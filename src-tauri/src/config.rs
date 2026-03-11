@@ -1,0 +1,862 @@
+#![allow(dead_code)]
+
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+use std::env;
+use std::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+use toml::{Table, Value};
+
+static CONFIG_LOCK: Mutex<()> = Mutex::new(());
+
+const SILO_DIR_NAME: &str = ".silo";
+const CONFIG_FILE_NAME: &str = "config.toml";
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct SiloConfig {
+    pub(crate) gcloud: GcloudConfig,
+    pub(crate) gh: GhConfig,
+    pub(crate) codex: CodexConfig,
+    pub(crate) claude: ClaudeConfig,
+    pub(crate) projects: IndexMap<String, ProjectConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct GcloudConfig {
+    pub(crate) account: String,
+    pub(crate) project: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct GhConfig {
+    pub(crate) username: String,
+    pub(crate) token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct CodexConfig {
+    pub(crate) token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct ClaudeConfig {
+    pub(crate) token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct ProjectConfig {
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) image: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ConfigStore {
+    home_dir: PathBuf,
+    silo_dir: PathBuf,
+    config_path: PathBuf,
+}
+
+impl ConfigStore {
+    pub(crate) fn new() -> Result<Self, ConfigError> {
+        let home_dir = env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or(ConfigError::HomeDirectoryNotFound)?;
+
+        Ok(Self::from_home_dir(home_dir))
+    }
+
+    pub(crate) fn from_home_dir(home_dir: PathBuf) -> Self {
+        let silo_dir = home_dir.join(SILO_DIR_NAME);
+        let config_path = silo_dir.join(CONFIG_FILE_NAME);
+
+        Self {
+            home_dir,
+            silo_dir,
+            config_path,
+        }
+    }
+
+    pub(crate) fn initialize_defaults_if_missing(&self) -> Result<(), ConfigError> {
+        let _guard = CONFIG_LOCK.lock().map_err(|_| ConfigError::LockPoisoned)?;
+        self.initialize_defaults_if_missing_locked(|home_dir| detect_initial_config(home_dir))
+    }
+
+    pub(crate) fn load(&self) -> Result<SiloConfig, ConfigError> {
+        let _guard = CONFIG_LOCK.lock().map_err(|_| ConfigError::LockPoisoned)?;
+        self.load_locked()
+    }
+
+    pub(crate) fn read(&self, path: &str) -> Result<Value, ConfigError> {
+        let _guard = CONFIG_LOCK.lock().map_err(|_| ConfigError::LockPoisoned)?;
+        let config = self.load_locked()?;
+        let value = config_to_value(&config)?;
+        let segments = parse_path(path)?;
+
+        read_value_at_path(&value, &segments)
+    }
+
+    pub(crate) fn write(&self, path: &str, value: Value) -> Result<(), ConfigError> {
+        let _guard = CONFIG_LOCK.lock().map_err(|_| ConfigError::LockPoisoned)?;
+        let config = self.load_locked()?;
+        let mut root = config_to_value(&config)?;
+        let segments = parse_path(path)?;
+
+        write_value_at_path(&mut root, &segments, value)?;
+
+        let next_config: SiloConfig = root
+            .try_into()
+            .map_err(|error| ConfigError::Schema(error.to_string()))?;
+
+        self.save_locked(&next_config)
+    }
+
+    pub(crate) fn save(&self, config: &SiloConfig) -> Result<(), ConfigError> {
+        let _guard = CONFIG_LOCK.lock().map_err(|_| ConfigError::LockPoisoned)?;
+        self.save_locked(config)
+    }
+
+    fn load_locked(&self) -> Result<SiloConfig, ConfigError> {
+        self.ensure_config_file_locked()?;
+
+        let contents = fs::read_to_string(&self.config_path).map_err(ConfigError::Io)?;
+        let config: SiloConfig = toml::from_str(&contents).map_err(ConfigError::Parse)?;
+        validate_config(&config)?;
+        Ok(config)
+    }
+
+    fn save_locked(&self, config: &SiloConfig) -> Result<(), ConfigError> {
+        self.ensure_silo_dir()?;
+        let contents = serialize_config(config)?;
+        self.write_atomically(&contents)
+    }
+
+    fn ensure_config_file_locked(&self) -> Result<(), ConfigError> {
+        self.initialize_defaults_if_missing_locked(|home_dir| detect_initial_config(home_dir))
+    }
+
+    fn ensure_silo_dir(&self) -> Result<(), ConfigError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true).mode(0o700);
+            builder.create(&self.silo_dir).map_err(ConfigError::Io)?;
+            ensure_unix_permissions(&self.silo_dir, 0o700)?;
+        }
+
+        #[cfg(not(unix))]
+        {
+            fs::create_dir_all(&self.silo_dir).map_err(ConfigError::Io)?;
+        }
+
+        Ok(())
+    }
+
+    fn write_atomically(&self, contents: &str) -> Result<(), ConfigError> {
+        self.ensure_silo_dir()?;
+
+        let temp_path = self.temp_path();
+        write_file(&temp_path, contents)?;
+
+        #[cfg(windows)]
+        if self.config_path.exists() {
+            fs::remove_file(&self.config_path).map_err(ConfigError::Io)?;
+        }
+
+        fs::rename(&temp_path, &self.config_path).map_err(ConfigError::Io)?;
+
+        #[cfg(unix)]
+        ensure_unix_permissions(&self.config_path, 0o600)?;
+
+        Ok(())
+    }
+
+    fn temp_path(&self) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+
+        self.silo_dir.join(format!(
+            "{CONFIG_FILE_NAME}.tmp.{}.{}",
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    fn initialize_defaults_if_missing_locked<F>(&self, detect: F) -> Result<(), ConfigError>
+    where
+        F: FnOnce(&Path) -> SiloConfig,
+    {
+        self.ensure_silo_dir()?;
+
+        if self.config_path.exists() {
+            #[cfg(unix)]
+            ensure_unix_permissions(&self.config_path, 0o600)?;
+            return Ok(());
+        }
+
+        let config = detect(&self.home_dir);
+        self.write_atomically(&serialize_config(&config)?)
+    }
+}
+
+pub(crate) fn initialize_on_start() -> Result<(), ConfigError> {
+    ConfigStore::new()?.initialize_defaults_if_missing()
+}
+
+#[derive(Debug)]
+pub(crate) enum ConfigError {
+    HomeDirectoryNotFound,
+    InvalidPath,
+    PathNotFound(String),
+    TypeMismatch(String),
+    Schema(String),
+    Io(std::io::Error),
+    Parse(toml::de::Error),
+    Serialize(toml::ser::Error),
+    LockPoisoned,
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::HomeDirectoryNotFound => f.write_str("unable to determine the home directory"),
+            Self::InvalidPath => {
+                f.write_str("config path must not be empty and cannot contain empty segments")
+            }
+            Self::PathNotFound(path) => write!(f, "config path not found: {path}"),
+            Self::TypeMismatch(path) => {
+                write!(f, "config path points at a non-table value: {path}")
+            }
+            Self::Schema(message) => write!(f, "config value does not match the schema: {message}"),
+            Self::Io(error) => write!(f, "config I/O error: {error}"),
+            Self::Parse(error) => write!(f, "config parse error: {error}"),
+            Self::Serialize(error) => write!(f, "config serialization error: {error}"),
+            Self::LockPoisoned => f.write_str("config store lock poisoned"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+fn parse_path(path: &str) -> Result<Vec<&str>, ConfigError> {
+    if path.is_empty() {
+        return Err(ConfigError::InvalidPath);
+    }
+
+    let segments: Vec<&str> = path.split('.').collect();
+    if segments.iter().any(|segment| segment.is_empty()) {
+        return Err(ConfigError::InvalidPath);
+    }
+
+    Ok(segments)
+}
+
+fn read_value_at_path(root: &Value, segments: &[&str]) -> Result<Value, ConfigError> {
+    let mut current = root;
+    let mut traversed = Vec::with_capacity(segments.len());
+
+    for segment in segments {
+        traversed.push(*segment);
+
+        let table = current
+            .as_table()
+            .ok_or_else(|| ConfigError::TypeMismatch(traversed.join(".")))?;
+
+        current = table
+            .get(*segment)
+            .ok_or_else(|| ConfigError::PathNotFound(traversed.join(".")))?;
+    }
+
+    Ok(current.clone())
+}
+
+fn write_value_at_path(
+    root: &mut Value,
+    segments: &[&str],
+    new_value: Value,
+) -> Result<(), ConfigError> {
+    let mut current = root;
+    let mut traversed = Vec::with_capacity(segments.len());
+
+    for (index, segment) in segments.iter().enumerate() {
+        traversed.push(*segment);
+
+        let table = current
+            .as_table_mut()
+            .ok_or_else(|| ConfigError::TypeMismatch(traversed.join(".")))?;
+
+        if index == segments.len() - 1 {
+            table.insert((*segment).to_string(), new_value);
+            return Ok(());
+        }
+
+        current = table
+            .entry((*segment).to_string())
+            .or_insert_with(|| Value::Table(Table::new()));
+    }
+
+    Err(ConfigError::InvalidPath)
+}
+
+fn config_to_value(config: &SiloConfig) -> Result<Value, ConfigError> {
+    let mut value =
+        Value::try_from(config).map_err(|error| ConfigError::Schema(error.to_string()))?;
+    let table = value
+        .as_table_mut()
+        .ok_or_else(|| ConfigError::Schema("root config is not a table".to_string()))?;
+
+    table
+        .entry("gcloud".to_string())
+        .or_insert_with(|| Value::Table(Table::new()));
+    table
+        .entry("gh".to_string())
+        .or_insert_with(|| Value::Table(Table::new()));
+    table
+        .entry("codex".to_string())
+        .or_insert_with(|| Value::Table(Table::new()));
+    table
+        .entry("claude".to_string())
+        .or_insert_with(|| Value::Table(Table::new()));
+    table
+        .entry("projects".to_string())
+        .or_insert_with(|| Value::Table(Table::new()));
+
+    Ok(value)
+}
+
+fn serialize_config(config: &SiloConfig) -> Result<String, ConfigError> {
+    validate_config(config)?;
+    let value = config_to_value(config)?;
+    toml::to_string_pretty(&value).map_err(ConfigError::Serialize)
+}
+
+pub(crate) fn set_gcloud_config(account: String, project: String) -> Result<(), ConfigError> {
+    let store = ConfigStore::new()?;
+    let mut table = Table::new();
+    table.insert("account".to_string(), Value::String(account));
+    table.insert("project".to_string(), Value::String(project));
+    store.write("gcloud", Value::Table(table))
+}
+
+pub(crate) fn set_codex_token(token: String) -> Result<(), ConfigError> {
+    let store = ConfigStore::new()?;
+    let mut table = Table::new();
+    table.insert("token".to_string(), Value::String(token));
+    store.write("codex", Value::Table(table))
+}
+
+pub(crate) fn set_claude_token(token: String) -> Result<(), ConfigError> {
+    let store = ConfigStore::new()?;
+    let mut table = Table::new();
+    table.insert("token".to_string(), Value::String(token));
+    store.write("claude", Value::Table(table))
+}
+
+fn detect_initial_config(home_dir: &Path) -> SiloConfig {
+    SiloConfig {
+        gcloud: GcloudConfig {
+            account: command_output("gcloud", ["config", "get-value", "account"])
+                .unwrap_or_default(),
+            project: command_output("gcloud", ["config", "get-value", "project"])
+                .unwrap_or_default(),
+        },
+        gh: GhConfig {
+            username: command_output("gh", ["api", "user", "--jq", ".login"]).unwrap_or_default(),
+            token: command_output("gh", ["auth", "token"]).unwrap_or_default(),
+        },
+        codex: CodexConfig {
+            token: detect_codex_token(home_dir).unwrap_or_default(),
+        },
+        claude: ClaudeConfig::default(),
+        projects: IndexMap::new(),
+    }
+}
+
+fn validate_config(config: &SiloConfig) -> Result<(), ConfigError> {
+    for (name, project) in &config.projects {
+        if project.name.trim().is_empty() {
+            return Err(ConfigError::Schema(format!(
+                "projects.{name}.name must not be empty"
+            )));
+        }
+
+        if project.path.trim().is_empty() {
+            return Err(ConfigError::Schema(format!(
+                "projects.{name}.path must not be empty"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn write_file(path: &Path, contents: &str) -> Result<(), ConfigError> {
+    let mut file = create_private_file(path)?;
+    file.write_all(contents.as_bytes())
+        .map_err(ConfigError::Io)?;
+    file.sync_all().map_err(ConfigError::Io)?;
+    Ok(())
+}
+
+fn command_output<I, S>(program: &str, args: I) -> Option<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let output = Command::new(program).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    normalize_value(String::from_utf8_lossy(&output.stdout).trim())
+}
+
+fn detect_codex_token(home_dir: &Path) -> Option<String> {
+    env::var("OPENAI_API_KEY")
+        .ok()
+        .and_then(|value| normalize_value(&value))
+        .or_else(|| codex_auth_token(home_dir))
+}
+
+pub(crate) fn detect_codex_token_from_store() -> Result<String, ConfigError> {
+    let home_dir = env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or(ConfigError::HomeDirectoryNotFound)?;
+
+    Ok(detect_codex_token(&home_dir).unwrap_or_default())
+}
+
+fn codex_auth_token(home_dir: &Path) -> Option<String> {
+    let auth_path = home_dir.join(".codex").join("auth.json");
+    let contents = fs::read_to_string(auth_path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&contents).ok()?;
+
+    json.get("OPENAI_API_KEY")
+        .and_then(serde_json::Value::as_str)
+        .and_then(normalize_value)
+        .or_else(|| {
+            json.get("tokens")
+                .and_then(|tokens| tokens.get("access_token"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(normalize_value)
+        })
+}
+
+fn normalize_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "(unset)" || trimmed == "unset" {
+        return None;
+    }
+
+    Some(trimmed.to_owned())
+}
+
+#[cfg(unix)]
+fn create_private_file(path: &Path) -> Result<File, ConfigError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(ConfigError::Io)
+}
+
+#[cfg(not(unix))]
+fn create_private_file(path: &Path) -> Result<File, ConfigError> {
+    OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)
+        .map_err(ConfigError::Io)
+}
+
+#[cfg(unix)]
+fn ensure_unix_permissions(path: &Path, mode: u32) -> Result<(), ConfigError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(ConfigError::Io)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::thread;
+
+    #[test]
+    fn first_load_creates_default_config() {
+        let temp_dir = TestDir::new_without_config();
+        let store = temp_dir.store();
+
+        store
+            .initialize_defaults_if_missing_locked(|_| SiloConfig::default())
+            .expect("initialization should create default config");
+
+        let config = store.load().expect("load should read initialized config");
+
+        assert_eq!(config, SiloConfig::default());
+        assert!(temp_dir.silo_dir().exists());
+        assert!(temp_dir.config_path().exists());
+
+        let contents =
+            fs::read_to_string(temp_dir.config_path()).expect("config file should be readable");
+        assert!(contents.contains("[gcloud]"));
+        assert!(contents.contains("[gh]"));
+        assert!(contents.contains("[codex]"));
+        assert!(contents.contains("[claude]"));
+        assert!(contents.contains("[projects]"));
+    }
+
+    #[test]
+    fn read_supports_sections_and_leaf_values() {
+        let temp_dir = TestDir::new();
+        let store = temp_dir.store();
+
+        store
+            .write("claude.token", Value::String("secret".to_string()))
+            .expect("write should succeed");
+
+        assert_eq!(
+            store
+                .read("claude.token")
+                .expect("leaf read should succeed"),
+            Value::String("secret".to_string())
+        );
+
+        let section = store.read("claude").expect("section read should succeed");
+        let token = section
+            .as_table()
+            .and_then(|table| table.get("token"))
+            .cloned()
+            .expect("claude.token should be present");
+
+        assert_eq!(token, Value::String("secret".to_string()));
+    }
+
+    #[test]
+    fn write_replaces_subtrees() {
+        let temp_dir = TestDir::new();
+        let store = temp_dir.store();
+
+        let mut claude = Table::new();
+        claude.insert("token".to_string(), Value::String("new-token".to_string()));
+
+        store
+            .write("claude", Value::Table(claude))
+            .expect("section write should succeed");
+
+        assert_eq!(
+            store
+                .read("claude.token")
+                .expect("leaf read should succeed"),
+            Value::String("new-token".to_string())
+        );
+    }
+
+    #[test]
+    fn write_supports_projects_and_leaf_reads() {
+        let temp_dir = TestDir::new();
+        let store = temp_dir.store();
+
+        let mut project = Table::new();
+        project.insert("name".to_string(), Value::String("My Project".to_string()));
+        project.insert(
+            "path".to_string(),
+            Value::String("/tmp/project".to_string()),
+        );
+        project.insert(
+            "image".to_string(),
+            Value::String("/tmp/image.png".to_string()),
+        );
+
+        store
+            .write("projects.myproj", Value::Table(project))
+            .expect("project write should succeed");
+
+        assert!(store
+            .read("projects")
+            .expect("projects read should succeed")
+            .is_table());
+        assert!(store
+            .read("projects.myproj")
+            .expect("project read should succeed")
+            .is_table());
+        assert_eq!(
+            store
+                .read("projects.myproj.image")
+                .expect("project image read should succeed"),
+            Value::String("/tmp/image.png".to_string())
+        );
+    }
+
+    #[test]
+    fn write_rejects_schema_breaking_values() {
+        let temp_dir = TestDir::new();
+        let store = temp_dir.store();
+
+        let error = store
+            .write("claude", Value::String("wrong".to_string()))
+            .expect_err("invalid section type should fail");
+
+        assert!(matches!(error, ConfigError::Schema(_)));
+    }
+
+    #[test]
+    fn write_requires_semantically_valid_projects() {
+        let temp_dir = TestDir::new();
+        let store = temp_dir.store();
+
+        let error = store
+            .write(
+                "projects.myproj.image",
+                Value::String("/tmp/image.png".to_string()),
+            )
+            .expect_err("image-only project should fail schema validation");
+
+        assert!(matches!(error, ConfigError::Schema(_)));
+    }
+
+    #[test]
+    fn invalid_paths_and_missing_reads_return_errors() {
+        let temp_dir = TestDir::new();
+        let store = temp_dir.store();
+
+        let invalid = store.read("").expect_err("empty path should be invalid");
+        assert!(matches!(invalid, ConfigError::InvalidPath));
+
+        let missing = store
+            .read("projects.unknown")
+            .expect_err("unknown project should fail");
+        assert!(matches!(missing, ConfigError::PathNotFound(_)));
+    }
+
+    #[test]
+    fn partial_config_backfills_defaults() {
+        let temp_dir = TestDir::new();
+
+        write_file(
+            &temp_dir.config_path(),
+            "[claude]\ntoken = \"partial\"\n[projects.demo]\nname = \"Demo\"\npath = \"/tmp/demo\"\n",
+        )
+        .expect("seed config should be written");
+
+        let config = temp_dir.store().load().expect("partial config should load");
+
+        assert_eq!(config.claude.token, "partial");
+        assert_eq!(config.gh.username, "");
+        assert_eq!(config.gcloud.project, "");
+        assert_eq!(
+            config.projects.get("demo"),
+            Some(&ProjectConfig {
+                name: "Demo".to_string(),
+                path: "/tmp/demo".to_string(),
+                image: None,
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_toml_returns_parse_error() {
+        let temp_dir = TestDir::new();
+
+        write_file(&temp_dir.config_path(), "[claude\n token = \"oops\"")
+            .expect("invalid config should be seeded");
+
+        let error = temp_dir
+            .store()
+            .load()
+            .expect_err("invalid toml should fail");
+
+        assert!(matches!(error, ConfigError::Parse(_)));
+    }
+
+    #[test]
+    fn concurrent_writes_do_not_corrupt_the_file() {
+        let temp_dir = Arc::new(TestDir::new());
+        let store = Arc::new(temp_dir.store());
+        let expected = [
+            "token-0".to_string(),
+            "token-1".to_string(),
+            "token-2".to_string(),
+            "token-3".to_string(),
+        ];
+
+        let handles: Vec<_> = expected
+            .iter()
+            .cloned()
+            .map(|token| {
+                let store = Arc::clone(&store);
+                thread::spawn(move || {
+                    store
+                        .write("claude.token", Value::String(token))
+                        .expect("concurrent write should succeed");
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("thread should finish cleanly");
+        }
+
+        let persisted = store.load().expect("final config should load");
+        assert!(expected.contains(&persisted.claude.token));
+
+        let raw =
+            fs::read_to_string(temp_dir.config_path()).expect("persisted file should be readable");
+        toml::from_str::<SiloConfig>(&raw).expect("persisted file should remain valid toml");
+    }
+
+    #[test]
+    fn initialize_defaults_if_missing_seeds_existing_credentials() {
+        let temp_dir = TestDir::new_without_config();
+        let store = temp_dir.store();
+
+        store
+            .initialize_defaults_if_missing_locked(|_| SiloConfig {
+                gcloud: GcloudConfig {
+                    account: "default-account@example.com".to_string(),
+                    project: "default-project".to_string(),
+                },
+                gh: GhConfig {
+                    username: "octocat".to_string(),
+                    token: "gh-token".to_string(),
+                },
+                codex: CodexConfig {
+                    token: "codex-token".to_string(),
+                },
+                claude: ClaudeConfig::default(),
+                projects: IndexMap::new(),
+            })
+            .expect("initialization should succeed");
+
+        let config = store.load().expect("seeded config should load");
+        assert_eq!(config.gcloud.account, "default-account@example.com");
+        assert_eq!(config.gcloud.project, "default-project");
+        assert_eq!(config.gh.username, "octocat");
+        assert_eq!(config.gh.token, "gh-token");
+        assert_eq!(config.codex.token, "codex-token");
+        assert_eq!(config.claude.token, "");
+    }
+
+    #[test]
+    fn initialize_defaults_if_missing_preserves_existing_config() {
+        let temp_dir = TestDir::new_without_config();
+        let store = temp_dir.store();
+
+        let existing = SiloConfig {
+            gcloud: GcloudConfig {
+                account: "existing-account@example.com".to_string(),
+                project: "existing-project".to_string(),
+            },
+            gh: GhConfig {
+                username: "existing-user".to_string(),
+                token: "existing-gh-token".to_string(),
+            },
+            codex: CodexConfig {
+                token: "existing-codex-token".to_string(),
+            },
+            claude: ClaudeConfig {
+                token: "existing-claude-token".to_string(),
+            },
+            projects: IndexMap::new(),
+        };
+
+        write_file(
+            &temp_dir.config_path(),
+            &serialize_config(&existing).expect("existing config should serialize"),
+        )
+        .expect("existing config should be written");
+
+        store
+            .initialize_defaults_if_missing_locked(|_| SiloConfig::default())
+            .expect("initialization should not overwrite existing config");
+
+        let loaded = store
+            .load()
+            .expect("existing config should remain readable");
+        assert_eq!(loaded, existing);
+    }
+
+    #[test]
+    fn codex_token_can_be_read_from_auth_json() {
+        let temp_dir = TestDir::new();
+        let codex_dir = temp_dir.root.join(".codex");
+        fs::create_dir_all(&codex_dir).expect("codex dir should be created");
+        write_file(
+            &codex_dir.join("auth.json"),
+            "{\"tokens\":{\"access_token\":\"codex-access-token\"}}",
+        )
+        .expect("auth file should be written");
+
+        let token = codex_auth_token(&temp_dir.root).expect("token should be detected");
+        assert_eq!(token, "codex-access-token");
+    }
+
+    struct TestDir {
+        root: PathBuf,
+    }
+
+    impl TestDir {
+        fn new() -> Self {
+            let test_dir = Self::new_without_config();
+            write_file(
+                &test_dir.config_path(),
+                &serialize_config(&SiloConfig::default()).expect("default config should serialize"),
+            )
+            .expect("default config should be written");
+            test_dir
+        }
+
+        fn new_without_config() -> Self {
+            let unique = format!(
+                "silo-config-test-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or(0)
+            );
+            let root = env::temp_dir().join(unique);
+            fs::create_dir_all(root.join(SILO_DIR_NAME)).expect("test dir should be created");
+
+            Self { root }
+        }
+
+        fn store(&self) -> ConfigStore {
+            ConfigStore::from_home_dir(self.root.clone())
+        }
+
+        fn silo_dir(&self) -> PathBuf {
+            self.root.join(SILO_DIR_NAME)
+        }
+
+        fn config_path(&self) -> PathBuf {
+            self.silo_dir().join(CONFIG_FILE_NAME)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+}
