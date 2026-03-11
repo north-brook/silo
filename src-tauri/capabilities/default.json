@@ -10,6 +10,12 @@
     "opener:default",
 "core:window:default",
     "core:window:allow-start-dragging",
-    "core:window:allow-show"
+    "core:window:allow-show",
+    "dialog:default",
+    "fs:default",
+    {
+      "identifier": "fs:scope",
+      "allow": [{ "path": "**" }]
+    }
   ]
 }
