@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "silo",
+  "productName": "Silo",
   "version": "0.1.0",
   "identifier": "new.silo.app",
   "build": {
@@ -12,9 +12,14 @@
   "app": {
     "windows": [
       {
-        "title": "silo",
+        "title": "",
         "width": 800,
-        "height": 600
+        "height": 600,
+        "titleBarStyle": "Overlay",
+        "visible": false,
+        "backgroundColor": "#0a0a0c",
+        "transparent": true,
+        "theme": "Dark"
       }
     ],
     "security": {
