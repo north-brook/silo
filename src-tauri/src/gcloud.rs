@@ -113,10 +113,7 @@ fn ensure_private_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-async fn gcloud_service_account_usable(
-    service_account: &str,
-    project: &str,
-) -> Result<(), String> {
+async fn gcloud_service_account_usable(service_account: &str, project: &str) -> Result<(), String> {
     if service_account.trim().is_empty() || project.trim().is_empty() {
         return Err("gcloud service account or project is unset".to_string());
     }
@@ -157,7 +154,9 @@ async fn gcloud_service_account_usable(
     if !compute_result.success {
         let stderr = compute_result.stderr.trim();
         return Err(if stderr.is_empty() {
-            format!("gcloud service account could not access compute instances in project {project}")
+            format!(
+                "gcloud service account could not access compute instances in project {project}"
+            )
         } else {
             stderr.to_string()
         });
@@ -313,13 +312,21 @@ async fn ensure_service_account_key(
         .ok_or_else(|| format!("invalid service account key path: {}", key_path.display()))?;
     ensure_private_dir(parent)?;
 
-    if key_path.is_file() && activate_service_account(service_account, &key_path, project).await.is_ok() {
+    if key_path.is_file()
+        && activate_service_account(service_account, &key_path, project)
+            .await
+            .is_ok()
+    {
         return Ok(key_path);
     }
 
     if key_path.exists() {
-        fs::remove_file(&key_path)
-            .map_err(|error| format!("failed to remove stale key file {}: {error}", key_path.display()))?;
+        fs::remove_file(&key_path).map_err(|error| {
+            format!(
+                "failed to remove stale key file {}: {error}",
+                key_path.display()
+            )
+        })?;
     }
 
     let result = run_gcloud([
@@ -420,16 +427,12 @@ pub async fn gcloud_authenticate() -> Result<(), String> {
     let key_path = ensure_service_account_key(&service_account, &project).await?;
     let key_path_string = key_path.to_string_lossy().into_owned();
     save_gcloud_identity(&account, &project, &service_account, &key_path_string)?;
-    log::info!(
-        "gcloud service account {service_account} saved for project {project}"
-    );
+    log::info!("gcloud service account {service_account} saved for project {project}");
 
     gcloud_service_account_usable(&service_account, &project)
         .await
         .map_err(|error| {
-            format!(
-                "service account was provisioned and saved, but it is not usable yet: {error}"
-            )
+            format!("service account was provisioned and saved, but it is not usable yet: {error}")
         })
 }
 
@@ -492,11 +495,10 @@ pub async fn gcloud_accounts() -> Vec<String> {
 #[tauri::command]
 pub async fn gcloud_projects(account: String) -> Vec<String> {
     log::trace!("listing gcloud projects");
-    let configured_service_account =
-        ConfigStore::new()
-            .and_then(|store| store.load())
-            .ok()
-            .and_then(|config| configured_service_account(&config.gcloud).map(str::to_owned));
+    let configured_service_account = ConfigStore::new()
+        .and_then(|store| store.load())
+        .ok()
+        .and_then(|config| configured_service_account(&config.gcloud).map(str::to_owned));
     let account = configured_service_account.unwrap_or(account);
 
     let Some(result) = run_gcloud([
