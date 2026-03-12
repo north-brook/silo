@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 const PROJECT_IMAGE_CANDIDATES: &[&str] = &[
     "favicon.ico",
@@ -59,6 +60,7 @@ pub fn projects_add_project(path: String) -> Result<(), String> {
     let project_root = resolve_project_root(Path::new(&path))?;
     let name = project_key_from_root(&project_root)?;
     let image = resolve_project_image_path(&project_root);
+    let target_branch = resolve_project_target_branch(&project_root);
 
     if config.projects.contains_key(&name) {
         return Err(format!("project already exists: {name}"));
@@ -70,6 +72,7 @@ pub fn projects_add_project(path: String) -> Result<(), String> {
             name,
             path: project_root.to_string_lossy().into_owned(),
             image,
+            target_branch,
             gcloud: Default::default(),
         },
     );
@@ -202,6 +205,23 @@ fn project_key_from_root(project_root: &Path) -> Result<String, String> {
         })
 }
 
+fn resolve_project_target_branch(project_root: &Path) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(["branch", "--show-current"])
+        .output();
+
+    let Ok(output) = output else {
+        return String::new();
+    };
+    if !output.status.success() {
+        return String::new();
+    }
+
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
 fn resolve_project_image_path(project_root: &Path) -> Option<String> {
     find_existing_candidate(project_root, PROJECT_IMAGE_CANDIDATES)
         .or_else(|| find_nested_project_image_path(project_root))
@@ -308,6 +328,7 @@ mod tests {
                         name: "Beta".to_string(),
                         path: "/tmp/beta".to_string(),
                         image: Some("/tmp/beta.png".to_string()),
+                        target_branch: String::new(),
                         gcloud: Default::default(),
                     },
                 ),
@@ -317,6 +338,7 @@ mod tests {
                         name: "Alpha".to_string(),
                         path: "/tmp/alpha".to_string(),
                         image: None,
+                        target_branch: String::new(),
                         gcloud: Default::default(),
                     },
                 ),
@@ -341,6 +363,7 @@ mod tests {
                         name: "Alpha".to_string(),
                         path: "/tmp/alpha".to_string(),
                         image: None,
+                        target_branch: String::new(),
                         gcloud: Default::default(),
                     },
                 ),
@@ -350,6 +373,7 @@ mod tests {
                         name: "Beta".to_string(),
                         path: "/tmp/beta".to_string(),
                         image: None,
+                        target_branch: String::new(),
                         gcloud: Default::default(),
                     },
                 ),
@@ -376,6 +400,7 @@ mod tests {
                         name: "Alpha".to_string(),
                         path: "/tmp/alpha".to_string(),
                         image: None,
+                        target_branch: String::new(),
                         gcloud: Default::default(),
                     },
                 ),
@@ -385,6 +410,7 @@ mod tests {
                         name: "Beta".to_string(),
                         path: "/tmp/beta".to_string(),
                         image: None,
+                        target_branch: String::new(),
                         gcloud: Default::default(),
                     },
                 ),
@@ -423,6 +449,24 @@ mod tests {
         let root =
             resolve_project_root(&project_root.join(".git")).expect("project root should resolve");
         assert_eq!(root, project_root);
+    }
+
+    #[test]
+    fn resolve_project_target_branch_reads_checked_out_branch() {
+        let temp_dir = TempDir::new();
+        let project_root = temp_dir.path.join("demo");
+        fs::create_dir_all(&project_root).expect("project root should be created");
+
+        let init = Command::new("git")
+            .arg("init")
+            .arg("-b")
+            .arg("main")
+            .arg(&project_root)
+            .output()
+            .expect("git should run");
+        assert!(init.status.success(), "git init should succeed");
+
+        assert_eq!(resolve_project_target_branch(&project_root), "main");
     }
 
     #[test]
