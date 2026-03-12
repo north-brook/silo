@@ -5,8 +5,9 @@ import { useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import { TopBar } from "../components/top-bar";
 import { PromptWorkspace } from "./prompt";
+import { PendingWorkspace } from "./pending";
 import { invoke } from "../../lib/invoke";
-import type { Workspace } from "../../lib/workspaces";
+import { isTemplateWorkspace, type Workspace } from "../../lib/workspaces";
 
 export default function WorkspacePage() {
 	return (
@@ -38,7 +39,6 @@ function WorkspaceLoading() {
 function WorkspaceView() {
 	const searchParams = useSearchParams();
 	const workspaceName = searchParams.get("name") ?? "";
-	const project = searchParams.get("project") ?? "";
 
 	const workspace = useQuery({
 		queryKey: ["workspaces_get_workspace", workspaceName],
@@ -60,15 +60,21 @@ function WorkspaceView() {
 	}
 
 	const isRunning = workspace.data.status === "RUNNING";
+
+	if (isTemplateWorkspace(workspace.data)) {
+		return (
+			<>
+				<TopBar workspace={workspace.data} />
+				<PendingWorkspace isRunning={isRunning} status={workspace.data.status} />
+			</>
+		);
+	}
+
 	const isPrompt = !workspace.data.last_active;
 
 	return (
 		<>
-			<TopBar
-				workspace={workspaceName}
-				project={project}
-				workspaceData={workspace.data}
-			/>
+			<TopBar workspace={workspace.data} />
 			{isPrompt ? (
 				<PromptWorkspace isRunning={isRunning} status={workspace.data.status} />
 			) : (
