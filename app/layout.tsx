@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ProjectsBar } from "./components/projects-bar";
 import { TooltipProvider } from "./components/tooltip";
 import { Toaster } from "./components/toaster";
-import { initializeFrontendLogging } from "../lib/logging";
+import { initializeFrontendLogging } from "../lib/invoke";
 
 export default function RootLayout({
 	children,

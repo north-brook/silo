@@ -6,7 +6,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Play, Square, Trash2 } from "lucide-react";
 import { TopBar } from "../components/top-bar";
 import { toast } from "../components/toaster";
-import { invokeLogged } from "../../lib/logging";
+import { invoke } from "../../lib/invoke";
 
 interface Workspace {
 	name: string;
@@ -36,16 +36,21 @@ function WorkspaceView() {
 	const workspace = useQuery({
 		queryKey: ["workspaces_get_workspace", workspaceName],
 		queryFn: () =>
-			invokeLogged<Workspace>("workspaces_get_workspace", {
-				workspace: workspaceName,
-			}),
+			invoke<Workspace>(
+				"workspaces_get_workspace",
+				{ workspace: workspaceName },
+				{
+					log: "state_changes_only",
+					key: `poll:workspaces_get_workspace:${workspaceName}`,
+				},
+			),
 		enabled: !!workspaceName,
 		refetchInterval: 10000,
 	});
 
 	const start = useMutation({
 		mutationFn: () =>
-			invokeLogged("workspaces_start_workspace", { workspace: workspaceName }),
+			invoke("workspaces_start_workspace", { workspace: workspaceName }),
 		onSuccess: () => {
 			queryClient.invalidateQueries({
 				queryKey: ["workspaces_get_workspace", workspaceName],
@@ -66,7 +71,7 @@ function WorkspaceView() {
 
 	const stop = useMutation({
 		mutationFn: () =>
-			invokeLogged("workspaces_stop_workspace", { workspace: workspaceName }),
+			invoke("workspaces_stop_workspace", { workspace: workspaceName }),
 		onSuccess: () => {
 			queryClient.invalidateQueries({
 				queryKey: ["workspaces_get_workspace", workspaceName],
@@ -87,7 +92,7 @@ function WorkspaceView() {
 
 	const remove = useMutation({
 		mutationFn: () =>
-			invokeLogged("workspaces_delete_workspace", { workspace: workspaceName }),
+			invoke("workspaces_delete_workspace", { workspace: workspaceName }),
 		onSuccess: () => {
 			queryClient.invalidateQueries({
 				queryKey: ["workspaces_list_workspaces", project],
