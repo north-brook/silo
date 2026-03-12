@@ -119,10 +119,10 @@ pub(crate) struct CommandResult {
 }
 
 #[derive(Debug, Clone)]
-struct WorkspaceLookup {
-    workspace: Workspace,
-    account: String,
-    gcloud_project: String,
+pub(crate) struct WorkspaceLookup {
+    pub(crate) workspace: Workspace,
+    pub(crate) account: String,
+    pub(crate) gcloud_project: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,7 +333,7 @@ pub async fn workspaces_update_workspace_target_branch(
     update_workspace_label_in_lookup(lookup, "target_branch", &target_branch).await
 }
 
-async fn find_workspace(name: &str) -> Result<WorkspaceLookup, String> {
+pub(crate) async fn find_workspace(name: &str) -> Result<WorkspaceLookup, String> {
     let config = ConfigStore::new()
         .and_then(|store| store.load())
         .map_err(|error| error.to_string())?;

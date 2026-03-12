@@ -8,6 +8,7 @@ mod projects;
 mod river_names;
 mod system;
 mod templates;
+mod terminal;
 mod workspaces;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -15,6 +16,7 @@ pub fn run() {
     let (logging_plugin, session_log) = logging::build_plugin();
 
     tauri::Builder::default()
+        .manage(terminal::TerminalManager::default())
         .plugin(logging_plugin)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -68,6 +70,13 @@ pub fn run() {
             workspaces::workspaces_delete_workspace,
             workspaces::workspaces_update_workspace_branch,
             workspaces::workspaces_update_workspace_target_branch,
+            terminal::terminal_list_terminals,
+            terminal::terminal_attach_terminal,
+            terminal::terminal_run_terminal,
+            terminal::terminal_detach_terminal,
+            terminal::terminal_kill_terminal,
+            terminal::terminal_write_terminal,
+            terminal::terminal_resize_terminal,
             system::system_memory_usage
         ])
         .run(tauri::generate_context!())

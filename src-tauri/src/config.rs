@@ -34,8 +34,8 @@ pub(crate) const DEFAULT_GCLOUD_ZONE: &str = "us-east4-c";
 pub(crate) const DEFAULT_GCLOUD_MACHINE_TYPE: &str = "e2-standard-4";
 pub(crate) const DEFAULT_GCLOUD_DISK_SIZE_GB: u32 = 80;
 pub(crate) const DEFAULT_GCLOUD_DISK_TYPE: &str = "pd-ssd";
-pub(crate) const DEFAULT_GCLOUD_IMAGE_FAMILY: &str = "ubuntu-2404-lts-amd64";
-pub(crate) const DEFAULT_GCLOUD_IMAGE_PROJECT: &str = "ubuntu-os-cloud";
+pub(crate) const DEFAULT_GCLOUD_IMAGE_FAMILY: &str = "silo-base";
+pub(crate) const DEFAULT_GCLOUD_IMAGE_PROJECT: &str = "silo-489618";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
