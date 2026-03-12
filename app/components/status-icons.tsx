@@ -5,7 +5,7 @@ import { CodexIcon } from "../icons/codex";
 import { ClaudeIcon } from "../icons/claude";
 import { Tooltip, TooltipTrigger, TooltipContent } from "./tooltip";
 import { toast } from "./toaster";
-import { invokeLogged } from "../../lib/logging";
+import { invoke } from "../../lib/invoke";
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 	return Promise.race([
@@ -20,18 +20,26 @@ function GCloudStatus() {
 	const queryClient = useQueryClient();
 	const installed = useQuery({
 		queryKey: ["gcloud_installed"],
-		queryFn: () => invokeLogged<boolean>("gcloud_installed"),
+		queryFn: () =>
+			invoke<boolean>("gcloud_installed", {
+				log: "state_changes_only",
+				key: "poll:gcloud_installed",
+			}),
 		refetchInterval: 5000,
 	});
 	const configured = useQuery({
 		queryKey: ["gcloud_configured"],
-		queryFn: () => invokeLogged<boolean>("gcloud_configured"),
+		queryFn: () =>
+			invoke<boolean>("gcloud_configured", {
+				log: "state_changes_only",
+				key: "poll:gcloud_configured",
+			}),
 		enabled: installed.data === true,
 		refetchInterval: 5000,
 	});
 	const authenticate = useMutation({
 		mutationFn: () =>
-			withTimeout(invokeLogged("gcloud_authenticate"), 10000),
+			withTimeout(invoke("gcloud_authenticate"), 10000),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["gcloud_configured"] });
 			toast({ variant: "success", title: "Google Cloud authenticated" });
@@ -74,17 +82,25 @@ function GHStatus() {
 	const queryClient = useQueryClient();
 	const installed = useQuery({
 		queryKey: ["gh_installed"],
-		queryFn: () => invokeLogged<boolean>("gh_installed"),
+		queryFn: () =>
+			invoke<boolean>("gh_installed", {
+				log: "state_changes_only",
+				key: "poll:gh_installed",
+			}),
 		refetchInterval: 5000,
 	});
 	const configured = useQuery({
 		queryKey: ["gh_configured"],
-		queryFn: () => invokeLogged<boolean>("gh_configured"),
+		queryFn: () =>
+			invoke<boolean>("gh_configured", {
+				log: "state_changes_only",
+				key: "poll:gh_configured",
+			}),
 		enabled: installed.data === true,
 		refetchInterval: 5000,
 	});
 	const authenticate = useMutation({
-		mutationFn: () => withTimeout(invokeLogged("gh_authenticate"), 10000),
+		mutationFn: () => withTimeout(invoke("gh_authenticate"), 10000),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["gh_configured"] });
 			toast({ variant: "success", title: "GitHub CLI authenticated" });
@@ -127,12 +143,16 @@ function CodexStatus() {
 	const queryClient = useQueryClient();
 	const configured = useQuery({
 		queryKey: ["codex_configured"],
-		queryFn: () => invokeLogged<boolean>("codex_configured"),
+		queryFn: () =>
+			invoke<boolean>("codex_configured", {
+				log: "state_changes_only",
+				key: "poll:codex_configured",
+			}),
 		refetchInterval: 5000,
 	});
 	const authenticate = useMutation({
 		mutationFn: () =>
-			withTimeout(invokeLogged("codex_authenticate"), 10000),
+			withTimeout(invoke("codex_authenticate"), 10000),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["codex_configured"] });
 			toast({ variant: "success", title: "Codex authenticated" });
@@ -171,12 +191,16 @@ function ClaudeStatus() {
 	const queryClient = useQueryClient();
 	const configured = useQuery({
 		queryKey: ["claude_configured"],
-		queryFn: () => invokeLogged<boolean>("claude_configured"),
+		queryFn: () =>
+			invoke<boolean>("claude_configured", {
+				log: "state_changes_only",
+				key: "poll:claude_configured",
+			}),
 		refetchInterval: 5000,
 	});
 	const authenticate = useMutation({
 		mutationFn: () =>
-			withTimeout(invokeLogged("claude_authenticate"), 10000),
+			withTimeout(invoke("claude_authenticate"), 10000),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["claude_configured"] });
 			toast({ variant: "success", title: "Claude authenticated" });

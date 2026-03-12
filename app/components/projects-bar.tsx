@@ -6,10 +6,17 @@ import { ChevronDown, Cpu, Plus } from "lucide-react";
 import { Tooltip, TooltipTrigger, TooltipContent } from "./tooltip";
 import { toast } from "./toaster";
 import Image from "next/image";
-import { invokeLogged } from "../../lib/logging";
+import { invoke } from "../../lib/invoke";
 
 interface Workspace {
 	name: string;
+	project: string | null;
+	branch: string | null;
+	working: boolean | null;
+	last_active: string | null;
+	created_at: string;
+	status: string;
+	zone: string;
 }
 
 interface ListedProject {
@@ -72,10 +79,48 @@ function ProjectRow({
 	);
 }
 
+function statusColor(status: string): string {
+	switch (status) {
+		case "RUNNING":
+			return "bg-emerald-400";
+		case "STAGING":
+		case "PROVISIONING":
+			return "bg-amber-400";
+		default:
+			return "bg-zinc-500";
+	}
+}
+
+function WorkspaceRow({ workspace }: { workspace: Workspace }) {
+	const router = useRouter();
+	return (
+		<button
+			type="button"
+			onClick={() =>
+				router.push(
+					`/workspace?project=${encodeURIComponent(workspace.project ?? "")}&name=${encodeURIComponent(workspace.name)}`,
+				)
+			}
+			className="flex items-center gap-2 w-full pl-10 pr-3 py-1.5 text-xs text-text-muted hover:bg-btn-hover hover:text-text-bright transition-colors"
+		>
+			<span
+				className={`w-1.5 h-1.5 rounded-full shrink-0 ${statusColor(workspace.status)}`}
+			/>
+			<span className="truncate">{workspace.name}</span>
+		</button>
+	);
+}
+
 function BarFooter() {
 	const memory = useQuery({
 		queryKey: ["system_memory_usage"],
-		queryFn: () => invokeLogged<number>("system_memory_usage"),
+		queryFn: () =>
+			invoke<number>("system_memory_usage", {
+				log: "state_changes_only",
+				key: "poll:system_memory_usage",
+				stateChanged: (previous, next) =>
+					Math.round((previous ?? 0) / 50) !== Math.round(next / 50),
+			}),
 		refetchInterval: 5000,
 	});
 
@@ -96,15 +141,20 @@ export function ProjectsBar() {
 	const queryClient = useQueryClient();
 	const projects = useQuery({
 		queryKey: ["projects_list_projects"],
-		queryFn: () => invokeLogged<ListedProject[]>("projects_list_projects"),
+		queryFn: () => invoke<ListedProject[]>("projects_list_projects"),
+	});
+	const workspaces = useQuery({
+		queryKey: ["workspaces_list_workspaces"],
+		queryFn: () => invoke<Workspace[]>("workspaces_list_workspaces"),
+		refetchInterval: 15000,
 	});
 	const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
 	const createWorkspace = useMutation({
 		mutationFn: (project: string) =>
-			invokeLogged<Workspace>("workspaces_create_workspace", { project }),
+			invoke<Workspace>("workspaces_create_workspace", { project }),
 		onSuccess: (workspace, project) => {
-			queryClient.invalidateQueries({ queryKey: ["workspaces_list_workspaces", project] });
+			queryClient.invalidateQueries({ queryKey: ["workspaces_list_workspaces"] });
 			toast({ variant: "success", title: "Workspace created" });
 			router.push(`/workspace?project=${encodeURIComponent(project)}&name=${encodeURIComponent(workspace.name)}`);
 		},
@@ -123,16 +173,26 @@ export function ProjectsBar() {
 		<aside className="w-48 shrink-0 border-r border-border-light bg-surface flex flex-col">
 			<div data-tauri-drag-region className="h-8 shrink-0" />
 			<div className="flex-1 overflow-y-auto pb-1">
-				{projects.data.map((project) => (
-					<ProjectRow
-						key={project.name}
-						project={project}
-						expanded={isExpanded(project.name)}
-						onToggle={() => toggle(project.name)}
-						onCreate={() => createWorkspace.mutate(project.name)}
-						isCreating={createWorkspace.isPending}
-					/>
-				))}
+				{projects.data.map((project) => {
+					const projectWorkspaces = (workspaces.data ?? []).filter(
+						(w) => w.project === project.name,
+					);
+					return (
+						<div key={project.name}>
+							<ProjectRow
+								project={project}
+								expanded={isExpanded(project.name)}
+								onToggle={() => toggle(project.name)}
+								onCreate={() => createWorkspace.mutate(project.name)}
+								isCreating={createWorkspace.isPending}
+							/>
+							{isExpanded(project.name) &&
+								projectWorkspaces.map((w) => (
+									<WorkspaceRow key={w.name} workspace={w} />
+								))}
+						</div>
+					);
+				})}
 			</div>
 			<BarFooter />
 		</aside>

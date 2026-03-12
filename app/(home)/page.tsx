@@ -6,7 +6,7 @@ import { FolderOpen } from "lucide-react";
 import { SiloIcon } from "../icons/silo";
 import { StatusIcons } from "../components/status-icons";
 import { toast } from "../components/toaster";
-import { invokeLogged } from "../../lib/logging";
+import { invoke } from "../../lib/invoke";
 
 export default function HomePage() {
 	const queryClient = useQueryClient();
@@ -18,7 +18,7 @@ export default function HomePage() {
 			const path = typeof selected === "string" ? selected : selected;
 			const name = path.split("/").pop() || path;
 
-			await invokeLogged("projects_add_project", { name, path });
+			await invoke("projects_add_project", { name, path });
 			return name;
 		},
 		onSuccess: (name) => {
