@@ -6,19 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { TopBar } from "../components/top-bar";
 import { PromptWorkspace } from "./prompt";
 import { invoke } from "../../lib/invoke";
-
-interface Workspace {
-	name: string;
-	project: string | null;
-	branch: string;
-	target_branch: string;
-	unread: boolean;
-	working: boolean | null;
-	last_active: string | null;
-	created_at: string;
-	status: string;
-	zone: string;
-}
+import type { Workspace } from "../../lib/workspaces";
 
 export default function WorkspacePage() {
 	return (
@@ -79,8 +67,7 @@ function WorkspaceView() {
 			<TopBar
 				workspace={workspaceName}
 				project={project}
-				branch={workspace.data.branch}
-				targetBranch={workspace.data.target_branch}
+				workspaceData={workspace.data}
 			/>
 			{isPrompt ? (
 				<PromptWorkspace isRunning={isRunning} status={workspace.data.status} />
