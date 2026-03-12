@@ -8,6 +8,7 @@ import { Tooltip, TooltipTrigger, TooltipContent } from "./tooltip";
 import { toast } from "./toaster";
 import Image from "next/image";
 import { invoke } from "../../lib/invoke";
+import { TerminalLoader } from "./terminal-loader";
 import { WorkspaceIndicator } from "./workspace-status";
 
 interface Workspace {
@@ -42,43 +43,48 @@ function ProjectRow({
 	isCreating: boolean;
 }) {
 	return (
-		<div className="group flex items-center w-full px-3 py-2 text-xs text-text hover:bg-btn-hover hover:text-text-bright transition-colors">
-			<button
-				type="button"
-				onClick={onToggle}
-				className="flex items-center gap-2.5 min-w-0 flex-1"
-			>
+		<button
+			type="button"
+			onClick={onToggle}
+			className="group flex items-center w-full px-3 py-2 text-xs text-text hover:bg-btn-hover hover:text-text-bright transition-colors cursor-pointer"
+		>
+			<span className="flex items-center gap-1.5 min-w-0 flex-1">
 				{project.image ? (
 					<Image
-						width={20}
-						height={20}
+						width={16}
+						height={16}
 						src={convertFileSrc(project.image)}
 						alt={project.name}
 						className="rounded object-cover shrink-0"
 					/>
 				) : (
-					<div className="w-5 h-5 rounded bg-border-light shrink-0" />
+					<div className="w-4 h-4 rounded bg-border-light shrink-0" />
 				)}
 				<span className="truncate">{project.name}</span>
 				<ChevronDown
 					size={10}
 					className={`shrink-0 text-text-placeholder transition-transform ${expanded ? "" : "-rotate-90"}`}
 				/>
-			</button>
-			<Tooltip>
-				<TooltipTrigger asChild>
-					<button
-						type="button"
-						onClick={onCreate}
-						disabled={isCreating}
-						className="shrink-0 ml-auto p-1 -mr-1 text-text-placeholder hover:text-text-bright opacity-0 group-hover:opacity-100 transition-opacity disabled:opacity-50"
-					>
-						<Plus size={12} />
-					</button>
-				</TooltipTrigger>
-				<TooltipContent side="right">New workspace</TooltipContent>
-			</Tooltip>
-		</div>
+			</span>
+			{isCreating ? (
+				<span className="shrink-0 ml-auto p-1 -mr-1 flex items-center justify-center w-3 h-3 text-xs leading-none">
+					<TerminalLoader className="text-text-muted" />
+				</span>
+			) : (
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<span
+							role="button"
+							onClick={(e) => { e.stopPropagation(); onCreate(); }}
+							className="shrink-0 ml-auto p-1 -mr-1 text-text-placeholder hover:text-text-bright opacity-0 group-hover:opacity-100 transition-opacity"
+						>
+							<Plus size={12} />
+						</span>
+					</TooltipTrigger>
+					<TooltipContent side="right">New workspace</TooltipContent>
+				</Tooltip>
+			)}
+		</button>
 	);
 }
 
@@ -118,51 +124,52 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["workspaces_list_workspaces"] });
 			toast({ variant: "success", title: "Workspace deleted" });
-			if (isActive) router.push("/");
 		},
 		onError: (error) => {
 			toast({ variant: "error", title: "Failed to delete", description: error.message });
 		},
 	});
 
-	const isPending = start.isPending || stop.isPending || remove.isPending;
+	const isStopping = workspace.status === "STOPPING" || workspace.status === "SUSPENDING";
+	const isDisabled = stop.isPending || remove.isPending || isStopping;
+	const [menuOpen, setMenuOpen] = useState(false);
 
 	return (
-		<div
-			className={`group flex items-center w-full pl-5 pr-3 py-1.5 text-xs transition-colors ${
-				isActive
-					? "bg-btn-hover text-text-bright"
-					: "text-text-muted hover:bg-btn-hover hover:text-text-bright"
+		<button
+			type="button"
+			onClick={() =>
+				router.push(
+					`/workspace?project=${encodeURIComponent(workspace.project ?? "")}&name=${encodeURIComponent(workspace.name)}`,
+				)
+			}
+			className={`group flex items-center w-full pl-5 pr-3 py-1.5 text-xs transition-colors cursor-pointer ${
+				isDisabled
+					? "opacity-30 pointer-events-none"
+					: isActive
+						? "bg-btn-hover text-text-bright"
+						: "text-text-muted hover:bg-btn-hover hover:text-text-bright"
 			}`}
 		>
-			<button
-				type="button"
-				onClick={() =>
-					router.push(
-						`/workspace?project=${encodeURIComponent(workspace.project ?? "")}&name=${encodeURIComponent(workspace.name)}`,
-					)
-				}
-				className="flex items-center gap-2 min-w-0 flex-1"
-			>
+			<span className="flex items-center gap-2 min-w-0 flex-1">
 				<WorkspaceIndicator workspace={workspace} />
-				<span className="truncate">{workspace.name}</span>
-			</button>
-			<Popover>
+				<span className="truncate">{workspace.branch || workspace.name}</span>
+			</span>
+			<Popover open={menuOpen} onOpenChange={setMenuOpen}>
 				<PopoverTrigger asChild>
-					<button
-						type="button"
+					<span
+						role="button"
+						onClick={(e) => e.stopPropagation()}
 						className="shrink-0 ml-auto p-1 -mr-1 text-text-placeholder hover:text-text-bright opacity-0 group-hover:opacity-100 transition-opacity"
 					>
 						<EllipsisVertical size={12} />
-					</button>
+					</span>
 				</PopoverTrigger>
 				<PopoverContent side="right" align="start" className="w-36 p-1">
 					{isStopped && (
 						<button
 							type="button"
-							onClick={() => start.mutate()}
-							disabled={isPending}
-							className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors disabled:opacity-50"
+							onClick={(e) => { e.stopPropagation(); start.mutate(); setMenuOpen(false); }}
+							className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
 						>
 							<Play size={12} />
 							Start
@@ -171,9 +178,8 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 					{isRunning && (
 						<button
 							type="button"
-							onClick={() => stop.mutate()}
-							disabled={isPending}
-							className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors disabled:opacity-50"
+							onClick={(e) => { e.stopPropagation(); setMenuOpen(false); router.push("/"); stop.mutate(); }}
+							className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
 						>
 							<Square size={12} />
 							Stop
@@ -181,16 +187,15 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 					)}
 					<button
 						type="button"
-						onClick={() => remove.mutate()}
-						disabled={isPending}
-						className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors disabled:opacity-50"
+						onClick={(e) => { e.stopPropagation(); setMenuOpen(false); router.push("/"); remove.mutate(); }}
+						className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
 					>
 						<Trash2 size={12} />
 						Delete
 					</button>
 				</PopoverContent>
 			</Popover>
-		</div>
+		</button>
 	);
 }
 
