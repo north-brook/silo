@@ -3,7 +3,7 @@ use crate::river_names::DEFAULT_RIVER_NAMES;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashSet;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
@@ -156,13 +156,7 @@ pub async fn workspaces_stop_workspace(workspace: String) -> Result<(), String> 
     let result = run_gcloud(
         &lookup.account,
         &lookup.gcloud_project,
-        [
-            "compute".to_string(),
-            "instances".to_string(),
-            "stop".to_string(),
-            workspace,
-            format!("--zone={}", lookup.workspace.zone),
-        ],
+        stop_workspace_args(&workspace, &lookup.workspace.zone),
     )
     .await?;
 
@@ -170,7 +164,7 @@ pub async fn workspaces_stop_workspace(workspace: String) -> Result<(), String> 
         return Err(gcloud_error("failed to stop workspace", &result.stderr));
     }
 
-    log::info!("workspace {} stopped", lookup.workspace.name);
+    log::info!("workspace {} stop initiated", lookup.workspace.name);
     Ok(())
 }
 
@@ -185,25 +179,14 @@ pub async fn workspaces_delete_workspace(workspace: String) -> Result<(), String
     log::info!("deleting workspace {workspace}");
     let lookup = find_workspace(&workspace).await?;
 
-    let result = run_gcloud(
+    run_gcloud_detached(
         &lookup.account,
         &lookup.gcloud_project,
-        [
-            "compute".to_string(),
-            "instances".to_string(),
-            "delete".to_string(),
-            workspace,
-            format!("--zone={}", lookup.workspace.zone),
-            "--quiet".to_string(),
-        ],
+        delete_workspace_args(&workspace, &lookup.workspace.zone),
     )
     .await?;
 
-    if !result.success {
-        return Err(gcloud_error("failed to delete workspace", &result.stderr));
-    }
-
-    log::info!("workspace {} deleted", lookup.workspace.name);
+    log::info!("workspace {} delete initiated", lookup.workspace.name);
     Ok(())
 }
 
@@ -539,6 +522,28 @@ fn update_workspace_label_args(workspace: &Workspace, label: &str, value: &str) 
     }
 }
 
+fn stop_workspace_args(workspace_name: &str, zone: &str) -> Vec<String> {
+    vec![
+        "compute".to_string(),
+        "instances".to_string(),
+        "stop".to_string(),
+        workspace_name.to_string(),
+        format!("--zone={zone}"),
+        "--async".to_string(),
+    ]
+}
+
+fn delete_workspace_args(workspace_name: &str, zone: &str) -> Vec<String> {
+    vec![
+        "compute".to_string(),
+        "instances".to_string(),
+        "delete".to_string(),
+        workspace_name.to_string(),
+        format!("--zone={zone}"),
+        "--quiet".to_string(),
+    ]
+}
+
 fn default_workspace_branch() -> String {
     if DEFAULT_RIVER_NAMES.is_empty() {
         return "silo/workspace".to_string();
@@ -598,6 +603,44 @@ where
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
+    })
+    .await
+    .map_err(|error| format!("gcloud task failed: {error}"))?
+}
+
+async fn run_gcloud_detached<I, S>(account: &str, project: &str, args: I) -> Result<(), String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let account = account.to_string();
+    let project = project.to_string();
+    let args: Vec<String> = args.into_iter().map(Into::into).collect();
+    let command_line = args.join(" ");
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let started = Instant::now();
+        let mut command = Command::new("gcloud");
+        if !account.trim().is_empty() {
+            command.arg(format!("--account={account}"));
+        }
+        if !project.trim().is_empty() {
+            command.arg(format!("--project={project}"));
+        }
+        command
+            .args(&args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .stdin(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("failed to execute gcloud: {error}"))?;
+
+        log::trace!(
+            "workspace gcloud command detached duration_ms={} project={} args={command_line}",
+            started.elapsed().as_millis(),
+            project
+        );
+        Ok(())
     })
     .await
     .map_err(|error| format!("gcloud task failed: {error}"))?
@@ -1072,6 +1115,40 @@ mod tests {
                 "ws-demo-123".to_string(),
                 "--zone=us-east1-b".to_string(),
                 "--labels=branch".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn stop_workspace_args_run_async() {
+        let args = stop_workspace_args("ws-demo-123", "us-east1-b");
+
+        assert_eq!(
+            args,
+            vec![
+                "compute".to_string(),
+                "instances".to_string(),
+                "stop".to_string(),
+                "ws-demo-123".to_string(),
+                "--zone=us-east1-b".to_string(),
+                "--async".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn delete_workspace_args_run_quiet_without_async() {
+        let args = delete_workspace_args("ws-demo-123", "us-east1-b");
+
+        assert_eq!(
+            args,
+            vec![
+                "compute".to_string(),
+                "instances".to_string(),
+                "delete".to_string(),
+                "ws-demo-123".to_string(),
+                "--zone=us-east1-b".to_string(),
+                "--quiet".to_string(),
             ]
         );
     }
