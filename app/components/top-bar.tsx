@@ -5,22 +5,24 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { GitBranch, ChevronRight, ChevronsUpDown } from "lucide-react";
 import { Popover, PopoverTrigger, PopoverContent } from "./popover";
 import { invoke } from "../../lib/invoke";
+import { isTemplateWorkspace, type Workspace } from "../../lib/workspaces";
 
 export function TopBar({
 	workspace,
 	project,
-	branch,
-	targetBranch,
+	workspaceData,
 }: {
 	workspace: string;
 	project: string;
-	branch: string;
-	targetBranch: string;
+	workspaceData: Workspace;
 }) {
 	const queryClient = useQueryClient();
+	const branchWorkspace = isTemplateWorkspace(workspaceData)
+		? null
+		: workspaceData;
 
 	const [editingBranch, setEditingBranch] = useState(false);
-	const [branchDraft, setBranchDraft] = useState(branch);
+	const [branchDraft, setBranchDraft] = useState(branchWorkspace?.branch ?? "");
 	const inputRef = useRef<HTMLInputElement>(null);
 
 	const [targetOpen, setTargetOpen] = useState(false);
@@ -28,7 +30,7 @@ export function TopBar({
 	const branches = useQuery({
 		queryKey: ["gh_project_branches", project],
 		queryFn: () => invoke<string[]>("gh_project_branches", { project }),
-		enabled: !!project,
+		enabled: !!project && !isTemplateWorkspace(workspaceData),
 	});
 
 	const updateBranch = useMutation({
@@ -70,6 +72,10 @@ export function TopBar({
 		}
 	}, [editingBranch]);
 
+	useEffect(() => {
+		setBranchDraft(branchWorkspace?.branch ?? "");
+	}, [branchWorkspace?.branch]);
+
 	const PRIORITY_BRANCHES = ["main", "master", "staging", "dev"];
 
 	const sortedBranches = (branches.data ?? []).slice().sort((a, b) => {
@@ -82,14 +88,32 @@ export function TopBar({
 	});
 
 	const commitBranch = () => {
+		if (!branchWorkspace) {
+			setEditingBranch(false);
+			return;
+		}
+
 		const trimmed = branchDraft.trim();
 		setEditingBranch(false);
-		if (trimmed && trimmed !== branch) {
+		if (trimmed && trimmed !== branchWorkspace.branch) {
 			updateBranch.mutate(trimmed);
 		} else {
-			setBranchDraft(branch);
+			setBranchDraft(branchWorkspace.branch);
 		}
 	};
+
+	if (!branchWorkspace) {
+		return (
+			<header className="h-8 w-full border-b border-border-light shrink-0 flex items-center relative">
+				<div data-tauri-drag-region className="absolute inset-0" />
+				<div className="relative flex items-center gap-1.5 px-3 text-[11px] text-text-muted z-10">
+					<span className="text-text">Template</span>
+				</div>
+			</header>
+		);
+	}
+
+	const targetBranch = branchWorkspace.target_branch;
 
 	return (
 		<header className="h-8 w-full border-b border-border-light shrink-0 flex items-center relative">
@@ -108,7 +132,7 @@ export function TopBar({
 						onKeyDown={(e) => {
 							if (e.key === "Enter") commitBranch();
 							if (e.key === "Escape") {
-								setBranchDraft(branch);
+								setBranchDraft(branchWorkspace.branch);
 								setEditingBranch(false);
 							}
 						}}
@@ -118,12 +142,12 @@ export function TopBar({
 					<button
 						type="button"
 						onClick={() => {
-							setBranchDraft(branch);
+							setBranchDraft(branchWorkspace.branch);
 							setEditingBranch(true);
 						}}
 						className="text-text hover:text-text-bright transition-colors"
 					>
-						{branch || "branch"}
+						{branchWorkspace.branch || "branch"}
 					</button>
 				)}
 				<ChevronRight size={10} className="shrink-0 text-text-placeholder" />
