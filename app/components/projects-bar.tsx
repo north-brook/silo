@@ -8,6 +8,8 @@ import {
 	EllipsisVertical,
 	Play,
 	Plus,
+	Save,
+	Settings,
 	Square,
 	Trash2,
 } from "lucide-react";
@@ -16,30 +18,120 @@ import { Tooltip, TooltipTrigger, TooltipContent } from "./tooltip";
 import { toast } from "./toaster";
 import Image from "next/image";
 import { invoke } from "../../lib/invoke";
-import type { Workspace } from "../../lib/workspaces";
-import { workspaceLabel } from "../../lib/workspaces";
+import type { ListedProject } from "../../lib/projects";
+import {
+	createWorkspace as createWorkspaceCommand,
+	isTemplateWorkspace,
+	workspaceLabel,
+	type Workspace,
+} from "../../lib/workspaces";
+import type { SnapshotTemplate } from "../../lib/templates";
 import { TerminalLoader } from "./terminal-loader";
 import { WorkspaceIndicator } from "./workspace-status";
-
-interface ListedProject {
-	name: string;
-	path: string;
-	image: string | null;
-}
 
 function ProjectRow({
 	project,
 	expanded,
 	onToggle,
-	onCreate,
-	isCreating,
+	hasTemplate,
+	templateWorkspace,
 }: {
 	project: ListedProject;
 	expanded: boolean;
 	onToggle: () => void;
-	onCreate: () => void;
-	isCreating: boolean;
+	hasTemplate: boolean;
+	templateWorkspace: Workspace | undefined;
 }) {
+	const router = useRouter();
+	const queryClient = useQueryClient();
+
+	const createWorkspace = useMutation({
+		mutationFn: () => createWorkspaceCommand(project.name),
+		onSuccess: (workspace) => {
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_list_workspaces"],
+			});
+			toast({ variant: "success", title: "Workspace created" });
+			router.push(
+				`/workspace?project=${encodeURIComponent(project.name)}&name=${encodeURIComponent(workspace.name)}`,
+			);
+		},
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to create workspace",
+				description: error.message,
+			});
+		},
+	});
+
+	const createTemplateMut = useMutation({
+		mutationFn: () =>
+			invoke<Workspace>("templates_create_template", {
+				project: project.name,
+			}),
+		onSuccess: (workspace) => {
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_list_workspaces"],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["templates_list_templates"],
+			});
+			toast({ variant: "success", title: "Template workspace created" });
+			router.push(
+				`/workspace?project=${encodeURIComponent(project.name)}&name=${encodeURIComponent(workspace.name)}`,
+			);
+		},
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to create template",
+				description: error.message,
+			});
+		},
+	});
+
+	const editTemplateMut = useMutation({
+		mutationFn: () =>
+			invoke<Workspace>("templates_edit_template", {
+				project: project.name,
+			}),
+		onSuccess: (workspace) => {
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_list_workspaces"],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["templates_list_templates"],
+			});
+			toast({ variant: "success", title: "Template workspace created" });
+			router.push(
+				`/workspace?project=${encodeURIComponent(project.name)}&name=${encodeURIComponent(workspace.name)}`,
+			);
+		},
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to edit template",
+				description: error.message,
+			});
+		},
+	});
+
+	const handleTemplate = () => {
+		if (templateWorkspace) {
+			router.push(
+				`/workspace?project=${encodeURIComponent(templateWorkspace.project ?? "")}&name=${encodeURIComponent(templateWorkspace.name)}`,
+			);
+		} else if (hasTemplate) {
+			editTemplateMut.mutate();
+		} else {
+			createTemplateMut.mutate();
+		}
+	};
+
+	const isCreatingTemplate =
+		createTemplateMut.isPending || editTemplateMut.isPending;
+
 	return (
 		// biome-ignore lint/a11y/useSemanticElements: can't use <button> because it contains interactive children
 		<div
@@ -72,27 +164,53 @@ function ProjectRow({
 					className={`shrink-0 text-text-placeholder transition-transform ${expanded ? "" : "-rotate-90"}`}
 				/>
 			</span>
-			{isCreating ? (
-				<span className="shrink-0 ml-auto p-1 -mr-1 flex items-center justify-center w-3 h-3 text-xs leading-none">
-					<TerminalLoader className="text-text-muted" />
-				</span>
-			) : (
-				<Tooltip>
-					<TooltipTrigger asChild>
-						<button
-							type="button"
-							onClick={(e) => {
-								e.stopPropagation();
-								onCreate();
-							}}
-							className="shrink-0 ml-auto p-1 -mr-1 text-text-placeholder hover:text-text-bright opacity-0 group-hover:opacity-100 transition-opacity"
-						>
-							<Plus size={12} />
-						</button>
-					</TooltipTrigger>
-					<TooltipContent side="right">New workspace</TooltipContent>
-				</Tooltip>
-			)}
+			<span className="shrink-0 ml-auto flex items-center -mr-1">
+				{isCreatingTemplate ? (
+					<span className="p-1 flex items-center justify-center">
+						<TerminalLoader className="text-text-muted" />
+					</span>
+				) : (
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<button
+								type="button"
+								onClick={(e) => {
+									e.stopPropagation();
+									handleTemplate();
+								}}
+								className="p-1 text-text-placeholder hover:text-text-bright opacity-0 group-hover:opacity-100 transition-opacity"
+							>
+								<Settings size={12} />
+							</button>
+						</TooltipTrigger>
+						<TooltipContent side="right">
+							{templateWorkspace ? "Edit Template" : "New Template"}
+						</TooltipContent>
+					</Tooltip>
+				)}
+				{hasTemplate &&
+					(createWorkspace.isPending ? (
+						<span className="p-1 flex items-center justify-center">
+							<TerminalLoader className="text-text-muted" />
+						</span>
+					) : (
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<button
+									type="button"
+									onClick={(e) => {
+										e.stopPropagation();
+										createWorkspace.mutate();
+									}}
+									className="p-1 text-text-placeholder hover:text-text-bright opacity-0 group-hover:opacity-100 transition-opacity"
+								>
+									<Plus size={12} />
+								</button>
+							</TooltipTrigger>
+							<TooltipContent side="right">New Workspace</TooltipContent>
+						</Tooltip>
+					))}
+			</span>
 		</div>
 	);
 }
@@ -105,6 +223,7 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 	const isRunning = workspace.status === "RUNNING";
 	const isStopped =
 		workspace.status === "TERMINATED" || workspace.status === "STOPPED";
+	const isTemplate = isTemplateWorkspace(workspace);
 
 	const start = useMutation({
 		mutationFn: () =>
@@ -160,6 +279,50 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 		},
 	});
 
+	const saveTemplateMut = useMutation({
+		mutationFn: () =>
+			invoke("templates_save_template", { project: workspace.project }),
+		onSuccess: () => {
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_list_workspaces"],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["templates_list_templates"],
+			});
+			toast({ variant: "success", title: "Template saved" });
+			router.push("/");
+		},
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to save template",
+				description: error.message,
+			});
+		},
+	});
+
+	const deleteTemplateMut = useMutation({
+		mutationFn: () =>
+			invoke("templates_delete_template", { project: workspace.project }),
+		onSuccess: () => {
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_list_workspaces"],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["templates_list_templates"],
+			});
+			toast({ variant: "success", title: "Template deleted" });
+			router.push("/");
+		},
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to delete template",
+				description: error.message,
+			});
+		},
+	});
+
 	const isStopping =
 		workspace.status === "STOPPING" || workspace.status === "SUSPENDING";
 	const isDisabled = stop.isPending || remove.isPending || isStopping;
@@ -205,48 +368,80 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 					</button>
 				</PopoverTrigger>
 				<PopoverContent side="right" align="start" className="w-36 p-1">
-					{isStopped && (
-						<button
-							type="button"
-							onClick={(e) => {
-								e.stopPropagation();
-								start.mutate();
-								setMenuOpen(false);
-							}}
-							className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
-						>
-							<Play size={12} />
-							Start
-						</button>
+					{isTemplate ? (
+						<>
+							<button
+								type="button"
+								onClick={(e) => {
+									e.stopPropagation();
+									setMenuOpen(false);
+									saveTemplateMut.mutate();
+								}}
+								className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+							>
+								<Save size={12} />
+								Save
+							</button>
+							<button
+								type="button"
+								onClick={(e) => {
+									e.stopPropagation();
+									setMenuOpen(false);
+									router.push("/");
+									deleteTemplateMut.mutate();
+								}}
+								className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
+							>
+								<Trash2 size={12} />
+								Delete
+							</button>
+						</>
+					) : (
+						<>
+							{isStopped && (
+								<button
+									type="button"
+									onClick={(e) => {
+										e.stopPropagation();
+										start.mutate();
+										setMenuOpen(false);
+									}}
+									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+								>
+									<Play size={12} />
+									Start
+								</button>
+							)}
+							{isRunning && (
+								<button
+									type="button"
+									onClick={(e) => {
+										e.stopPropagation();
+										setMenuOpen(false);
+										router.push("/");
+										stop.mutate();
+									}}
+									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+								>
+									<Square size={12} />
+									Stop
+								</button>
+							)}
+							<button
+								type="button"
+								onClick={(e) => {
+									e.stopPropagation();
+									setMenuOpen(false);
+									router.push("/");
+									remove.mutate();
+								}}
+								className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
+							>
+								<Trash2 size={12} />
+								Delete
+							</button>
+						</>
 					)}
-					{isRunning && (
-						<button
-							type="button"
-							onClick={(e) => {
-								e.stopPropagation();
-								setMenuOpen(false);
-								router.push("/");
-								stop.mutate();
-							}}
-							className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
-						>
-							<Square size={12} />
-							Stop
-						</button>
-					)}
-					<button
-						type="button"
-						onClick={(e) => {
-							e.stopPropagation();
-							setMenuOpen(false);
-							router.push("/");
-							remove.mutate();
-						}}
-						className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
-					>
-						<Trash2 size={12} />
-						Delete
-					</button>
 				</PopoverContent>
 			</Popover>
 		</div>
@@ -279,8 +474,6 @@ function BarFooter() {
 }
 
 export function ProjectsBar() {
-	const router = useRouter();
-	const queryClient = useQueryClient();
 	const projects = useQuery({
 		queryKey: ["projects_list_projects"],
 		queryFn: () => invoke<ListedProject[]>("projects_list_projects"),
@@ -294,28 +487,12 @@ export function ProjectsBar() {
 			}),
 		refetchInterval: 15000,
 	});
-	const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-
-	const createWorkspace = useMutation({
-		mutationFn: (project: string) =>
-			invoke<Workspace>("workspaces_create_workspace", { project }),
-		onSuccess: (workspace, project) => {
-			queryClient.invalidateQueries({
-				queryKey: ["workspaces_list_workspaces"],
-			});
-			toast({ variant: "success", title: "Workspace created" });
-			router.push(
-				`/workspace?project=${encodeURIComponent(project)}&name=${encodeURIComponent(workspace.name)}`,
-			);
-		},
-		onError: (error) => {
-			toast({
-				variant: "error",
-				title: "Failed to create workspace",
-				description: error.message,
-			});
-		},
+	const templates = useQuery({
+		queryKey: ["templates_list_templates"],
+		queryFn: () => invoke<SnapshotTemplate[]>("templates_list_templates"),
+		refetchInterval: 15000,
 	});
+	const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
 	if (!projects.data || projects.data.length === 0) return null;
 
@@ -331,14 +508,21 @@ export function ProjectsBar() {
 					const projectWorkspaces = (workspaces.data ?? []).filter(
 						(w) => w.project === project.name,
 					);
+					const hasTemplate = (templates.data ?? []).some(
+						(t) => t.project === project.name,
+					);
+					const templateWorkspace = projectWorkspaces.find((w) =>
+						isTemplateWorkspace(w),
+					);
+
 					return (
 						<div key={project.name}>
 							<ProjectRow
 								project={project}
 								expanded={isExpanded(project.name)}
 								onToggle={() => toggle(project.name)}
-								onCreate={() => createWorkspace.mutate(project.name)}
-								isCreating={createWorkspace.isPending}
+								hasTemplate={hasTemplate}
+								templateWorkspace={templateWorkspace}
 							/>
 							{isExpanded(project.name) &&
 								projectWorkspaces.map((w) => (

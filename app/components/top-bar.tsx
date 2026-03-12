@@ -2,24 +2,71 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { GitBranch, ChevronRight, ChevronsUpDown } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { GitBranch, ChevronRight, ChevronsUpDown, Save } from "lucide-react";
 import { Popover, PopoverTrigger, PopoverContent } from "./popover";
+import { toast } from "./toaster";
 import { invoke } from "../../lib/invoke";
 import { isTemplateWorkspace, type Workspace } from "../../lib/workspaces";
 
-export function TopBar({
-	workspace,
-	project,
-	workspaceData,
-}: {
-	workspace: string;
-	project: string;
-	workspaceData: Workspace;
-}) {
+export function TopBar({ workspace }: { workspace: Workspace }) {
+	if (isTemplateWorkspace(workspace)) {
+		return <TemplateTopBar workspace={workspace} />;
+	}
+
+	return <BranchTopBar workspace={workspace} />;
+}
+
+function TemplateTopBar({ workspace }: { workspace: Workspace }) {
+	const router = useRouter();
 	const queryClient = useQueryClient();
-	const branchWorkspace = isTemplateWorkspace(workspaceData)
-		? null
-		: workspaceData;
+
+	const save = useMutation({
+		mutationFn: () =>
+			invoke("templates_save_template", { project: workspace.project ?? "" }),
+		onSuccess: () => {
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_list_workspaces"],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["templates_list_templates"],
+			});
+			toast({ variant: "success", title: "Template saved" });
+			router.push("/");
+		},
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to save template",
+				description: error.message,
+			});
+		},
+	});
+
+	return (
+		<header className="h-8 w-full border-b border-border-light shrink-0 flex items-center relative">
+			<div className="relative flex items-center justify-between w-full px-3 h-8 z-10">
+				<span className="text-[11px] text-text-muted">
+					<span className="text-text">{workspace.project}</span> template
+				</span>
+				<div data-tauri-drag-region className="h-8 flex-1" />
+				<button
+					type="button"
+					disabled={save.isPending}
+					onClick={() => save.mutate()}
+					className="flex items-center gap-1.5 justify-center px-3 py-0.5 rounded text-[11px] font-medium bg-white text-bg transition-colors hover:bg-white/80 disabled:opacity-50 disabled:cursor-not-allowed"
+				>
+					<Save size={10} />
+					Save
+				</button>
+			</div>
+		</header>
+	);
+}
+
+function BranchTopBar({ workspace }: { workspace: Workspace }) {
+	const queryClient = useQueryClient();
+	const branchWorkspace = isTemplateWorkspace(workspace) ? null : workspace;
 
 	const [editingBranch, setEditingBranch] = useState(false);
 	const [branchDraft, setBranchDraft] = useState(branchWorkspace?.branch ?? "");
@@ -28,20 +75,21 @@ export function TopBar({
 	const [targetOpen, setTargetOpen] = useState(false);
 
 	const branches = useQuery({
-		queryKey: ["gh_project_branches", project],
-		queryFn: () => invoke<string[]>("gh_project_branches", { project }),
-		enabled: !!project && !isTemplateWorkspace(workspaceData),
+		queryKey: ["gh_project_branches", workspace.project],
+		queryFn: () =>
+			invoke<string[]>("gh_project_branches", { project: workspace.project }),
+		enabled: !!workspace.project && !!branchWorkspace,
 	});
 
 	const updateBranch = useMutation({
 		mutationFn: (newBranch: string) =>
 			invoke("workspaces_update_workspace_branch", {
-				workspace,
+				workspace: workspace.name,
 				branch: newBranch,
 			}),
 		onSuccess: () => {
 			queryClient.invalidateQueries({
-				queryKey: ["workspaces_get_workspace", workspace],
+				queryKey: ["workspaces_get_workspace", workspace.name],
 			});
 			queryClient.invalidateQueries({
 				queryKey: ["workspaces_list_workspaces"],
@@ -52,12 +100,12 @@ export function TopBar({
 	const updateTargetBranch = useMutation({
 		mutationFn: (newTargetBranch: string) =>
 			invoke("workspaces_update_workspace_target_branch", {
-				workspace,
+				workspace: workspace.name,
 				target_branch: newTargetBranch,
 			}),
 		onSuccess: () => {
 			queryClient.invalidateQueries({
-				queryKey: ["workspaces_get_workspace", workspace],
+				queryKey: ["workspaces_get_workspace", workspace.name],
 			});
 			queryClient.invalidateQueries({
 				queryKey: ["workspaces_list_workspaces"],
@@ -102,25 +150,13 @@ export function TopBar({
 		}
 	};
 
-	if (!branchWorkspace) {
-		return (
-			<header className="h-8 w-full border-b border-border-light shrink-0 flex items-center relative">
-				<div data-tauri-drag-region className="absolute inset-0" />
-				<div className="relative flex items-center gap-1.5 px-3 text-[11px] text-text-muted z-10">
-					<span className="text-text">Template</span>
-				</div>
-			</header>
-		);
-	}
+	if (!branchWorkspace) return null;
 
 	const targetBranch = branchWorkspace.target_branch;
 
 	return (
 		<header className="h-8 w-full border-b border-border-light shrink-0 flex items-center relative">
-			<div
-				data-tauri-drag-region
-				className="absolute inset-0"
-			/>
+			<div data-tauri-drag-region className="absolute inset-0" />
 			<div className="relative flex items-center gap-1.5 px-3 text-[11px] text-text-muted z-10">
 				<GitBranch size={12} className="shrink-0 text-text-placeholder" />
 				{editingBranch ? (
@@ -161,9 +197,15 @@ export function TopBar({
 							<ChevronsUpDown size={10} className="text-text-placeholder" />
 						</button>
 					</PopoverTrigger>
-					<PopoverContent side="bottom" align="start" className="w-52 p-1 max-h-64 overflow-y-auto">
+					<PopoverContent
+						side="bottom"
+						align="start"
+						className="w-52 p-1 max-h-64 overflow-y-auto"
+					>
 						{branches.isLoading && (
-							<span className="block px-2 py-1.5 text-xs text-text-muted">Loading...</span>
+							<span className="block px-2 py-1.5 text-xs text-text-muted">
+								Loading...
+							</span>
 						)}
 						{sortedBranches.map((b) => (
 							<button
@@ -183,7 +225,9 @@ export function TopBar({
 							</button>
 						))}
 						{branches.data?.length === 0 && (
-							<span className="block px-2 py-1.5 text-xs text-text-muted">No branches found</span>
+							<span className="block px-2 py-1.5 text-xs text-text-muted">
+								No branches found
+							</span>
 						)}
 					</PopoverContent>
 				</Popover>
