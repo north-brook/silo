@@ -2,8 +2,8 @@ import { TerminalLoader } from "./terminal-loader";
 
 interface WorkspaceStatus {
 	status: string;
-	working: boolean | null;
-	unread: boolean;
+	working?: boolean | null;
+	unread?: boolean;
 }
 
 export function WorkspaceIndicator({ workspace }: { workspace: WorkspaceStatus }) {
