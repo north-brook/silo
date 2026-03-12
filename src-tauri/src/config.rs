@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
+use crate::codex::detect_codex_token;
 use indexmap::IndexMap;
+use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fmt;
@@ -27,11 +29,60 @@ pub(crate) struct SiloConfig {
     pub(crate) projects: IndexMap<String, ProjectConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) const DEFAULT_GCLOUD_REGION: &str = "us-east4";
+pub(crate) const DEFAULT_GCLOUD_ZONE: &str = "us-east4-c";
+pub(crate) const DEFAULT_GCLOUD_MACHINE_TYPE: &str = "e2-standard-4";
+pub(crate) const DEFAULT_GCLOUD_DISK_SIZE_GB: u32 = 80;
+pub(crate) const DEFAULT_GCLOUD_DISK_TYPE: &str = "pd-ssd";
+pub(crate) const DEFAULT_GCLOUD_IMAGE_FAMILY: &str = "ubuntu-2404-lts-amd64";
+pub(crate) const DEFAULT_GCLOUD_IMAGE_PROJECT: &str = "ubuntu-os-cloud";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub(crate) struct GcloudConfig {
     pub(crate) account: String,
+    pub(crate) service_account: String,
+    pub(crate) service_account_key_file: String,
     pub(crate) project: String,
+    pub(crate) region: String,
+    pub(crate) zone: String,
+    pub(crate) machine_type: String,
+    pub(crate) disk_size_gb: u32,
+    pub(crate) disk_type: String,
+    pub(crate) image_family: String,
+    pub(crate) image_project: String,
+}
+
+impl Default for GcloudConfig {
+    fn default() -> Self {
+        Self {
+            account: String::new(),
+            service_account: String::new(),
+            service_account_key_file: String::new(),
+            project: String::new(),
+            region: DEFAULT_GCLOUD_REGION.to_string(),
+            zone: DEFAULT_GCLOUD_ZONE.to_string(),
+            machine_type: DEFAULT_GCLOUD_MACHINE_TYPE.to_string(),
+            disk_size_gb: DEFAULT_GCLOUD_DISK_SIZE_GB,
+            disk_type: DEFAULT_GCLOUD_DISK_TYPE.to_string(),
+            image_family: DEFAULT_GCLOUD_IMAGE_FAMILY.to_string(),
+            image_project: DEFAULT_GCLOUD_IMAGE_PROJECT.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub(crate) struct ProjectGcloudConfig {
+    pub(crate) account: Option<String>,
+    pub(crate) project: Option<String>,
+    pub(crate) region: Option<String>,
+    pub(crate) zone: Option<String>,
+    pub(crate) machine_type: Option<String>,
+    pub(crate) disk_size_gb: Option<u32>,
+    pub(crate) disk_type: Option<String>,
+    pub(crate) image_family: Option<String>,
+    pub(crate) image_project: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -59,6 +110,7 @@ pub(crate) struct ProjectConfig {
     pub(crate) name: String,
     pub(crate) path: String,
     pub(crate) image: Option<String>,
+    pub(crate) gcloud: ProjectGcloudConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -90,16 +142,19 @@ impl ConfigStore {
 
     pub(crate) fn initialize_defaults_if_missing(&self) -> Result<(), ConfigError> {
         let _guard = CONFIG_LOCK.lock().map_err(|_| ConfigError::LockPoisoned)?;
+        debug!("ensuring config exists at {}", self.config_path.display());
         self.initialize_defaults_if_missing_locked(|home_dir| detect_initial_config(home_dir))
     }
 
     pub(crate) fn load(&self) -> Result<SiloConfig, ConfigError> {
         let _guard = CONFIG_LOCK.lock().map_err(|_| ConfigError::LockPoisoned)?;
+        debug!("loading config from {}", self.config_path.display());
         self.load_locked()
     }
 
     pub(crate) fn read(&self, path: &str) -> Result<Value, ConfigError> {
         let _guard = CONFIG_LOCK.lock().map_err(|_| ConfigError::LockPoisoned)?;
+        debug!("reading config path {path}");
         let config = self.load_locked()?;
         let value = config_to_value(&config)?;
         let segments = parse_path(path)?;
@@ -109,6 +164,7 @@ impl ConfigStore {
 
     pub(crate) fn write(&self, path: &str, value: Value) -> Result<(), ConfigError> {
         let _guard = CONFIG_LOCK.lock().map_err(|_| ConfigError::LockPoisoned)?;
+        debug!("writing config path {path}");
         let config = self.load_locked()?;
         let mut root = config_to_value(&config)?;
         let segments = parse_path(path)?;
@@ -124,6 +180,7 @@ impl ConfigStore {
 
     pub(crate) fn save(&self, config: &SiloConfig) -> Result<(), ConfigError> {
         let _guard = CONFIG_LOCK.lock().map_err(|_| ConfigError::LockPoisoned)?;
+        debug!("saving config to {}", self.config_path.display());
         self.save_locked(config)
     }
 
@@ -209,12 +266,14 @@ impl ConfigStore {
             return Ok(());
         }
 
+        info!("creating initial config at {}", self.config_path.display());
         let config = detect(&self.home_dir);
         self.write_atomically(&serialize_config(&config)?)
     }
 }
 
 pub(crate) fn initialize_on_start() -> Result<(), ConfigError> {
+    info!("initializing config on startup");
     ConfigStore::new()?.initialize_defaults_if_missing()
 }
 
@@ -345,36 +404,16 @@ fn serialize_config(config: &SiloConfig) -> Result<String, ConfigError> {
     toml::to_string_pretty(&value).map_err(ConfigError::Serialize)
 }
 
-pub(crate) fn set_gcloud_config(account: String, project: String) -> Result<(), ConfigError> {
-    let store = ConfigStore::new()?;
-    let mut table = Table::new();
-    table.insert("account".to_string(), Value::String(account));
-    table.insert("project".to_string(), Value::String(project));
-    store.write("gcloud", Value::Table(table))
-}
-
-pub(crate) fn set_codex_token(token: String) -> Result<(), ConfigError> {
-    let store = ConfigStore::new()?;
-    let mut table = Table::new();
-    table.insert("token".to_string(), Value::String(token));
-    store.write("codex", Value::Table(table))
-}
-
-pub(crate) fn set_claude_token(token: String) -> Result<(), ConfigError> {
-    let store = ConfigStore::new()?;
-    let mut table = Table::new();
-    table.insert("token".to_string(), Value::String(token));
-    store.write("claude", Value::Table(table))
-}
-
 fn detect_initial_config(home_dir: &Path) -> SiloConfig {
+    let mut gcloud = GcloudConfig::default();
+    gcloud.account = command_output("gcloud", ["config", "get-value", "account"]).unwrap_or_default();
+    gcloud.project = command_output("gcloud", ["config", "get-value", "project"]).unwrap_or_default();
+    if gcloud.account.ends_with(".gserviceaccount.com") {
+        gcloud.service_account = gcloud.account.clone();
+    }
+
     SiloConfig {
-        gcloud: GcloudConfig {
-            account: command_output("gcloud", ["config", "get-value", "account"])
-                .unwrap_or_default(),
-            project: command_output("gcloud", ["config", "get-value", "project"])
-                .unwrap_or_default(),
-        },
+        gcloud,
         gh: GhConfig {
             username: command_output("gh", ["api", "user", "--jq", ".login"]).unwrap_or_default(),
             token: command_output("gh", ["auth", "token"]).unwrap_or_default(),
@@ -400,6 +439,18 @@ fn validate_config(config: &SiloConfig) -> Result<(), ConfigError> {
                 "projects.{name}.path must not be empty"
             )));
         }
+
+        if matches!(project.gcloud.disk_size_gb, Some(0)) {
+            return Err(ConfigError::Schema(format!(
+                "projects.{name}.gcloud.disk_size_gb must be greater than zero"
+            )));
+        }
+    }
+
+    if config.gcloud.disk_size_gb == 0 {
+        return Err(ConfigError::Schema(
+            "gcloud.disk_size_gb must be greater than zero".to_string(),
+        ));
     }
 
     Ok(())
@@ -424,37 +475,6 @@ where
     }
 
     normalize_value(String::from_utf8_lossy(&output.stdout).trim())
-}
-
-fn detect_codex_token(home_dir: &Path) -> Option<String> {
-    env::var("OPENAI_API_KEY")
-        .ok()
-        .and_then(|value| normalize_value(&value))
-        .or_else(|| codex_auth_token(home_dir))
-}
-
-pub(crate) fn detect_codex_token_from_store() -> Result<String, ConfigError> {
-    let home_dir = env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or(ConfigError::HomeDirectoryNotFound)?;
-
-    Ok(detect_codex_token(&home_dir).unwrap_or_default())
-}
-
-fn codex_auth_token(home_dir: &Path) -> Option<String> {
-    let auth_path = home_dir.join(".codex").join("auth.json");
-    let contents = fs::read_to_string(auth_path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&contents).ok()?;
-
-    json.get("OPENAI_API_KEY")
-        .and_then(serde_json::Value::as_str)
-        .and_then(normalize_value)
-        .or_else(|| {
-            json.get("tokens")
-                .and_then(|tokens| tokens.get("access_token"))
-                .and_then(serde_json::Value::as_str)
-                .and_then(normalize_value)
-        })
 }
 
 fn normalize_value(value: &str) -> Option<String> {
@@ -664,27 +684,53 @@ mod tests {
         assert_eq!(config.claude.token, "partial");
         assert_eq!(config.gh.username, "");
         assert_eq!(config.gcloud.project, "");
+        assert_eq!(config.gcloud.service_account, "");
+        assert_eq!(config.gcloud.service_account_key_file, "");
+        assert_eq!(config.gcloud.region, DEFAULT_GCLOUD_REGION);
+        assert_eq!(config.gcloud.zone, DEFAULT_GCLOUD_ZONE);
         assert_eq!(
             config.projects.get("demo"),
             Some(&ProjectConfig {
                 name: "Demo".to_string(),
                 path: "/tmp/demo".to_string(),
                 image: None,
+                gcloud: ProjectGcloudConfig::default(),
             })
         );
     }
 
     #[test]
+    fn project_gcloud_overrides_deserialize() {
+        let temp_dir = TestDir::new();
+
+        write_file(
+            &temp_dir.config_path(),
+            "[gcloud]\nproject = \"default-project\"\nregion = \"us-east4\"\n\n[projects.demo]\nname = \"Demo\"\npath = \"/tmp/demo\"\n\n[projects.demo.gcloud]\nproject = \"override-project\"\nregion = \"us-west1\"\nzone = \"us-west1-b\"\ndisk_size_gb = 120\n",
+        )
+        .expect("seed config should be written");
+
+        let config = temp_dir.store().load().expect("config should load");
+        let project = config
+            .projects
+            .get("demo")
+            .expect("project override should exist");
+
+        assert_eq!(project.gcloud.project.as_deref(), Some("override-project"));
+        assert_eq!(project.gcloud.region.as_deref(), Some("us-west1"));
+        assert_eq!(project.gcloud.zone.as_deref(), Some("us-west1-b"));
+        assert_eq!(project.gcloud.disk_size_gb, Some(120));
+        assert_eq!(config.gcloud.machine_type, DEFAULT_GCLOUD_MACHINE_TYPE);
+    }
+
+    #[test]
     fn invalid_toml_returns_parse_error() {
         let temp_dir = TestDir::new();
+        let store = temp_dir.store();
 
         write_file(&temp_dir.config_path(), "[claude\n token = \"oops\"")
             .expect("invalid config should be seeded");
 
-        let error = temp_dir
-            .store()
-            .load()
-            .expect_err("invalid toml should fail");
+        let error = store.load_locked().expect_err("invalid toml should fail");
 
         assert!(matches!(error, ConfigError::Parse(_)));
     }
@@ -735,6 +781,7 @@ mod tests {
                 gcloud: GcloudConfig {
                     account: "default-account@example.com".to_string(),
                     project: "default-project".to_string(),
+                    ..GcloudConfig::default()
                 },
                 gh: GhConfig {
                     username: "octocat".to_string(),
@@ -751,6 +798,7 @@ mod tests {
         let config = store.load().expect("seeded config should load");
         assert_eq!(config.gcloud.account, "default-account@example.com");
         assert_eq!(config.gcloud.project, "default-project");
+        assert_eq!(config.gcloud.service_account, "");
         assert_eq!(config.gh.username, "octocat");
         assert_eq!(config.gh.token, "gh-token");
         assert_eq!(config.codex.token, "codex-token");
@@ -766,6 +814,7 @@ mod tests {
             gcloud: GcloudConfig {
                 account: "existing-account@example.com".to_string(),
                 project: "existing-project".to_string(),
+                ..GcloudConfig::default()
             },
             gh: GhConfig {
                 username: "existing-user".to_string(),
@@ -794,21 +843,6 @@ mod tests {
             .load()
             .expect("existing config should remain readable");
         assert_eq!(loaded, existing);
-    }
-
-    #[test]
-    fn codex_token_can_be_read_from_auth_json() {
-        let temp_dir = TestDir::new();
-        let codex_dir = temp_dir.root.join(".codex");
-        fs::create_dir_all(&codex_dir).expect("codex dir should be created");
-        write_file(
-            &codex_dir.join("auth.json"),
-            "{\"tokens\":{\"access_token\":\"codex-access-token\"}}",
-        )
-        .expect("auth file should be written");
-
-        let token = codex_auth_token(&temp_dir.root).expect("token should be detected");
-        assert_eq!(token, "codex-access-token");
     }
 
     struct TestDir {

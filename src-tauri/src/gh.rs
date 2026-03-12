@@ -1,5 +1,6 @@
 use crate::config::ConfigStore;
 use std::process::Command;
+use std::time::Instant;
 
 struct CommandResult {
     success: bool,
@@ -12,9 +13,16 @@ where
     S: Into<String>,
 {
     let args: Vec<String> = args.into_iter().map(Into::into).collect();
+    let command_line = args.join(" ");
 
     tauri::async_runtime::spawn_blocking(move || {
+        let started = Instant::now();
         let output = Command::new("gh").args(&args).output().ok()?;
+        log::debug!(
+            "gh command completed success={} duration_ms={} args={command_line}",
+            output.status.success(),
+            started.elapsed().as_millis()
+        );
 
         Some(CommandResult {
             success: output.status.success(),
@@ -28,6 +36,7 @@ where
 
 #[tauri::command]
 pub async fn gh_installed() -> bool {
+    log::debug!("checking whether gh is installed");
     run_gh(["--version"])
         .await
         .map(|result| result.success)
@@ -36,6 +45,7 @@ pub async fn gh_installed() -> bool {
 
 #[tauri::command]
 pub async fn gh_configured() -> bool {
+    log::debug!("checking whether gh is configured");
     ConfigStore::new()
         .and_then(|store| store.load())
         .map(|config| !config.gh.username.trim().is_empty() && !config.gh.token.trim().is_empty())
@@ -44,6 +54,7 @@ pub async fn gh_configured() -> bool {
 
 #[tauri::command]
 pub async fn gh_username() -> String {
+    log::debug!("reading gh username");
     run_gh(["api", "user", "--jq", ".login"])
         .await
         .filter(|result| result.success)

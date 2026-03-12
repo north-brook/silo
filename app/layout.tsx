@@ -4,26 +4,9 @@ import "./globals.css";
 import { useEffect, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ProjectsBar } from "./components/projects-bar";
-import { StatusBar } from "./components/status-bar";
 import { TooltipProvider } from "./components/tooltip";
 import { Toaster } from "./components/toaster";
-import { useProjects } from "./hooks/use-projects";
-
-function Shell({ children }: Readonly<{ children: React.ReactNode }>) {
-	const projects = useProjects();
-	const hasProjects = projects.data && projects.data.length > 0;
-
-	return (
-		<TooltipProvider delayDuration={300}>
-			<ProjectsBar />
-			<main className={`pb-6 h-full ${hasProjects ? "pl-48" : ""}`}>
-				{children}
-			</main>
-			<StatusBar />
-			<Toaster />
-		</TooltipProvider>
-	);
-}
+import { initializeFrontendLogging } from "../lib/logging";
 
 export default function RootLayout({
 	children,
@@ -31,6 +14,7 @@ export default function RootLayout({
 	const [queryClient] = useState(() => new QueryClient());
 
 	useEffect(() => {
+		initializeFrontendLogging();
 		import("@tauri-apps/api/window").then(({ getCurrentWindow }) => {
 			getCurrentWindow().show();
 		});
@@ -39,9 +23,15 @@ export default function RootLayout({
 	return (
 		<html lang="en">
 			<QueryClientProvider client={queryClient}>
-				<body>
-					<Shell>{children}</Shell>
-				</body>
+				<TooltipProvider delayDuration={0} skipDelayDuration={Infinity} disableHoverableContent>
+					<body className="flex flex-col h-screen overflow-hidden">
+						<div className="flex flex-1 min-h-0">
+							<ProjectsBar />
+							<main className="flex-1 min-w-0 overflow-auto flex flex-col">{children}</main>
+						</div>
+						<Toaster />
+					</body>
+				</TooltipProvider>
 			</QueryClientProvider>
 		</html>
 	);

@@ -1,0 +1,19 @@
+use sysinfo::{Pid, System};
+
+#[tauri::command]
+pub fn system_memory_usage() -> f64 {
+    log::debug!("reading process memory usage");
+    let pid = Pid::from_u32(std::process::id());
+    let mut sys = System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+
+    let bytes = sys
+        .process(pid)
+        .map(|p| p.memory())
+        .unwrap_or(0);
+
+    let mb = (bytes as f64) / 1_048_576.0;
+    let rounded = (mb * 10.0).round() / 10.0;
+    log::debug!("process memory usage is {rounded:.1} MB");
+    rounded
+}

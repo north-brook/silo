@@ -1,8 +1,10 @@
-use crate::config::{set_claude_token, ConfigStore};
+use crate::config::ConfigStore;
 use std::process::Command;
+use toml::Value;
 
 #[tauri::command]
 pub async fn claude_authenticate() -> Result<(), String> {
+    log::info!("starting claude authentication");
     tauri::async_runtime::spawn_blocking(move || {
         Command::new("claude")
             .arg("setup-token")
@@ -25,11 +27,20 @@ pub async fn claude_authenticate() -> Result<(), String> {
     })
     .await
     .map_err(|error| format!("claude setup-token task failed: {error}"))?
-    .and_then(|token| set_claude_token(token).map_err(|error| error.to_string()))
+    .and_then(|token| {
+        log::debug!("persisting claude token");
+        ConfigStore::new()
+            .map_err(|error| error.to_string())?
+            .write("claude.token", Value::String(token))
+            .map_err(|error| error.to_string())
+    })?;
+    log::info!("claude authentication saved successfully");
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn claude_configured() -> bool {
+    log::debug!("checking whether claude is configured");
     ConfigStore::new()
         .and_then(|store| store.load())
         .map(|config| !config.claude.token.trim().is_empty())

@@ -43,6 +43,7 @@ pub struct ListedProject {
 
 #[tauri::command]
 pub fn projects_list_projects() -> Result<Vec<ListedProject>, String> {
+    log::debug!("listing configured projects");
     let config = ConfigStore::new()
         .and_then(|store| store.load())
         .map_err(|error| error.to_string())?;
@@ -52,6 +53,7 @@ pub fn projects_list_projects() -> Result<Vec<ListedProject>, String> {
 
 #[tauri::command]
 pub fn projects_add_project(path: String) -> Result<(), String> {
+    log::info!("adding project from path {}", path);
     let store = ConfigStore::new().map_err(|error| error.to_string())?;
     let mut config = store.load().map_err(|error| error.to_string())?;
     let project_root = resolve_project_root(Path::new(&path))?;
@@ -68,9 +70,12 @@ pub fn projects_add_project(path: String) -> Result<(), String> {
             name,
             path: project_root.to_string_lossy().into_owned(),
             image,
+            gcloud: Default::default(),
         },
     );
-    store.save(&config).map_err(|error| error.to_string())
+    store.save(&config).map_err(|error| error.to_string())?;
+    log::info!("project added successfully");
+    Ok(())
 }
 
 #[tauri::command]
@@ -79,6 +84,7 @@ pub fn projects_update_project(
     path: String,
     image: Option<String>,
 ) -> Result<(), String> {
+    log::info!("updating project {name}");
     let store = ConfigStore::new().map_err(|error| error.to_string())?;
     let mut config = store.load().map_err(|error| error.to_string())?;
 
@@ -86,21 +92,26 @@ pub fn projects_update_project(
         .projects
         .get_mut(&name)
         .ok_or_else(|| format!("project not found: {name}"))?;
-    project.name = name;
+    project.name = name.clone();
     project.path = path;
     project.image = image;
 
-    store.save(&config).map_err(|error| error.to_string())
+    store.save(&config).map_err(|error| error.to_string())?;
+    log::info!("project {name} updated");
+    Ok(())
 }
 
 #[tauri::command]
 pub fn projects_reorder_projects(project_names: Vec<String>) -> Result<(), String> {
+    log::info!("reordering {} projects", project_names.len());
     let store = ConfigStore::new().map_err(|error| error.to_string())?;
     let mut config = store.load().map_err(|error| error.to_string())?;
 
     validate_project_order(&config, &project_names)?;
     config.projects = reorder_projects(&config.projects, &project_names)?;
-    store.save(&config).map_err(|error| error.to_string())
+    store.save(&config).map_err(|error| error.to_string())?;
+    log::info!("project order updated");
+    Ok(())
 }
 
 fn listed_projects(config: &SiloConfig) -> Vec<ListedProject> {
@@ -297,6 +308,7 @@ mod tests {
                         name: "Beta".to_string(),
                         path: "/tmp/beta".to_string(),
                         image: Some("/tmp/beta.png".to_string()),
+                        gcloud: Default::default(),
                     },
                 ),
                 (
@@ -305,6 +317,7 @@ mod tests {
                         name: "Alpha".to_string(),
                         path: "/tmp/alpha".to_string(),
                         image: None,
+                        gcloud: Default::default(),
                     },
                 ),
             ]),
@@ -328,6 +341,7 @@ mod tests {
                         name: "Alpha".to_string(),
                         path: "/tmp/alpha".to_string(),
                         image: None,
+                        gcloud: Default::default(),
                     },
                 ),
                 (
@@ -336,6 +350,7 @@ mod tests {
                         name: "Beta".to_string(),
                         path: "/tmp/beta".to_string(),
                         image: None,
+                        gcloud: Default::default(),
                     },
                 ),
             ]),
@@ -361,6 +376,7 @@ mod tests {
                         name: "Alpha".to_string(),
                         path: "/tmp/alpha".to_string(),
                         image: None,
+                        gcloud: Default::default(),
                     },
                 ),
                 (
@@ -369,6 +385,7 @@ mod tests {
                         name: "Beta".to_string(),
                         path: "/tmp/beta".to_string(),
                         image: None,
+                        gcloud: Default::default(),
                     },
                 ),
             ]),
