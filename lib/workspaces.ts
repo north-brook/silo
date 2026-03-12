@@ -1,3 +1,5 @@
+import { invoke } from "./invoke";
+
 export interface WorkspaceBase {
 	name: string;
 	project: string | null;
@@ -28,8 +30,12 @@ export function isTemplateWorkspace(
 
 export function workspaceLabel(workspace: Workspace): string {
 	if (isTemplateWorkspace(workspace)) {
-		return workspace.name;
+		return "template";
 	}
 
 	return workspace.branch || workspace.name;
+}
+
+export function createWorkspace(project: string): Promise<Workspace> {
+	return invoke<Workspace>("workspaces_create_workspace", { project });
 }
