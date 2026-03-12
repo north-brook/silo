@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
-import { ArrowUp } from "lucide-react";
+import { useState, useRef, useEffect } from "react";
+import { ArrowUp, ChevronsUpDown, Laptop, Terminal } from "lucide-react";
 import { Popover, PopoverTrigger, PopoverContent } from "../components/popover";
+import { TerminalLoader } from "../components/terminal-loader";
 import { ClaudeIcon } from "../icons/claude";
 import { CodexIcon } from "../icons/codex";
 
@@ -19,12 +20,37 @@ const PROVIDERS = [
 	},
 ] as const;
 
+function statusMessage(status: string): string {
+	switch (status) {
+		case "STAGING":
+		case "PROVISIONING":
+			return "Starting workspace...";
+		case "STOPPING":
+		case "SUSPENDING":
+			return "Stopping workspace...";
+		case "TERMINATED":
+		case "STOPPED":
+			return "Workspace is stopped";
+		case "":
+			return "Loading...";
+		default:
+			return status.charAt(0) + status.slice(1).toLowerCase();
+	}
+}
+
 export function PromptWorkspace({
 	isRunning,
+	status,
 }: {
 	isRunning: boolean;
+	status: string;
 }) {
+	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const [prompt, setPrompt] = useState("");
+
+	useEffect(() => {
+		textareaRef.current?.focus();
+	}, []);
 	const [provider, setProvider] = useState(PROVIDERS[0]);
 	const [providerOpen, setProviderOpen] = useState(false);
 	const canSubmit = isRunning && prompt.trim().length > 0;
@@ -34,8 +60,13 @@ export function PromptWorkspace({
 				<div className="w-full max-w-2xl">
 					<div className="rounded-lg border border-border-light bg-surface overflow-hidden">
 						<textarea
+							ref={textareaRef}
 							value={prompt}
-							onChange={(e) => setPrompt(e.target.value)}
+							onChange={(e) => {
+								setPrompt(e.target.value);
+								e.target.style.height = "auto";
+								e.target.style.height = `${e.target.scrollHeight}px`;
+							}}
 							onKeyDown={(e) => {
 								if (e.key === "Enter" && !e.shiftKey && canSubmit) {
 									e.preventDefault();
@@ -43,7 +74,7 @@ export function PromptWorkspace({
 							}}
 							placeholder="What do you want to do?"
 							rows={4}
-							className="w-full resize-none bg-transparent border-0 px-4 pt-4 pb-2 text-sm text-text-bright placeholder:text-text-placeholder outline-none focus:border-0 focus:ring-0"
+							className="w-full resize-none bg-transparent border-0 px-4 pt-4 pb-2 text-sm text-text-bright placeholder:text-text-placeholder outline-none focus:border-0 focus:ring-0 min-h-[6rem] max-h-64 overflow-y-auto"
 						/>
 						<div className="flex items-center justify-between px-3 pb-3">
 							<Popover open={providerOpen} onOpenChange={setProviderOpen}>
@@ -54,6 +85,7 @@ export function PromptWorkspace({
 									>
 										{provider.icon}
 										{provider.label}
+										<ChevronsUpDown size={10} className="text-text-placeholder" />
 									</button>
 								</PopoverTrigger>
 								<PopoverContent
@@ -90,6 +122,29 @@ export function PromptWorkspace({
 							</button>
 						</div>
 					</div>
+				{isRunning ? (
+					<div className="flex items-center gap-3 mt-3">
+						<button
+							type="button"
+							className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-text-muted hover:text-text transition-colors"
+						>
+							<Terminal size={12} />
+							Open Terminal
+						</button>
+						<button
+							type="button"
+							className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-text-muted hover:text-text transition-colors"
+						>
+							<Laptop size={12} />
+							Open Desktop
+						</button>
+					</div>
+				) : (
+					<div className="flex items-center gap-2 mt-3 px-2 py-1 text-[11px] text-text-muted">
+						<TerminalLoader className="text-text-muted" />
+						<span>{statusMessage(status)}</span>
+					</div>
+				)}
 				</div>
 		</div>
 	);
