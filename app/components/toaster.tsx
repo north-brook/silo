@@ -154,7 +154,7 @@ export function Toaster() {
 			{toasts.map(({ id, title, description, action, variant = "default", ...props }, index) => (
 				<ToastPrimitive.Root
 					key={id}
-					duration={4000}
+					duration={2000}
 					className={cn(
 						"group pointer-events-auto absolute bottom-0 right-0 flex w-full items-center gap-3 overflow-hidden rounded-lg border p-3 font-mono shadow-lg",
 						"data-[state=open]:toast-enter data-[state=closed]:toast-exit",
@@ -187,7 +187,7 @@ export function Toaster() {
 					</ToastPrimitive.Close>
 				</ToastPrimitive.Root>
 			))}
-			<ToastPrimitive.Viewport className="fixed bottom-8 right-3 z-[100] flex max-h-screen w-full max-w-sm" />
+			<ToastPrimitive.Viewport className="fixed bottom-3 right-3 z-[100] flex max-h-screen w-64" />
 		</ToastPrimitive.Provider>
 	);
 }
