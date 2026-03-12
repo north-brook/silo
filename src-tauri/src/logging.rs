@@ -3,7 +3,9 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{plugin::TauriPlugin, Runtime};
-use tauri_plugin_log::{Builder, RotationStrategy, Target, TargetKind, TimezoneStrategy, WEBVIEW_TARGET};
+use tauri_plugin_log::{
+    Builder, RotationStrategy, Target, TargetKind, TimezoneStrategy, WEBVIEW_TARGET,
+};
 use time::{format_description::FormatItem, macros::format_description, OffsetDateTime};
 
 const SESSION_FILE_STEM_FORMAT: &[FormatItem<'static>] =
@@ -105,7 +107,10 @@ mod tests {
         let session = create_session_log_for_home_dir(home_dir.clone())
             .expect("session log should be created");
         assert!(session.directory.ends_with(".silo/logs"));
-        assert_eq!(session.path, session.directory.join(format!("{}.log", session.file_stem)));
+        assert_eq!(
+            session.path,
+            session.directory.join(format!("{}.log", session.file_stem))
+        );
         assert!(!session.file_stem.contains(':'));
 
         let _ = fs::remove_dir_all(home_dir);
