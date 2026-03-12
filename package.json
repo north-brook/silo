@@ -7,7 +7,9 @@
     "dev": "next dev --port 3000",
     "build": "next build",
     "start": "next start --port 3000",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "check": "bun x @biomejs/biome check .",
+    "check:fix": "bun x @biomejs/biome check --write ."
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",
