@@ -7,6 +7,7 @@ mod logging;
 mod projects;
 mod river_names;
 mod system;
+mod templates;
 mod workspaces;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -54,6 +55,11 @@ pub fn run() {
             projects::projects_add_project,
             projects::projects_update_project,
             projects::projects_reorder_projects,
+            templates::templates_list_templates,
+            templates::templates_create_template,
+            templates::templates_edit_template,
+            templates::templates_save_template,
+            templates::templates_delete_template,
             workspaces::workspaces_list_workspaces,
             workspaces::workspaces_create_workspace,
             workspaces::workspaces_start_workspace,
