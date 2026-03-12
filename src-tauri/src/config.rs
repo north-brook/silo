@@ -2,7 +2,7 @@
 
 use crate::codex::detect_codex_token;
 use indexmap::IndexMap;
-use log::{debug, info};
+use log::{info, trace};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fmt;
@@ -142,19 +142,19 @@ impl ConfigStore {
 
     pub(crate) fn initialize_defaults_if_missing(&self) -> Result<(), ConfigError> {
         let _guard = CONFIG_LOCK.lock().map_err(|_| ConfigError::LockPoisoned)?;
-        debug!("ensuring config exists at {}", self.config_path.display());
+        trace!("ensuring config exists at {}", self.config_path.display());
         self.initialize_defaults_if_missing_locked(|home_dir| detect_initial_config(home_dir))
     }
 
     pub(crate) fn load(&self) -> Result<SiloConfig, ConfigError> {
         let _guard = CONFIG_LOCK.lock().map_err(|_| ConfigError::LockPoisoned)?;
-        debug!("loading config from {}", self.config_path.display());
+        trace!("loading config from {}", self.config_path.display());
         self.load_locked()
     }
 
     pub(crate) fn read(&self, path: &str) -> Result<Value, ConfigError> {
         let _guard = CONFIG_LOCK.lock().map_err(|_| ConfigError::LockPoisoned)?;
-        debug!("reading config path {path}");
+        trace!("reading config path {path}");
         let config = self.load_locked()?;
         let value = config_to_value(&config)?;
         let segments = parse_path(path)?;
@@ -164,7 +164,7 @@ impl ConfigStore {
 
     pub(crate) fn write(&self, path: &str, value: Value) -> Result<(), ConfigError> {
         let _guard = CONFIG_LOCK.lock().map_err(|_| ConfigError::LockPoisoned)?;
-        debug!("writing config path {path}");
+        trace!("writing config path {path}");
         let config = self.load_locked()?;
         let mut root = config_to_value(&config)?;
         let segments = parse_path(path)?;
@@ -180,7 +180,7 @@ impl ConfigStore {
 
     pub(crate) fn save(&self, config: &SiloConfig) -> Result<(), ConfigError> {
         let _guard = CONFIG_LOCK.lock().map_err(|_| ConfigError::LockPoisoned)?;
-        debug!("saving config to {}", self.config_path.display());
+        trace!("saving config to {}", self.config_path.display());
         self.save_locked(config)
     }
 

@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Workspace {
@@ -46,38 +47,23 @@ struct WorkspaceLookup {
 }
 
 #[tauri::command]
-pub async fn workspaces_list_workspaces(project: String) -> Result<Vec<Workspace>, String> {
-    log::info!("listing workspaces for project {project}");
+pub async fn workspaces_list_workspaces() -> Result<Vec<Workspace>, String> {
+    log::info!("listing workspaces across configured gcloud projects");
     let config = ConfigStore::new()
         .and_then(|store| store.load())
         .map_err(|error| error.to_string())?;
-    let gcloud = resolve_project_gcloud_config(&config, &project)?;
-    let expected_project_label = sanitize_label_value(&project);
+    let candidates = candidate_gcloud_configs(&config);
 
-    let result = run_gcloud(
-        &gcloud.account,
-        &gcloud.project,
-        [
-            "compute".to_string(),
-            "instances".to_string(),
-            "list".to_string(),
-            "--format=json(name,zone,status,labels,creationTimestamp)".to_string(),
-        ],
-    )
-    .await?;
-
-    if !result.success {
-        return Err(gcloud_error("failed to list workspaces", &result.stderr));
+    if candidates.is_empty() {
+        return Err("gcloud account and project must be configured".to_string());
     }
 
-    let mut workspaces = parse_workspaces(&result.stdout)?
-        .into_iter()
-        .filter(|workspace| {
-            workspace.project.as_deref() == Some(expected_project_label.as_str())
-        })
-        .collect::<Vec<_>>();
+    let mut workspaces = Vec::new();
+    for gcloud in candidates {
+        workspaces.extend(list_workspaces_in_project(&gcloud.account, &gcloud.project).await?);
+    }
     workspaces.sort_by(compare_workspaces_by_last_active_desc);
-    log::info!("listed {} workspaces for project {project}", workspaces.len());
+    log::info!("listed {} workspaces", workspaces.len());
 
     Ok(workspaces)
 }
@@ -102,8 +88,18 @@ pub async fn workspaces_create_workspace(project: String) -> Result<Workspace, S
         return Err(gcloud_error("failed to create workspace", &result.stderr));
     }
 
-    log::info!("workspace {workspace_name} created for project {project}");
-    describe_workspace_in_project(&workspace_name, &gcloud.account, &gcloud.project).await
+    log::info!("workspace {workspace_name} creation started for project {project}");
+    match describe_workspace_in_project(&workspace_name, &gcloud.account, &gcloud.project).await {
+        Ok(workspace) => Ok(workspace),
+        Err(error) => {
+            log::warn!(
+                "workspace {} creation started but instance is not yet visible: {}",
+                workspace_name,
+                error
+            );
+            Ok(pending_workspace(&workspace_name, &project, &gcloud.zone))
+        }
+    }
 }
 
 #[tauri::command]
@@ -160,7 +156,7 @@ pub async fn workspaces_stop_workspace(workspace: String) -> Result<(), String> 
 
 #[tauri::command]
 pub async fn workspaces_get_workspace(workspace: String) -> Result<Workspace, String> {
-    log::debug!("getting workspace {workspace}");
+    log::trace!("getting workspace {workspace}");
     Ok(find_workspace(&workspace).await?.workspace)
 }
 
@@ -228,24 +224,8 @@ async fn find_workspace_in_project(
     account: &str,
     project: &str,
 ) -> Result<Option<Workspace>, String> {
-    let result = run_gcloud(
-        account,
-        project,
-        [
-            "compute".to_string(),
-            "instances".to_string(),
-            "list".to_string(),
-            format!("--filter=name={name}"),
-            "--format=json(name,zone,status,labels,creationTimestamp)".to_string(),
-        ],
-    )
-    .await?;
-
-    if !result.success {
-        return Err(gcloud_error("failed to look up workspace", &result.stderr));
-    }
-
-    let mut workspaces = parse_workspaces(&result.stdout)?
+    let mut workspaces = list_workspaces_in_project(account, project)
+        .await?
         .into_iter()
         .filter(|workspace| workspace.name == name)
         .collect::<Vec<_>>();
@@ -256,6 +236,43 @@ async fn find_workspace_in_project(
     }
 
     Ok(workspaces.pop())
+}
+
+async fn list_workspaces_in_project(account: &str, project: &str) -> Result<Vec<Workspace>, String> {
+    let result = run_gcloud(
+        account,
+        project,
+        [
+            "compute".to_string(),
+            "instances".to_string(),
+            "list".to_string(),
+            "--format=json(name,zone,status,labels,creationTimestamp)".to_string(),
+        ],
+    )
+    .await?;
+
+    if !result.success {
+        return Err(gcloud_error("failed to list workspaces", &result.stderr));
+    }
+
+    parse_workspaces(&result.stdout)
+}
+
+fn pending_workspace(name: &str, project_label: &str, zone: &str) -> Workspace {
+    let created_at = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+
+    Workspace {
+        name: name.to_string(),
+        project: Some(sanitize_label_value(project_label)),
+        branch: None,
+        working: None,
+        last_active: None,
+        created_at,
+        status: "PROVISIONING".to_string(),
+        zone: zone.to_string(),
+    }
 }
 
 async fn describe_workspace_in_project(
@@ -397,6 +414,7 @@ fn create_workspace_args(
         format!("--image-family={}", gcloud.image_family),
         format!("--image-project={}", gcloud.image_project),
         format!("--labels=project={}", sanitize_label_value(project_label)),
+        "--async".to_string(),
     ];
 
     if gcloud.service_account.trim().is_empty() {
@@ -433,12 +451,21 @@ where
             .args(&args)
             .output()
             .map_err(|error| format!("failed to execute gcloud: {error}"))?;
-        log::debug!(
-            "workspace gcloud command completed success={} duration_ms={} project={} args={command_line}",
-            output.status.success(),
-            started.elapsed().as_millis(),
-            project
-        );
+        if output.status.success() {
+            log::trace!(
+                "workspace gcloud command completed duration_ms={} project={} args={command_line}",
+                started.elapsed().as_millis(),
+                project
+            );
+        } else {
+            log::warn!(
+                "workspace gcloud command failed duration_ms={} project={} args={} stderr={}",
+                started.elapsed().as_millis(),
+                project,
+                command_line,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
 
         Ok(CommandResult {
             success: output.status.success(),
@@ -776,6 +803,7 @@ mod tests {
         assert!(args.contains(&"--boot-disk-type=pd-ssd".to_string()));
         assert!(args.contains(&"--image-family=ubuntu-2404-lts-amd64".to_string()));
         assert!(args.contains(&"--image-project=ubuntu-os-cloud".to_string()));
+        assert!(args.contains(&"--async".to_string()));
         assert!(args.contains(
             &"--service-account=silo-workspaces@proj.iam.gserviceaccount.com".to_string()
         ));
@@ -802,6 +830,7 @@ mod tests {
 
         let args = create_workspace_args("ws-demo-abc", "Demo Project", &gcloud);
 
+        assert!(args.contains(&"--async".to_string()));
         assert!(args.contains(&"--no-service-account".to_string()));
         assert!(args.contains(&"--no-scopes".to_string()));
     }

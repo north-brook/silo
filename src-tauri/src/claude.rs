@@ -40,7 +40,7 @@ pub async fn claude_authenticate() -> Result<(), String> {
 
 #[tauri::command]
 pub async fn claude_configured() -> bool {
-    log::debug!("checking whether claude is configured");
+    log::trace!("checking whether claude is configured");
     ConfigStore::new()
         .and_then(|store| store.load())
         .map(|config| !config.claude.token.trim().is_empty())

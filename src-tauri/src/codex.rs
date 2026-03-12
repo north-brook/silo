@@ -49,7 +49,7 @@ pub async fn codex_authenticate() -> Result<(), String> {
 
 #[tauri::command]
 pub async fn codex_configured() -> bool {
-    log::debug!("checking whether codex is configured");
+    log::trace!("checking whether codex is configured");
     ConfigStore::new()
         .and_then(|store| store.load())
         .map(|config| !config.codex.token.trim().is_empty())

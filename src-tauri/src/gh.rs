@@ -18,11 +18,12 @@ where
     tauri::async_runtime::spawn_blocking(move || {
         let started = Instant::now();
         let output = Command::new("gh").args(&args).output().ok()?;
-        log::debug!(
-            "gh command completed success={} duration_ms={} args={command_line}",
-            output.status.success(),
-            started.elapsed().as_millis()
-        );
+        if output.status.success() {
+            log::trace!(
+                "gh command completed duration_ms={} args={command_line}",
+                started.elapsed().as_millis()
+            );
+        }
 
         Some(CommandResult {
             success: output.status.success(),
@@ -36,7 +37,7 @@ where
 
 #[tauri::command]
 pub async fn gh_installed() -> bool {
-    log::debug!("checking whether gh is installed");
+    log::trace!("checking whether gh is installed");
     run_gh(["--version"])
         .await
         .map(|result| result.success)
@@ -45,7 +46,7 @@ pub async fn gh_installed() -> bool {
 
 #[tauri::command]
 pub async fn gh_configured() -> bool {
-    log::debug!("checking whether gh is configured");
+    log::trace!("checking whether gh is configured");
     ConfigStore::new()
         .and_then(|store| store.load())
         .map(|config| !config.gh.username.trim().is_empty() && !config.gh.token.trim().is_empty())
@@ -54,7 +55,7 @@ pub async fn gh_configured() -> bool {
 
 #[tauri::command]
 pub async fn gh_username() -> String {
-    log::debug!("reading gh username");
+    log::trace!("reading gh username");
     run_gh(["api", "user", "--jq", ".login"])
         .await
         .filter(|result| result.success)

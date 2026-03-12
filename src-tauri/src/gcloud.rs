@@ -25,11 +25,19 @@ where
     tauri::async_runtime::spawn_blocking(move || {
         let started = Instant::now();
         let output = Command::new("gcloud").args(&args).output().ok()?;
-        log::debug!(
-            "gcloud command completed success={} duration_ms={} args={command_line}",
-            output.status.success(),
-            started.elapsed().as_millis()
-        );
+        if output.status.success() {
+            log::trace!(
+                "gcloud command completed duration_ms={} args={command_line}",
+                started.elapsed().as_millis()
+            );
+        } else {
+            log::warn!(
+                "gcloud command failed duration_ms={} args={} stderr={}",
+                started.elapsed().as_millis(),
+                command_line,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
 
         Some(CommandResult {
             success: output.status.success(),
@@ -359,7 +367,7 @@ fn save_gcloud_identity(
 
 #[tauri::command]
 pub async fn gcloud_installed() -> bool {
-    log::debug!("checking whether gcloud is installed");
+    log::trace!("checking whether gcloud is installed");
     run_gcloud(["version"])
         .await
         .map(|result| result.success)
@@ -434,7 +442,7 @@ pub fn gcloud_configure(account: String, project: String) -> Result<(), String> 
 
 #[tauri::command]
 pub async fn gcloud_configured() -> bool {
-    log::debug!("checking whether gcloud is configured");
+    log::trace!("checking whether gcloud is configured");
     let Ok(config) = ConfigStore::new().and_then(|store| store.load()) else {
         return false;
     };
@@ -454,7 +462,7 @@ pub async fn gcloud_configured() -> bool {
 
 #[tauri::command]
 pub async fn gcloud_accounts() -> Vec<String> {
-    log::debug!("listing gcloud accounts");
+    log::trace!("listing gcloud accounts");
     if let Ok(config) = ConfigStore::new().and_then(|store| store.load()) {
         if let Some(service_account) = configured_service_account(&config.gcloud) {
             return vec![service_account.to_string()];
@@ -483,7 +491,7 @@ pub async fn gcloud_accounts() -> Vec<String> {
 
 #[tauri::command]
 pub async fn gcloud_projects(account: String) -> Vec<String> {
-    log::debug!("listing gcloud projects");
+    log::trace!("listing gcloud projects");
     let configured_service_account =
         ConfigStore::new()
             .and_then(|store| store.load())
