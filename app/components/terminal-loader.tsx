@@ -12,5 +12,5 @@ export function TerminalLoader({ className }: { className?: string }) {
 		return () => clearInterval(id);
 	}, []);
 
-	return <span className={`shrink-0 ${className ?? "text-accent"}`}>{FRAMES[frame]}</span>;
+	return <span className={`shrink-0 leading-none ${className ?? "text-accent"}`}>{FRAMES[frame]}</span>;
 }
