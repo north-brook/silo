@@ -5,6 +5,7 @@ mod gcloud;
 mod gh;
 mod logging;
 mod projects;
+mod river_names;
 mod system;
 mod workspaces;
 
@@ -23,7 +24,10 @@ pub fn run() {
             }
 
             if let Some(session_log) = &session_log {
-                log::info!("session logging initialized at {}", session_log.path.display());
+                log::info!(
+                    "session logging initialized at {}",
+                    session_log.path.display()
+                );
             } else {
                 log::warn!("session file logging is unavailable; using stdout only");
             }
@@ -39,6 +43,7 @@ pub fn run() {
             gh::gh_installed,
             gh::gh_configured,
             gh::gh_username,
+            gh::gh_project_branches,
             gcloud::gcloud_authenticate,
             gcloud::gcloud_configure,
             gcloud::gcloud_installed,
@@ -55,6 +60,8 @@ pub fn run() {
             workspaces::workspaces_stop_workspace,
             workspaces::workspaces_get_workspace,
             workspaces::workspaces_delete_workspace,
+            workspaces::workspaces_update_workspace_branch,
+            workspaces::workspaces_update_workspace_target_branch,
             system::system_memory_usage
         ])
         .run(tauri::generate_context!())
