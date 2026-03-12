@@ -110,6 +110,7 @@ pub(crate) struct ProjectConfig {
     pub(crate) name: String,
     pub(crate) path: String,
     pub(crate) image: Option<String>,
+    pub(crate) target_branch: String,
     pub(crate) gcloud: ProjectGcloudConfig,
 }
 
@@ -406,8 +407,10 @@ fn serialize_config(config: &SiloConfig) -> Result<String, ConfigError> {
 
 fn detect_initial_config(home_dir: &Path) -> SiloConfig {
     let mut gcloud = GcloudConfig::default();
-    gcloud.account = command_output("gcloud", ["config", "get-value", "account"]).unwrap_or_default();
-    gcloud.project = command_output("gcloud", ["config", "get-value", "project"]).unwrap_or_default();
+    gcloud.account =
+        command_output("gcloud", ["config", "get-value", "account"]).unwrap_or_default();
+    gcloud.project =
+        command_output("gcloud", ["config", "get-value", "project"]).unwrap_or_default();
     if gcloud.account.ends_with(".gserviceaccount.com") {
         gcloud.service_account = gcloud.account.clone();
     }
@@ -694,6 +697,7 @@ mod tests {
                 name: "Demo".to_string(),
                 path: "/tmp/demo".to_string(),
                 image: None,
+                target_branch: String::new(),
                 gcloud: ProjectGcloudConfig::default(),
             })
         );
