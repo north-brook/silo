@@ -7,10 +7,7 @@ pub fn system_memory_usage() -> f64 {
     let mut sys = System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
 
-    let bytes = sys
-        .process(pid)
-        .map(|p| p.memory())
-        .unwrap_or(0);
+    let bytes = sys.process(pid).map(|p| p.memory()).unwrap_or(0);
 
     let mb = (bytes as f64) / 1_048_576.0;
     let rounded = (mb * 10.0).round() / 10.0;
