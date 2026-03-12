@@ -4,21 +4,89 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::process::{Command, Stdio};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct Workspace {
-    name: String,
-    project: Option<String>,
+#[serde(untagged)]
+pub enum Workspace {
+    Branch(BranchWorkspace),
+    Template(TemplateWorkspace),
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BranchWorkspace {
+    #[serde(flatten)]
+    base: WorkspaceBase,
     branch: String,
     target_branch: String,
     unread: bool,
     working: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TemplateWorkspace {
+    #[serde(flatten)]
+    base: WorkspaceBase,
+    template: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct WorkspaceBase {
+    name: String,
+    project: Option<String>,
     last_active: Option<String>,
     created_at: String,
     status: String,
     zone: String,
+}
+
+impl Workspace {
+    fn branch(
+        base: WorkspaceBase,
+        branch: String,
+        target_branch: String,
+        unread: bool,
+        working: Option<bool>,
+    ) -> Self {
+        Self::Branch(BranchWorkspace {
+            base,
+            branch,
+            target_branch,
+            unread,
+            working,
+        })
+    }
+
+    fn template(base: WorkspaceBase) -> Self {
+        Self::Template(TemplateWorkspace {
+            base,
+            template: true,
+        })
+    }
+
+    fn base(&self) -> &WorkspaceBase {
+        match self {
+            Self::Branch(workspace) => &workspace.base,
+            Self::Template(workspace) => &workspace.base,
+        }
+    }
+
+    fn is_template(&self) -> bool {
+        matches!(self, Self::Template(_))
+    }
+
+    fn last_active(&self) -> Option<&str> {
+        self.base().last_active.as_deref()
+    }
+
+    fn name(&self) -> &str {
+        &self.base().name
+    }
+
+    fn zone(&self) -> &str {
+        &self.base().zone
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,8 +150,8 @@ pub async fn workspaces_create_workspace(project: String) -> Result<Workspace, S
         .get(&project)
         .ok_or_else(|| format!("project not found: {project}"))?;
     let gcloud = resolve_project_gcloud_config(&config, &project)?;
-    let workspace_name = generate_workspace_name(&project);
-    let branch_name = default_workspace_branch();
+    let (workspace_name, branch_name) =
+        reserve_branch_workspace_identity(&project, &gcloud.account, &gcloud.project).await?;
 
     let result = run_gcloud(
         &gcloud.account,
@@ -135,7 +203,7 @@ pub async fn workspaces_start_workspace(workspace: String) -> Result<(), String>
             "instances".to_string(),
             "start".to_string(),
             workspace,
-            format!("--zone={}", lookup.workspace.zone),
+            format!("--zone={}", lookup.workspace.zone()),
         ],
     )
     .await?;
@@ -144,7 +212,7 @@ pub async fn workspaces_start_workspace(workspace: String) -> Result<(), String>
         return Err(gcloud_error("failed to start workspace", &result.stderr));
     }
 
-    log::info!("workspace {} started", lookup.workspace.name);
+    log::info!("workspace {} started", lookup.workspace.name());
     Ok(())
 }
 
@@ -156,7 +224,7 @@ pub async fn workspaces_stop_workspace(workspace: String) -> Result<(), String> 
     let result = run_gcloud(
         &lookup.account,
         &lookup.gcloud_project,
-        stop_workspace_args(&workspace, &lookup.workspace.zone),
+        stop_workspace_args(&workspace, lookup.workspace.zone()),
     )
     .await?;
 
@@ -164,7 +232,7 @@ pub async fn workspaces_stop_workspace(workspace: String) -> Result<(), String> 
         return Err(gcloud_error("failed to stop workspace", &result.stderr));
     }
 
-    log::info!("workspace {} stop initiated", lookup.workspace.name);
+    log::info!("workspace {} stop initiated", lookup.workspace.name());
     Ok(())
 }
 
@@ -182,11 +250,11 @@ pub async fn workspaces_delete_workspace(workspace: String) -> Result<(), String
     run_gcloud_detached(
         &lookup.account,
         &lookup.gcloud_project,
-        delete_workspace_args(&workspace, &lookup.workspace.zone),
+        delete_workspace_args(&workspace, lookup.workspace.zone()),
     )
     .await?;
 
-    log::info!("workspace {} delete initiated", lookup.workspace.name);
+    log::info!("workspace {} delete initiated", lookup.workspace.name());
     Ok(())
 }
 
@@ -196,7 +264,15 @@ pub async fn workspaces_update_workspace_branch(
     branch: String,
 ) -> Result<(), String> {
     log::info!("updating branch label for workspace {workspace}");
-    update_workspace_label(&workspace, "branch", &branch).await
+    let lookup = find_workspace(&workspace).await?;
+    if lookup.workspace.is_template() {
+        return Err(format!(
+            "template workspace {} does not have a branch",
+            workspace
+        ));
+    }
+
+    update_workspace_label_in_lookup(lookup, "branch", &branch).await
 }
 
 #[tauri::command]
@@ -205,7 +281,15 @@ pub async fn workspaces_update_workspace_target_branch(
     target_branch: String,
 ) -> Result<(), String> {
     log::info!("updating target branch label for workspace {workspace}");
-    update_workspace_label(&workspace, "target_branch", &target_branch).await
+    let lookup = find_workspace(&workspace).await?;
+    if lookup.workspace.is_template() {
+        return Err(format!(
+            "template workspace {} does not have a target branch",
+            workspace
+        ));
+    }
+
+    update_workspace_label_in_lookup(lookup, "target_branch", &target_branch).await
 }
 
 async fn find_workspace(name: &str) -> Result<WorkspaceLookup, String> {
@@ -240,8 +324,11 @@ async fn find_workspace(name: &str) -> Result<WorkspaceLookup, String> {
     }
 }
 
-async fn update_workspace_label(workspace: &str, label: &str, value: &str) -> Result<(), String> {
-    let lookup = find_workspace(workspace).await?;
+async fn update_workspace_label_in_lookup(
+    lookup: WorkspaceLookup,
+    label: &str,
+    value: &str,
+) -> Result<(), String> {
     let result = run_gcloud(
         &lookup.account,
         &lookup.gcloud_project,
@@ -253,7 +340,8 @@ async fn update_workspace_label(workspace: &str, label: &str, value: &str) -> Re
         return Err(gcloud_error(
             &format!(
                 "failed to update {} label for workspace {}",
-                label, lookup.workspace.name
+                label,
+                lookup.workspace.name()
             ),
             &result.stderr,
         ));
@@ -262,7 +350,7 @@ async fn update_workspace_label(workspace: &str, label: &str, value: &str) -> Re
     log::info!(
         "updated {} label for workspace {}",
         label,
-        lookup.workspace.name
+        lookup.workspace.name()
     );
     Ok(())
 }
@@ -275,7 +363,7 @@ async fn find_workspace_in_project(
     let mut workspaces = list_workspaces_in_project(account, project)
         .await?
         .into_iter()
-        .filter(|workspace| workspace.name == name)
+        .filter(|workspace| workspace.name() == name)
         .collect::<Vec<_>>();
     if workspaces.len() > 1 {
         return Err(format!(
@@ -320,18 +408,20 @@ fn pending_workspace(
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
 
-    Workspace {
-        name: name.to_string(),
-        project: Some(sanitize_label_value(project_label)),
-        branch: branch_label.to_string(),
-        target_branch: target_branch.to_string(),
-        unread: false,
-        working: None,
-        last_active: None,
-        created_at,
-        status: "PROVISIONING".to_string(),
-        zone: zone.to_string(),
-    }
+    Workspace::branch(
+        WorkspaceBase {
+            name: name.to_string(),
+            project: Some(sanitize_label_value(project_label)),
+            last_active: None,
+            created_at,
+            status: "PROVISIONING".to_string(),
+            zone: zone.to_string(),
+        },
+        branch_label.to_string(),
+        target_branch.to_string(),
+        false,
+        None,
+    )
 }
 
 async fn describe_workspace_in_project(
@@ -506,8 +596,8 @@ fn update_workspace_label_args(workspace: &Workspace, label: &str, value: &str) 
             "compute".to_string(),
             "instances".to_string(),
             "remove-labels".to_string(),
-            workspace.name.clone(),
-            format!("--zone={}", workspace.zone),
+            workspace.name().to_string(),
+            format!("--zone={}", workspace.zone()),
             format!("--labels={label}"),
         ]
     } else {
@@ -515,8 +605,8 @@ fn update_workspace_label_args(workspace: &Workspace, label: &str, value: &str) 
             "compute".to_string(),
             "instances".to_string(),
             "add-labels".to_string(),
-            workspace.name.clone(),
-            format!("--zone={}", workspace.zone),
+            workspace.name().to_string(),
+            format!("--zone={}", workspace.zone()),
             format!("--labels={label}={sanitized_value}"),
         ]
     }
@@ -542,21 +632,6 @@ fn delete_workspace_args(workspace_name: &str, zone: &str) -> Vec<String> {
         format!("--zone={zone}"),
         "--quiet".to_string(),
     ]
-}
-
-fn default_workspace_branch() -> String {
-    if DEFAULT_RIVER_NAMES.is_empty() {
-        return "silo/workspace".to_string();
-    }
-
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    format!(
-        "silo/{}",
-        DEFAULT_RIVER_NAMES[nanos as usize % DEFAULT_RIVER_NAMES.len()]
-    )
 }
 
 async fn run_gcloud<I, S>(account: &str, project: &str, args: I) -> Result<CommandResult, String>
@@ -667,49 +742,64 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    let template = labels
+        .get("template")
+        .and_then(Value::as_str)
+        .map(|value| parse_bool_label("template", value))
+        .transpose()?
+        .unwrap_or(false);
 
     let project = labels
         .get("project")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let branch = labels
-        .get("branch")
-        .and_then(Value::as_str)
-        .map(parse_branch_label)
-        .unwrap_or_default();
-    let target_branch = labels
-        .get("target_branch")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_default();
-    let unread = labels
-        .get("unread")
-        .and_then(Value::as_str)
-        .map(|value| parse_bool_label("unread", value))
-        .transpose()?
-        .unwrap_or(false);
-    let working = labels
-        .get("working")
-        .and_then(Value::as_str)
-        .map(|value| parse_bool_label("working", value))
-        .transpose()?;
     let last_active = labels
         .get("last_active")
         .and_then(Value::as_str)
         .map(str::to_owned);
 
-    Ok(Workspace {
+    let base = WorkspaceBase {
         name,
         project,
-        branch,
-        target_branch,
-        unread,
-        working,
         last_active,
         created_at,
         status,
         zone,
-    })
+    };
+
+    if template {
+        Ok(Workspace::template(base))
+    } else {
+        let branch = labels
+            .get("branch")
+            .and_then(Value::as_str)
+            .map(parse_branch_label)
+            .unwrap_or_default();
+        let target_branch = labels
+            .get("target_branch")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_default();
+        let unread = labels
+            .get("unread")
+            .and_then(Value::as_str)
+            .map(|value| parse_bool_label("unread", value))
+            .transpose()?
+            .unwrap_or(false);
+        let working = labels
+            .get("working")
+            .and_then(Value::as_str)
+            .map(|value| parse_bool_label("working", value))
+            .transpose()?;
+
+        Ok(Workspace::branch(
+            base,
+            branch,
+            target_branch,
+            unread,
+            working,
+        ))
+    }
 }
 
 fn parse_branch_label(value: &str) -> String {
@@ -752,30 +842,81 @@ fn compare_workspaces_by_last_active_desc(
     left: &Workspace,
     right: &Workspace,
 ) -> std::cmp::Ordering {
-    match (&left.last_active, &right.last_active) {
+    match (left.last_active(), right.last_active()) {
         (Some(left_last_active), Some(right_last_active)) => right_last_active
             .cmp(left_last_active)
-            .then_with(|| left.name.cmp(&right.name)),
+            .then_with(|| left.name().cmp(right.name())),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => left.name.cmp(&right.name),
+        (None, None) => left.name().cmp(right.name()),
     }
 }
 
-fn generate_workspace_name(project: &str) -> String {
-    let normalized = normalize_instance_component(project);
-    let suffix = unique_suffix();
-    let max_project_len = 63usize.saturating_sub("ws--".len() + suffix.len());
-    let truncated_project = truncate_to_boundary(&normalized, max_project_len);
-    format!("ws-{truncated_project}-{suffix}")
+async fn reserve_branch_workspace_identity(
+    project: &str,
+    account: &str,
+    gcloud_project: &str,
+) -> Result<(String, String), String> {
+    let existing = list_workspaces_in_project(account, gcloud_project).await?;
+    let used_names = existing
+        .iter()
+        .map(|workspace| workspace.name().to_string())
+        .collect::<HashSet<_>>();
+
+    for river in DEFAULT_RIVER_NAMES {
+        let branch = format!("silo/{river}");
+        let workspace_name = generate_branch_workspace_name(project, &branch);
+        if !used_names.contains(&workspace_name) {
+            return Ok((workspace_name, branch));
+        }
+    }
+
+    Err(format!(
+        "no available river names remain for project {}",
+        project
+    ))
 }
 
-fn unique_suffix() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    format!("{:x}", nanos)
+fn generate_branch_workspace_name(project: &str, branch: &str) -> String {
+    let suffix = branch_workspace_name_suffix(branch);
+    generate_project_workspace_name(project, &suffix)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn generate_template_workspace_name(project: &str) -> String {
+    generate_project_workspace_name(project, "template")
+}
+
+fn generate_project_workspace_name(project: &str, suffix: &str) -> String {
+    let infix = "-silo-";
+    let normalized_project = normalize_instance_component(project);
+    let normalized_suffix = normalize_instance_component(suffix);
+    let max_total_len = 63usize;
+    let reserved_len = infix.len();
+    let max_project_len = max_total_len
+        .saturating_sub(reserved_len + normalized_suffix.len())
+        .max(1);
+    let truncated_project = truncate_to_boundary(&normalized_project, max_project_len);
+
+    let remaining_suffix_len = max_total_len
+        .saturating_sub(truncated_project.len() + reserved_len)
+        .max(1);
+    let truncated_suffix = truncate_to_boundary(&normalized_suffix, remaining_suffix_len);
+
+    format!("{truncated_project}{infix}{truncated_suffix}")
+}
+
+fn branch_workspace_name_suffix(branch: &str) -> String {
+    let trimmed = branch.trim();
+
+    if let Some(river) = trimmed.strip_prefix("silo/") {
+        return river.to_string();
+    }
+    if let Some(river) = trimmed.strip_prefix("silo-") {
+        return river.to_string();
+    }
+
+    trimmed.to_string()
 }
 
 fn normalize_instance_component(value: &str) -> String {
@@ -877,6 +1018,27 @@ mod tests {
     use crate::config::{GcloudConfig, ProjectGcloudConfig, DEFAULT_GCLOUD_DISK_SIZE_GB};
     use indexmap::IndexMap;
     use serde_json::json;
+
+    fn test_workspace_base(name: &str, last_active: Option<&str>) -> WorkspaceBase {
+        WorkspaceBase {
+            name: name.to_string(),
+            project: Some("demo".to_string()),
+            last_active: last_active.map(str::to_string),
+            created_at: "2026-03-11T10:00:00Z".to_string(),
+            status: "RUNNING".to_string(),
+            zone: "us-east1-b".to_string(),
+        }
+    }
+
+    fn test_branch_workspace(name: &str, last_active: Option<&str>) -> Workspace {
+        Workspace::branch(
+            test_workspace_base(name, last_active),
+            "silo/aare".to_string(),
+            String::new(),
+            false,
+            None,
+        )
+    }
 
     #[test]
     fn resolve_gcloud_config_applies_project_overrides() {
@@ -1046,30 +1208,23 @@ mod tests {
     }
 
     #[test]
-    fn default_workspace_branch_uses_ported_river_names() {
-        let branch = default_workspace_branch();
+    fn generate_branch_workspace_name_uses_project_and_river() {
+        let name = generate_branch_workspace_name("Lenny", "silo/nile");
 
-        let river = branch
-            .strip_prefix("silo/")
-            .expect("default branch should use silo/ prefix");
-        assert!(DEFAULT_RIVER_NAMES.contains(&river));
+        assert_eq!(name, "lenny-silo-nile");
+    }
+
+    #[test]
+    fn generate_template_workspace_name_uses_template_suffix() {
+        let name = generate_template_workspace_name("Lenny");
+
+        assert_eq!(name, "lenny-silo-template");
     }
 
     #[test]
     fn update_workspace_label_args_adds_label_when_value_present() {
         let args = update_workspace_label_args(
-            &Workspace {
-                name: "ws-demo-123".to_string(),
-                project: Some("demo".to_string()),
-                branch: "silo/aare".to_string(),
-                target_branch: String::new(),
-                unread: false,
-                working: None,
-                last_active: None,
-                created_at: "2026-03-11T10:00:00Z".to_string(),
-                status: "RUNNING".to_string(),
-                zone: "us-east1-b".to_string(),
-            },
+            &test_branch_workspace("ws-demo-123", None),
             "target_branch",
             "Feature/Inbox",
         );
@@ -1089,22 +1244,8 @@ mod tests {
 
     #[test]
     fn update_workspace_label_args_removes_label_when_value_empty() {
-        let args = update_workspace_label_args(
-            &Workspace {
-                name: "ws-demo-123".to_string(),
-                project: Some("demo".to_string()),
-                branch: "silo/aare".to_string(),
-                target_branch: String::new(),
-                unread: false,
-                working: None,
-                last_active: None,
-                created_at: "2026-03-11T10:00:00Z".to_string(),
-                status: "RUNNING".to_string(),
-                zone: "us-east1-b".to_string(),
-            },
-            "branch",
-            "",
-        );
+        let args =
+            update_workspace_label_args(&test_branch_workspace("ws-demo-123", None), "branch", "");
 
         assert_eq!(
             args,
@@ -1171,18 +1312,22 @@ mod tests {
         }))
         .expect("workspace should parse");
 
-        assert_eq!(workspace.name, "ws-demo-123");
-        assert_eq!(workspace.project.as_deref(), Some("demo"));
+        let Workspace::Branch(workspace) = workspace else {
+            panic!("workspace should parse as a branch workspace");
+        };
+
+        assert_eq!(workspace.base.name, "ws-demo-123");
+        assert_eq!(workspace.base.project.as_deref(), Some("demo"));
         assert_eq!(workspace.branch, "silo/aare");
         assert_eq!(workspace.target_branch, "main");
         assert!(workspace.unread);
         assert_eq!(workspace.working, Some(true));
         assert_eq!(
-            workspace.last_active.as_deref(),
+            workspace.base.last_active.as_deref(),
             Some("2026-03-11T13:05:00Z")
         );
-        assert_eq!(workspace.created_at, "2026-03-11T13:00:00.000-04:00");
-        assert_eq!(workspace.zone, "us-east1-b");
+        assert_eq!(workspace.base.created_at, "2026-03-11T13:00:00.000-04:00");
+        assert_eq!(workspace.base.zone, "us-east1-b");
     }
 
     #[test]
@@ -1195,53 +1340,47 @@ mod tests {
         }))
         .expect("workspace should parse");
 
-        assert_eq!(workspace.project, None);
+        let Workspace::Branch(workspace) = workspace else {
+            panic!("workspace should default to a branch workspace");
+        };
+
+        assert_eq!(workspace.base.project, None);
         assert_eq!(workspace.branch, "");
         assert_eq!(workspace.target_branch, "");
         assert!(!workspace.unread);
         assert_eq!(workspace.working, None);
-        assert_eq!(workspace.last_active, None);
+        assert_eq!(workspace.base.last_active, None);
+    }
+
+    #[test]
+    fn parse_workspace_maps_template_labels() {
+        let workspace = parse_workspace(&json!({
+            "name": "template-demo-123",
+            "zone": "us-east1-b",
+            "status": "RUNNING",
+            "creationTimestamp": "2026-03-11T13:00:00.000-04:00",
+            "labels": {
+                "project": "demo",
+                "template": "true"
+            }
+        }))
+        .expect("workspace should parse");
+
+        let Workspace::Template(workspace) = workspace else {
+            panic!("workspace should parse as a template workspace");
+        };
+
+        assert!(workspace.template);
+        assert_eq!(workspace.base.name, "template-demo-123");
+        assert_eq!(workspace.base.project.as_deref(), Some("demo"));
     }
 
     #[test]
     fn compare_workspaces_sorts_last_active_desc_with_nulls_last() {
         let mut workspaces = vec![
-            Workspace {
-                name: "c".to_string(),
-                project: Some("demo".to_string()),
-                branch: String::new(),
-                target_branch: String::new(),
-                unread: false,
-                working: None,
-                last_active: None,
-                created_at: "2026-03-11T10:00:00Z".to_string(),
-                status: "RUNNING".to_string(),
-                zone: "us-east1-b".to_string(),
-            },
-            Workspace {
-                name: "b".to_string(),
-                project: Some("demo".to_string()),
-                branch: String::new(),
-                target_branch: String::new(),
-                unread: false,
-                working: None,
-                last_active: Some("2026-03-11T11:00:00Z".to_string()),
-                created_at: "2026-03-11T10:00:00Z".to_string(),
-                status: "RUNNING".to_string(),
-                zone: "us-east1-b".to_string(),
-            },
-            Workspace {
-                name: "a".to_string(),
-                project: Some("demo".to_string()),
-                branch: String::new(),
-                target_branch: String::new(),
-                unread: false,
-                working: None,
-                last_active: Some("2026-03-11T12:00:00Z".to_string()),
-                created_at: "2026-03-11T10:00:00Z".to_string(),
-                status: "RUNNING".to_string(),
-                zone: "us-east1-b".to_string(),
-            },
+            test_branch_workspace("c", None),
+            test_branch_workspace("b", Some("2026-03-11T11:00:00Z")),
+            test_branch_workspace("a", Some("2026-03-11T12:00:00Z")),
         ];
 
         workspaces.sort_by(compare_workspaces_by_last_active_desc);
@@ -1249,17 +1388,21 @@ mod tests {
         assert_eq!(
             workspaces
                 .iter()
-                .map(|workspace| workspace.name.as_str())
+                .map(|workspace| workspace.name())
                 .collect::<Vec<_>>(),
             vec!["a", "b", "c"]
         );
     }
 
     #[test]
-    fn generate_workspace_name_normalizes_and_truncates() {
-        let name = generate_workspace_name("123 Very Loud Project Name With Spaces And Symbols!!!");
+    fn generate_template_workspace_name_normalizes_and_truncates() {
+        let name = generate_template_workspace_name(
+            "123 Very Loud Project Name With Spaces And Symbols!!!",
+        );
 
-        assert!(name.starts_with("ws-w123-very-loud-project-name-with-spaces"));
+        assert!(name.starts_with("w123-"));
+        assert!(name.contains("-silo-"));
+        assert!(name.ends_with("template"));
         assert!(name.len() <= 63);
         assert!(name
             .chars()
