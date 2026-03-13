@@ -1,29 +1,106 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Laptop, Terminal } from "lucide-react";
+import { Check, Laptop, Terminal } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "../../lib/invoke";
 import { Loader } from "../components/loader";
 import { toast } from "../components/toaster";
 import { SiloIcon } from "../icons/silo";
 
-function statusMessage(status: string): string {
-	switch (status) {
-		case "STAGING":
-		case "PROVISIONING":
-			return "Starting workspace...";
-		case "STOPPING":
-		case "SUSPENDING":
-			return "Stopping workspace...";
-		case "TERMINATED":
-		case "STOPPED":
-			return "Workspace is stopped";
-		case "":
-			return "Loading...";
-		default:
-			return status.charAt(0) + status.slice(1).toLowerCase();
-	}
+interface Step {
+	label: string;
+	state: "pending" | "active" | "done";
+}
+
+function useProvisioningSteps(status: string): { steps: Step[]; allDone: boolean } {
+	const [configIndex, setConfigIndex] = useState(-1);
+	const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+	const startedRef = useRef(false);
+
+	const isRunning = status === "RUNNING";
+	const isProvisioning =
+		status === "STAGING" || status === "PROVISIONING";
+
+	// VM-derived step states
+	const vmProvisionState: Step["state"] = isRunning
+		? "done"
+		: isProvisioning
+			? "active"
+			: "pending";
+	const vmStartState: Step["state"] = isRunning
+		? "done"
+		: vmProvisionState === "done"
+			? "active"
+			: "pending";
+
+	const configSteps = [
+		{ label: "Configuring git", delay: 3_000 },
+		{ label: "Configuring codex", delay: 5_000 },
+		{ label: "Configuring claude code", delay: 5_000 },
+		{ label: "Configuring chrome", delay: 30_000 },
+	];
+
+	// Start config timers once VM is running
+	useEffect(() => {
+		if (!isRunning || startedRef.current) return;
+		startedRef.current = true;
+		setConfigIndex(0);
+
+		let cumulative = 0;
+		for (let i = 0; i < configSteps.length; i++) {
+			cumulative += configSteps[i].delay;
+			const timer = setTimeout(() => setConfigIndex(i + 1), cumulative);
+			timersRef.current.push(timer);
+		}
+
+		return () => {
+			for (const t of timersRef.current) clearTimeout(t);
+		};
+	}, [isRunning]);
+
+	const steps: Step[] = [
+		{ label: "Provisioning virtual machine", state: vmProvisionState },
+		{ label: "Starting virtual machine", state: vmStartState },
+		...configSteps.map(({ label }, i) => {
+			let state: Step["state"] = "pending";
+			if (configIndex > i) state = "done";
+			else if (configIndex === i) state = "active";
+			return { label, state };
+		}),
+	];
+
+	const allDone = configIndex >= configSteps.length;
+
+	return { steps, allDone };
+}
+
+function StepRow({ step }: { step: Step }) {
+	return (
+		<div className="flex items-center gap-2.5 text-[11px]">
+			<span className="w-3 flex items-center justify-center shrink-0">
+				{step.state === "done" ? (
+					<Check size={12} className="text-green-500" />
+				) : step.state === "active" ? (
+					<Loader />
+				) : (
+					<span className="block w-1 h-1 rounded-full bg-text-placeholder" />
+				)}
+			</span>
+			<span
+				className={
+					step.state === "done"
+						? "text-text-muted"
+						: step.state === "active"
+							? "text-text"
+							: "text-text-placeholder"
+				}
+			>
+				{step.label}
+			</span>
+		</div>
+	);
 }
 
 export function TemplatingWorkspace({
@@ -39,6 +116,7 @@ export function TemplatingWorkspace({
 }) {
 	const router = useRouter();
 	const queryClient = useQueryClient();
+	const { steps, allDone } = useProvisioningSteps(status);
 
 	const createTerminal = useMutation({
 		mutationFn: () =>
@@ -63,7 +141,13 @@ export function TemplatingWorkspace({
 			<div className="flex flex-col items-center gap-5">
 				<SiloIcon height={24} className="opacity-40" />
 
-				{isRunning ? (
+				<div className="flex flex-col gap-1.5">
+					{steps.map((step) => (
+						<StepRow key={step.label} step={step} />
+					))}
+				</div>
+
+				{allDone && (
 					<div className="flex items-center gap-3">
 						<button
 							type="button"
@@ -81,11 +165,6 @@ export function TemplatingWorkspace({
 							<Laptop size={12} />
 							Open Desktop
 						</button>
-					</div>
-				) : (
-					<div className="flex items-center gap-2 px-2 py-1 text-[11px] text-text-muted">
-						<Loader className="text-text-muted" />
-						<span>{statusMessage(status)}</span>
 					</div>
 				)}
 			</div>
