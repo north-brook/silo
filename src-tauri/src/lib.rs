@@ -1,3 +1,4 @@
+mod chrome;
 mod claude;
 mod codex;
 mod config;
@@ -41,6 +42,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             claude::claude_authenticate,
             claude::claude_configured,
+            chrome::chrome_installed,
+            chrome::chrome_configured,
             codex::codex_authenticate,
             codex::codex_configured,
             git::git_authenticate,
