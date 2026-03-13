@@ -9,10 +9,15 @@ const SHIFT_ENTER = "\n";
 
 interface TerminalBindingEvent {
 	altKey: boolean;
+	code?: string;
 	ctrlKey: boolean;
 	key: string;
 	metaKey: boolean;
 	shiftKey: boolean;
+}
+
+function matchesKey(event: TerminalBindingEvent, expected: string) {
+	return event.key === expected || event.code === expected;
 }
 
 export function attachTerminalBindings(
@@ -45,33 +50,32 @@ export function sequenceForEvent(event: TerminalBindingEvent): string | null {
 		!event.metaKey &&
 		!event.altKey &&
 		!event.ctrlKey &&
-		event.key === "Enter"
+		matchesKey(event, "Enter")
 	) {
 		return SHIFT_ENTER;
 	}
 
 	if (event.metaKey && !event.altKey && !event.ctrlKey) {
-		switch (event.key) {
-			case "ArrowLeft":
-				return COMMAND_LEFT;
-			case "ArrowRight":
-				return COMMAND_RIGHT;
-			case "Backspace":
-				return COMMAND_BACKSPACE;
-			default:
-				return null;
+		if (matchesKey(event, "ArrowLeft")) {
+			return COMMAND_LEFT;
 		}
+		if (matchesKey(event, "ArrowRight")) {
+			return COMMAND_RIGHT;
+		}
+		if (matchesKey(event, "Backspace")) {
+			return COMMAND_BACKSPACE;
+		}
+		return null;
 	}
 
 	if (event.altKey && !event.metaKey && !event.ctrlKey) {
-		switch (event.key) {
-			case "ArrowLeft":
-				return ALT_LEFT;
-			case "ArrowRight":
-				return ALT_RIGHT;
-			default:
-				return null;
+		if (matchesKey(event, "ArrowLeft")) {
+			return ALT_LEFT;
 		}
+		if (matchesKey(event, "ArrowRight")) {
+			return ALT_RIGHT;
+		}
+		return null;
 	}
 
 	return null;

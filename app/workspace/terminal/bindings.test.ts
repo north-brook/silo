@@ -34,6 +34,18 @@ describe("sequenceForEvent", () => {
 		).toBe("\u001b[1337;1u");
 	});
 
+	test("maps command-backspace from the physical backspace key when key is layout-specific", () => {
+		expect(
+			sequenceForEvent(
+				event({
+					code: "Backspace",
+					key: "Թ",
+					metaKey: true,
+				}),
+			),
+		).toBe("\u001b[1337;1u");
+	});
+
 	test("maps command-left and command-right to line navigation", () => {
 		expect(
 			sequenceForEvent(
