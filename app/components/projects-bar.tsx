@@ -12,7 +12,7 @@ import {
 	Trash2,
 } from "lucide-react";
 import Image from "next/image";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { invoke } from "../../lib/invoke";
 import type { ListedProject } from "../../lib/projects";
@@ -27,6 +27,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "./popover";
 import { Loader } from "./loader";
 import { toast } from "./toaster";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
+import { LogoIcon } from "../icons/logo";
 import { WorkspaceIndicator } from "./workspace-status";
 
 function ProjectRow({
@@ -288,6 +289,11 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 	const saveTemplateMut = useMutation({
 		mutationFn: () =>
 			invoke("templates_save_template", { project: workspace.project }),
+		onMutate: () => {
+			router.push(
+				`/workspace/saving?project=${encodeURIComponent(workspace.project ?? "")}&workspace=${encodeURIComponent(workspace.name)}`,
+			);
+		},
 		onSuccess: () => {
 			queryClient.invalidateQueries({
 				queryKey: ["workspaces_list_workspaces"],
@@ -295,8 +301,6 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 			queryClient.invalidateQueries({
 				queryKey: ["templates_list_templates"],
 			});
-			toast({ variant: "success", title: "Template saved" });
-			router.push("/");
 		},
 		onError: (error) => {
 			toast({
@@ -318,7 +322,6 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 				queryKey: ["templates_list_templates"],
 			});
 			toast({ variant: "success", title: "Template deleted" });
-			router.push("/");
 		},
 		onError: (error) => {
 			toast({
@@ -335,8 +338,7 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 		workspace.status === "STAGING" || workspace.status === "PROVISIONING";
 	const optimisticStopping = stop.isPending || remove.isPending;
 	const optimisticStarting = start.isPending;
-	const isDisabled =
-		optimisticStopping || isStopping || optimisticStarting || isStarting;
+	const isDisabled = optimisticStopping || isStopping;
 	const [menuOpen, setMenuOpen] = useState(false);
 
 	const navigate = () =>
@@ -360,7 +362,7 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 				isDisabled
 					? "pointer-events-none"
 					: isActive
-						? "bg-surface text-text-bright"
+						? "bg-btn-hover text-text-bright"
 						: "text-text-muted hover:bg-btn-hover hover:text-text-bright"
 			}`}
 		>
@@ -399,7 +401,7 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 								}}
 								className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
 							>
-								<Save size={12} />
+								{saveTemplateMut.isPending ? <Loader className="text-text-bright" /> : <Save size={12} />}
 								Save
 							</button>
 							<button
@@ -494,6 +496,9 @@ function BarFooter() {
 }
 
 export function ProjectsBar() {
+	const router = useRouter();
+	const pathname = usePathname();
+	const isHome = pathname === "/";
 	const projects = useQuery({
 		queryKey: ["projects_list_projects"],
 		queryFn: () => invoke<ListedProject[]>("projects_list_projects"),
@@ -529,7 +534,15 @@ export function ProjectsBar() {
 	return (
 		<aside className="w-48 shrink-0 border-r border-border-light bg-bg flex flex-col">
 			<div data-tauri-drag-region className="h-9 shrink-0" />
-			<div className="flex-1 overflow-y-auto pb-1">
+			<button
+				type="button"
+				onClick={() => router.push("/")}
+				className={`flex items-center gap-2 px-3 py-2 text-xs transition-colors ${isHome ? "bg-btn-hover text-text-bright" : "text-text hover:bg-btn-hover hover:text-text-bright"}`}
+			>
+				<LogoIcon height={12} />
+				Dashboard
+			</button>
+			<div className="flex-1 overflow-y-auto pb-1 mt-0.5 flex flex-col gap-0.5">
 				{projects.data.map((project) => {
 					const projectWorkspaces = (workspaces.data ?? []).filter(
 						(w) => w.project === project.name,

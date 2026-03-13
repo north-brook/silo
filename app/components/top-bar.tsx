@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "../../lib/invoke";
 import { isTemplateWorkspace, type Workspace } from "../../lib/workspaces";
+import { Loader } from "./loader";
 import { Popover, PopoverContent, PopoverTrigger } from "./popover";
 import { toast } from "./toaster";
 
@@ -24,6 +25,11 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 	const save = useMutation({
 		mutationFn: () =>
 			invoke("templates_save_template", { project: workspace.project ?? "" }),
+		onMutate: () => {
+			router.push(
+				`/workspace/saving?project=${encodeURIComponent(workspace.project ?? "")}&workspace=${encodeURIComponent(workspace.name)}`,
+			);
+		},
 		onSuccess: () => {
 			queryClient.invalidateQueries({
 				queryKey: ["workspaces_list_workspaces"],
@@ -31,8 +37,6 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 			queryClient.invalidateQueries({
 				queryKey: ["templates_list_templates"],
 			});
-			toast({ variant: "success", title: "Template saved" });
-			router.push("/");
 		},
 		onError: (error) => {
 			toast({
@@ -56,7 +60,7 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 					onClick={() => save.mutate()}
 					className="flex items-center gap-1.5 justify-center px-3 py-0.5 rounded text-[11px] font-medium bg-green-600 text-white transition-colors hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
 				>
-					<Save size={10} />
+					{save.isPending ? <Loader className="text-white" /> : <Save size={10} />}
 					Save
 				</button>
 			</div>
