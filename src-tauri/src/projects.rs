@@ -35,6 +35,22 @@ const IMAGE_SEARCH_EXCLUDED_DIRS: &[&str] = &[
     "vendor",
 ];
 
+const ENV_SEARCH_EXCLUDED_DIRS: &[&str] = &[
+    ".direnv",
+    ".git",
+    ".next",
+    ".silo",
+    ".turbo",
+    "artifacts",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+    "out",
+    "target",
+    "vendor",
+];
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ListedProject {
     name: String,
@@ -62,6 +78,7 @@ pub fn projects_add_project(path: String) -> Result<(), String> {
     let image = resolve_project_image_path(&project_root);
     let remote_url = resolve_project_remote_url(&project_root)?;
     let target_branch = resolve_project_target_branch(&project_root);
+    let env_files = resolve_project_env_files(&project_root);
 
     if config.projects.contains_key(&name) {
         return Err(format!("project already exists: {name}"));
@@ -75,6 +92,7 @@ pub fn projects_add_project(path: String) -> Result<(), String> {
             image,
             remote_url,
             target_branch,
+            env_files,
             gcloud: Default::default(),
         },
     );
@@ -261,6 +279,56 @@ fn resolve_project_image_path(project_root: &Path) -> Option<String> {
         .map(|path| path.to_string_lossy().into_owned())
 }
 
+fn resolve_project_env_files(project_root: &Path) -> Vec<String> {
+    let mut env_files = Vec::new();
+    let mut queue = VecDeque::from([project_root.to_path_buf()]);
+
+    while let Some(dir_path) = queue.pop_front() {
+        let Ok(entries) = fs::read_dir(&dir_path) else {
+            continue;
+        };
+
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect();
+        paths.sort();
+
+        for path in paths {
+            let Ok(file_type) = fs::symlink_metadata(&path).map(|metadata| metadata.file_type())
+            else {
+                continue;
+            };
+
+            if file_type.is_dir() {
+                let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+                if should_skip_env_search_dir(name) {
+                    continue;
+                }
+                queue.push_back(path);
+                continue;
+            }
+
+            if !file_type.is_file() || !is_env_file_path(&path) {
+                continue;
+            }
+
+            let Ok(relative) = path.strip_prefix(project_root) else {
+                continue;
+            };
+            if let Some(relative) = normalize_relative_path(relative) {
+                env_files.push(relative);
+            }
+        }
+    }
+
+    env_files.sort();
+    env_files.dedup();
+    env_files
+}
+
 fn find_existing_candidate(root: &Path, candidates: &[&str]) -> Option<PathBuf> {
     candidates
         .iter()
@@ -319,6 +387,33 @@ fn should_skip_image_search_dir(name: &str) -> bool {
     name.starts_with('.') || IMAGE_SEARCH_EXCLUDED_DIRS.contains(&name)
 }
 
+fn should_skip_env_search_dir(name: &str) -> bool {
+    name.starts_with('.') || ENV_SEARCH_EXCLUDED_DIRS.contains(&name)
+}
+
+fn is_env_file_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|name| name == ".env" || name.starts_with(".env."))
+        .unwrap_or(false)
+}
+
+fn normalize_relative_path(path: &Path) -> Option<String> {
+    let mut normalized = String::new();
+
+    for component in path.components() {
+        let std::path::Component::Normal(value) = component else {
+            return None;
+        };
+        if !normalized.is_empty() {
+            normalized.push('/');
+        }
+        normalized.push_str(value.to_str()?);
+    }
+
+    (!normalized.is_empty()).then_some(normalized)
+}
+
 fn resolve_package_json_icon(project_root: &Path) -> Option<PathBuf> {
     let package_json_path = project_root.join("package.json");
     let contents = fs::read_to_string(package_json_path).ok()?;
@@ -342,7 +437,7 @@ fn resolve_package_json_icon(project_root: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::config::{
-        ClaudeConfig, CodexConfig, GcloudConfig, GitConfig, ProjectConfig, SiloConfig,
+        ChromeConfig, ClaudeConfig, CodexConfig, GcloudConfig, GitConfig, ProjectConfig, SiloConfig,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -351,6 +446,7 @@ mod tests {
         let config = SiloConfig {
             gcloud: GcloudConfig::default(),
             git: GitConfig::default(),
+            chrome: ChromeConfig::default(),
             codex: CodexConfig::default(),
             claude: ClaudeConfig::default(),
             projects: IndexMap::from_iter([
@@ -362,6 +458,7 @@ mod tests {
                         image: Some("/tmp/beta.png".to_string()),
                         remote_url: "git@github.com:example/beta.git".to_string(),
                         target_branch: String::new(),
+                        env_files: Vec::new(),
                         gcloud: Default::default(),
                     },
                 ),
@@ -373,6 +470,7 @@ mod tests {
                         image: None,
                         remote_url: "git@github.com:example/alpha.git".to_string(),
                         target_branch: String::new(),
+                        env_files: Vec::new(),
                         gcloud: Default::default(),
                     },
                 ),
@@ -388,6 +486,7 @@ mod tests {
         let config = SiloConfig {
             gcloud: GcloudConfig::default(),
             git: GitConfig::default(),
+            chrome: ChromeConfig::default(),
             codex: CodexConfig::default(),
             claude: ClaudeConfig::default(),
             projects: IndexMap::from_iter([
@@ -399,6 +498,7 @@ mod tests {
                         image: None,
                         remote_url: "git@github.com:example/alpha.git".to_string(),
                         target_branch: String::new(),
+                        env_files: Vec::new(),
                         gcloud: Default::default(),
                     },
                 ),
@@ -410,6 +510,7 @@ mod tests {
                         image: None,
                         remote_url: "git@github.com:example/beta.git".to_string(),
                         target_branch: String::new(),
+                        env_files: Vec::new(),
                         gcloud: Default::default(),
                     },
                 ),
@@ -427,6 +528,7 @@ mod tests {
         let config = SiloConfig {
             gcloud: GcloudConfig::default(),
             git: GitConfig::default(),
+            chrome: ChromeConfig::default(),
             codex: CodexConfig::default(),
             claude: ClaudeConfig::default(),
             projects: IndexMap::from_iter([
@@ -438,6 +540,7 @@ mod tests {
                         image: None,
                         remote_url: "git@github.com:example/alpha.git".to_string(),
                         target_branch: String::new(),
+                        env_files: Vec::new(),
                         gcloud: Default::default(),
                     },
                 ),
@@ -449,6 +552,7 @@ mod tests {
                         image: None,
                         remote_url: "git@github.com:example/beta.git".to_string(),
                         target_branch: String::new(),
+                        env_files: Vec::new(),
                         gcloud: Default::default(),
                     },
                 ),
@@ -518,6 +622,48 @@ mod tests {
             image,
             project_root.join("assets/icon.png").to_string_lossy()
         );
+    }
+
+    #[test]
+    fn resolve_project_env_files_detects_root_and_nested_variants() {
+        let temp_dir = TempDir::new();
+        let project_root = temp_dir.path.join("demo");
+        init_repo_with_origin(&project_root);
+        fs::create_dir_all(project_root.join("apps/web")).expect("nested app dir should exist");
+        fs::write(project_root.join(".env.local"), "ROOT=1").expect("root env should be written");
+        fs::write(
+            project_root.join("apps/web/.env.development.local"),
+            "WEB=1",
+        )
+        .expect("nested env should be written");
+
+        let env_files = resolve_project_env_files(&project_root);
+
+        assert_eq!(
+            env_files,
+            vec![
+                ".env.local".to_string(),
+                "apps/web/.env.development.local".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_project_env_files_skips_ignored_directories() {
+        let temp_dir = TempDir::new();
+        let project_root = temp_dir.path.join("demo");
+        init_repo_with_origin(&project_root);
+        fs::create_dir_all(project_root.join("node_modules/pkg"))
+            .expect("ignored dir should be created");
+        fs::create_dir_all(project_root.join("src")).expect("source dir should be created");
+        fs::write(project_root.join("node_modules/pkg/.env"), "IGNORED=1")
+            .expect("ignored env should be written");
+        fs::write(project_root.join("src/.env.test"), "SRC=1")
+            .expect("source env should be written");
+
+        let env_files = resolve_project_env_files(&project_root);
+
+        assert_eq!(env_files, vec!["src/.env.test".to_string()]);
     }
 
     fn init_repo_with_origin(project_root: &Path) {
