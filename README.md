@@ -18,7 +18,7 @@ bun run build
 
 ## Shared Base Image
 
-The shared workspace base image is built manually by developers and is not part of the Tauri app runtime. The implementation lives in `src-tauri/src/bin/base_image.rs` and is intended to publish a versioned image into a stable image family that user projects can reference through `gcloud.image_project` and `gcloud.image_family`.
+The shared workspace base image is built manually by developers and is not part of the Tauri app runtime. The implementation lives in `tools/base-image` and is intended to publish a versioned image into a stable image family that user projects can reference through `gcloud.image_project` and `gcloud.image_family`.
 
 The app defaults now point at the shared family in project `silo-489618`:
 
@@ -31,8 +31,8 @@ image_project = "silo-489618"
 Example dry run:
 
 ```bash
-cd src-tauri
-cargo run --bin base_image -- \
+cd tools/base-image
+cargo run -- \
   --project silo-images \
   --family silo-base \
   --member group:silo-users@example.com \
@@ -42,8 +42,8 @@ cargo run --bin base_image -- \
 Example publish:
 
 ```bash
-cd src-tauri
-cargo run --bin base_image -- \
+cd tools/base-image
+cargo run -- \
   --project silo-images \
   --family silo-base \
   --member group:silo-users@example.com

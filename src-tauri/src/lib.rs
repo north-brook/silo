@@ -70,6 +70,7 @@ pub fn run() {
             workspaces::workspaces_delete_workspace,
             workspaces::workspaces_update_workspace_branch,
             workspaces::workspaces_update_workspace_target_branch,
+            terminal::terminal_create_terminal,
             terminal::terminal_list_terminals,
             terminal::terminal_attach_terminal,
             terminal::terminal_run_terminal,

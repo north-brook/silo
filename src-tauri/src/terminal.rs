@@ -1,11 +1,11 @@
 use crate::workspaces::{self, WorkspaceLookup};
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, EventTarget, State, WebviewWindow};
 use uuid::Uuid;
@@ -16,6 +16,7 @@ const DEFAULT_TERMINAL_COLS: u16 = 80;
 const DEFAULT_TERMINAL_ROWS: u16 = 24;
 const MAX_SCROLLBACK_BYTES: usize = 512 * 1024;
 const ATTACH_COMMAND_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+const TERMINAL_USER: &str = "silo";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TerminalSessionSummary {
@@ -28,10 +29,15 @@ pub struct TerminalSessionSummary {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TerminalAttachResult {
-    attachment_id: String,
+    terminal: String,
     session: TerminalSessionSummary,
     scrollback_vt: String,
     scrollback_truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TerminalCreateResult {
+    terminal: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -52,14 +58,14 @@ pub struct TerminalKillResult {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct TerminalExitPayload {
-    attachment_id: String,
+    terminal: String,
     exit_code: u32,
     signal: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct TerminalErrorPayload {
-    attachment_id: String,
+    terminal: String,
     message: String,
 }
 
@@ -136,6 +142,21 @@ struct CommandResult {
 }
 
 #[tauri::command]
+pub async fn terminal_create_terminal(workspace: String) -> Result<TerminalCreateResult, String> {
+    log::trace!("creating terminal attachment id for workspace {workspace}");
+    let lookup = workspaces::find_workspace(&workspace).await?;
+    let existing_names = list_terminals_in_workspace(&lookup)
+        .await?
+        .into_iter()
+        .map(|session| session.name)
+        .collect::<HashSet<_>>();
+
+    Ok(TerminalCreateResult {
+        terminal: generate_terminal_attachment_id(&existing_names),
+    })
+}
+
+#[tauri::command]
 pub async fn terminal_list_terminals(
     workspace: String,
 ) -> Result<Vec<TerminalSessionSummary>, String> {
@@ -173,7 +194,7 @@ pub async fn terminal_attach_terminal(
         }
 
         return Ok(TerminalAttachResult {
-            attachment_id: existing.id.clone(),
+            terminal: existing.id.clone(),
             session: resolve_attached_session(&lookup, &name).await?,
             scrollback_vt,
             scrollback_truncated,
@@ -193,7 +214,7 @@ pub async fn terminal_attach_terminal(
     }
 
     Ok(TerminalAttachResult {
-        attachment_id: attachment.id.clone(),
+        terminal: attachment.id.clone(),
         session: resolve_attached_session(&lookup, &name).await?,
         scrollback_vt,
         scrollback_truncated,
@@ -213,9 +234,12 @@ pub async fn terminal_run_terminal(
         payload.push(b'\n');
     }
 
-    let result =
-        run_remote_command_with_stdin(&lookup, &format!("zmx run {}", shell_quote(&name)), payload)
-            .await?;
+    let result = run_remote_command_with_stdin(
+        &lookup,
+        &run_terminal_user_command(&format!("zmx run {}", shell_quote(&name))),
+        payload,
+    )
+    .await?;
     if !result.success {
         return Err(remote_command_error(
             "failed to run terminal command",
@@ -252,7 +276,11 @@ pub async fn terminal_kill_terminal(
     name: String,
 ) -> Result<TerminalKillResult, String> {
     let lookup = workspaces::find_workspace(&workspace).await?;
-    let result = run_remote_command(&lookup, &format!("zmx kill {}", shell_quote(&name))).await?;
+    let result = run_remote_command(
+        &lookup,
+        &run_terminal_user_command(&format!("zmx kill {}", shell_quote(&name))),
+    )
+    .await?;
     if !result.success {
         return Err(remote_command_error(
             "failed to kill terminal session",
@@ -271,12 +299,12 @@ pub async fn terminal_kill_terminal(
 #[tauri::command]
 pub fn terminal_write_terminal(
     state: State<'_, TerminalManager>,
-    attachment_id: String,
+    terminal: String,
     data: Vec<u8>,
 ) -> Result<(), String> {
     let attachment = state
-        .get_by_id(&attachment_id)
-        .ok_or_else(|| format!("terminal attachment not found: {attachment_id}"))?;
+        .get_by_id(&terminal)
+        .ok_or_else(|| format!("terminal attachment not found: {terminal}"))?;
     let mut writer = attachment
         .writer
         .lock()
@@ -293,13 +321,13 @@ pub fn terminal_write_terminal(
 #[tauri::command]
 pub fn terminal_resize_terminal(
     state: State<'_, TerminalManager>,
-    attachment_id: String,
+    terminal: String,
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
     let attachment = state
-        .get_by_id(&attachment_id)
-        .ok_or_else(|| format!("terminal attachment not found: {attachment_id}"))?;
+        .get_by_id(&terminal)
+        .ok_or_else(|| format!("terminal attachment not found: {terminal}"))?;
     let master = attachment
         .master
         .lock()
@@ -343,7 +371,10 @@ fn spawn_terminal_attachment(
         "--ssh-flag=-tt".to_string(),
         format!(
             "--command={}",
-            wrap_remote_shell_command(&format!("exec zmx attach {}", shell_quote(&key.name)))
+            wrap_remote_shell_command(&run_terminal_user_command(&format!(
+                "exec zmx attach {}",
+                shell_quote(&key.name)
+            )))
         ),
     ]);
 
@@ -431,7 +462,7 @@ fn spawn_waiter_loop(
         match status {
             Ok(status) => {
                 let payload = TerminalExitPayload {
-                    attachment_id: attachment.id.clone(),
+                    terminal: attachment.id.clone(),
                     exit_code: status.exit_code(),
                     signal: status.signal().map(ToOwned::to_owned),
                 };
@@ -470,7 +501,7 @@ fn emit_terminal_error(attachment: &Attachment, message: String) {
                 EventTarget::webview_window(window_label),
                 TERMINAL_ERROR_EVENT,
                 TerminalErrorPayload {
-                    attachment_id: attachment.id.clone(),
+                    terminal: attachment.id.clone(),
                     message,
                 },
             );
@@ -485,7 +516,7 @@ fn emit_terminal_error_with_app(app: &AppHandle, attachment: &Attachment, messag
             EventTarget::webview_window(window_label),
             TERMINAL_ERROR_EVENT,
             TerminalErrorPayload {
-                attachment_id: attachment.id.clone(),
+                terminal: attachment.id.clone(),
                 message,
             },
         );
@@ -549,7 +580,7 @@ fn write_attachment_input(attachment: &Attachment, data: &[u8]) -> Result<(), St
 async fn list_terminals_in_workspace(
     lookup: &WorkspaceLookup,
 ) -> Result<Vec<TerminalSessionSummary>, String> {
-    let result = run_remote_command(lookup, "zmx list").await?;
+    let result = run_remote_command(lookup, &run_terminal_user_command("zmx list")).await?;
     if !result.success {
         let stderr = result.stderr.trim();
         if stderr.contains("not found") || stderr.contains("command not found") {
@@ -562,7 +593,13 @@ async fn list_terminals_in_workspace(
         ));
     }
 
-    parse_terminal_sessions(&result.stdout)
+    if is_empty_terminal_list_output(&result.stdout) {
+        return Ok(Vec::new());
+    }
+
+    let mut sessions = parse_terminal_sessions(&result.stdout)?;
+    sort_terminal_sessions_oldest_to_newest(&mut sessions);
+    Ok(sessions)
 }
 
 async fn find_terminal_session(
@@ -576,8 +613,11 @@ async fn find_terminal_session(
 }
 
 async fn load_scrollback(lookup: &WorkspaceLookup, name: &str) -> Result<(String, bool), String> {
-    let result =
-        run_remote_command(lookup, &format!("zmx history {} --vt", shell_quote(name))).await?;
+    let result = run_remote_command(
+        lookup,
+        &run_terminal_user_command(&format!("zmx history {} --vt", shell_quote(name))),
+    )
+    .await?;
     if !result.success {
         if is_missing_terminal_session_error(&result.stderr) {
             return Ok((String::new(), false));
@@ -683,6 +723,13 @@ fn wrap_remote_shell_command(command: &str) -> String {
     format!("bash -lc {}", shell_quote(command))
 }
 
+fn run_terminal_user_command(command: &str) -> String {
+    format!(
+        "sudo -iu {TERMINAL_USER} bash -lc {}",
+        shell_quote(command)
+    )
+}
+
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -703,6 +750,13 @@ fn is_missing_terminal_session_error(stderr: &str) -> bool {
         || lower.contains("unknown session")
 }
 
+fn is_empty_terminal_list_output(stdout: &str) -> bool {
+    stdout
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("no sessions found")
+}
+
 fn pending_terminal_session(name: &str) -> TerminalSessionSummary {
     TerminalSessionSummary {
         name: name.to_string(),
@@ -711,6 +765,36 @@ fn pending_terminal_session(name: &str) -> TerminalSessionSummary {
         started_in: None,
         created_at: None,
     }
+}
+
+fn generate_terminal_attachment_id(existing_names: &HashSet<String>) -> String {
+    let mut timestamp = current_unix_timestamp_millis();
+    loop {
+        let candidate = format!("terminal-{timestamp}");
+        if !existing_names.contains(&candidate) {
+            return candidate;
+        }
+        timestamp += 1;
+    }
+}
+
+fn current_unix_timestamp_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+fn sort_terminal_sessions_oldest_to_newest(sessions: &mut [TerminalSessionSummary]) {
+    sessions.sort_by(|left, right| {
+        terminal_name_timestamp(&left.name)
+            .cmp(&terminal_name_timestamp(&right.name))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+}
+
+fn terminal_name_timestamp(name: &str) -> Option<u128> {
+    name.strip_prefix("terminal-")?.parse::<u128>().ok()
 }
 
 fn truncate_scrollback(mut scrollback: String, max_bytes: usize) -> (String, bool) {
@@ -808,6 +892,22 @@ mod tests {
     }
 
     #[test]
+    fn run_terminal_user_command_executes_as_silo() {
+        assert_eq!(
+            run_terminal_user_command("zmx list"),
+            "sudo -iu silo bash -lc 'zmx list'"
+        );
+    }
+
+    #[test]
+    fn run_terminal_user_command_preserves_quoting() {
+        assert_eq!(
+            run_terminal_user_command("zmx history 'terminal-1' --vt"),
+            "sudo -iu silo bash -lc 'zmx history '\"'\"'terminal-1'\"'\"' --vt'"
+        );
+    }
+
+    #[test]
     fn truncate_scrollback_keeps_recent_tail() {
         let (scrollback, truncated) = truncate_scrollback("abcdef".to_string(), 3);
         assert!(truncated);
@@ -819,6 +919,61 @@ mod tests {
         assert_eq!(terminal_command_bytes("pwd"), b"pwd\n");
         assert_eq!(terminal_command_bytes("pwd\n"), b"pwd\n");
         assert!(terminal_command_bytes("").is_empty());
+    }
+
+    #[test]
+    fn generate_terminal_attachment_id_avoids_existing_names() {
+        let existing = HashSet::from([
+            "terminal-1741812345678".to_string(),
+            "terminal-1741812345679".to_string(),
+        ]);
+        let generated = generate_terminal_attachment_id(&existing);
+        assert!(generated.starts_with("terminal-"));
+        assert!(!existing.contains(&generated));
+        assert!(generated["terminal-".len()..].parse::<u128>().is_ok());
+    }
+
+    #[test]
+    fn sort_terminal_sessions_orders_oldest_to_newest_by_timestamp_name() {
+        let mut sessions = vec![
+            TerminalSessionSummary {
+                name: "terminal-1741812345680".to_string(),
+                pid: None,
+                clients: 0,
+                started_in: None,
+                created_at: None,
+            },
+            TerminalSessionSummary {
+                name: "terminal-1741812345678".to_string(),
+                pid: None,
+                clients: 0,
+                started_in: None,
+                created_at: None,
+            },
+            TerminalSessionSummary {
+                name: "terminal-1741812345679".to_string(),
+                pid: None,
+                clients: 0,
+                started_in: None,
+                created_at: None,
+            },
+        ];
+
+        sort_terminal_sessions_oldest_to_newest(&mut sessions);
+
+        assert_eq!(sessions[0].name, "terminal-1741812345678");
+        assert_eq!(sessions[1].name, "terminal-1741812345679");
+        assert_eq!(sessions[2].name, "terminal-1741812345680");
+    }
+
+    #[test]
+    fn empty_terminal_list_output_is_recognized() {
+        assert!(is_empty_terminal_list_output(
+            "no sessions found in /run/user/1001/zmx"
+        ));
+        assert!(!is_empty_terminal_list_output(
+            "session_name=terminal-1741812345678\tpid=1\tclients=0"
+        ));
     }
 
     #[test]

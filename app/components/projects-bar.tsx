@@ -485,11 +485,17 @@ export function ProjectsBar() {
 				log: "state_changes_only",
 				key: "poll:workspaces_list_workspaces",
 			}),
-		refetchInterval: 15000,
+		refetchInterval: 2000,
 	});
 	const templates = useQuery({
 		queryKey: ["templates_list_templates"],
-		queryFn: () => invoke<SnapshotTemplate[]>("templates_list_templates"),
+		queryFn: () =>
+			invoke<SnapshotTemplate[]>("templates_list_templates", {
+				log: "state_changes_only",
+				key: "poll:templates_list_templates",
+				stateChanged: (previous, next) =>
+					JSON.stringify(previous) !== JSON.stringify(next),
+			}),
 		refetchInterval: 15000,
 	});
 	const [expanded, setExpanded] = useState<Record<string, boolean>>({});

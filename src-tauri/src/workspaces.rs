@@ -155,7 +155,6 @@ const TEMPLATE_SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[tauri::command]
 pub async fn workspaces_list_workspaces() -> Result<Vec<Workspace>, String> {
-    log::info!("listing workspaces across configured gcloud projects");
     let config = ConfigStore::new()
         .and_then(|store| store.load())
         .map_err(|error| error.to_string())?;
@@ -170,7 +169,6 @@ pub async fn workspaces_list_workspaces() -> Result<Vec<Workspace>, String> {
         workspaces.extend(list_workspaces_in_project(&gcloud.account, &gcloud.project).await?);
     }
     workspaces.sort_by(compare_workspaces_by_last_active_desc);
-    log::info!("listed {} workspaces", workspaces.len());
 
     Ok(workspaces)
 }
@@ -1164,7 +1162,6 @@ pub(crate) async fn list_template_snapshots_in_project(
 }
 
 pub(crate) async fn list_template_snapshots() -> Result<Vec<SnapshotTemplate>, String> {
-    log::info!("listing template snapshots across configured gcloud projects");
     let config = ConfigStore::new()
         .and_then(|store| store.load())
         .map_err(|error| error.to_string())?;
@@ -1191,7 +1188,6 @@ pub(crate) async fn list_template_snapshots() -> Result<Vec<SnapshotTemplate>, S
             .then_with(|| left.project.cmp(&right.project))
             .then_with(|| left.name.cmp(&right.name))
     });
-    log::info!("listed {} template snapshots", snapshots.len());
     Ok(snapshots)
 }
 
