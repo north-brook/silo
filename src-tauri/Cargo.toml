@@ -33,3 +33,5 @@ log = "0.4"
 portable-pty = "0.9.0"
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
 uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+sha2 = "0.10"

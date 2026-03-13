@@ -3697,11 +3697,13 @@ name = "silo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "indexmap 2.13.0",
  "log",
  "portable-pty",
  "serde",
  "serde_json",
+ "sha2",
  "sysinfo",
  "tauri",
  "tauri-build",
