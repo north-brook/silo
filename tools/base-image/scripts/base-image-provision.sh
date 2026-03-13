@@ -116,6 +116,16 @@ apt-get install -y \
   zip \
   zsh
 
+install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
+  | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
+chmod 0644 /etc/apt/keyrings/google-chrome.gpg
+cat > /etc/apt/sources.list.d/google-chrome.list <<'EOF'
+deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main
+EOF
+apt-get update
+apt-get install -y google-chrome-stable
+
 serial_log "Installing selkies-gstreamer runtime dependencies"
 
 apt-get install -y \
@@ -185,7 +195,8 @@ run_as_developer "export PATH='${BUN_INSTALL_DIR}/bin:${BREW_PREFIX}/bin:${BREW_
 run_as_developer "export PATH='${BUN_INSTALL_DIR}/bin:${BREW_PREFIX}/bin:${BREW_PREFIX}/sbin:\$PATH' && corepack prepare yarn@stable --activate"
 run_as_developer "export PATH='${BUN_INSTALL_DIR}/bin:${BREW_PREFIX}/bin:${BREW_PREFIX}/sbin:\$PATH' && corepack prepare pnpm@latest --activate"
 
-run_as_developer "export PATH='${BUN_INSTALL_DIR}/bin:${BREW_PREFIX}/bin:${BREW_PREFIX}/sbin:\$PATH' && npm install -g @anthropic-ai/claude-code @openai/codex"
+run_as_developer "export PATH='${BUN_INSTALL_DIR}/bin:${BREW_PREFIX}/bin:${BREW_PREFIX}/sbin:\$PATH' && npm install -g @openai/codex"
+run_as_developer 'curl -fsSL https://claude.ai/install.sh | bash'
 
 mkdir -p /etc/profile.d
 cat > /etc/profile.d/silo-homebrew.sh <<'EOF'
@@ -201,6 +212,10 @@ fi
 
 if [ -d "${BUN_INSTALL}/bin" ]; then
   export PATH="${BUN_INSTALL}/bin:${PATH}"
+fi
+
+if [ -d "${HOME}/.local/bin" ]; then
+  export PATH="${HOME}/.local/bin:${PATH}"
 fi
 
 export PATH="/usr/local/bin:${PATH}"
@@ -266,7 +281,9 @@ if command -v fdfind >/dev/null 2>&1; then
   ln -sf "$(command -v fdfind)" /usr/local/bin/fd
 fi
 
-for command_name in bun cargo claude codex corepack direnv gh just node npm npx pnpm rustc shellcheck yarn zig zmx; do
+export PATH="${DEVELOPER_HOME}/.local/bin:${PATH}"
+
+for command_name in bun cargo claude codex corepack direnv gh google-chrome just node npm npx pnpm rustc shellcheck yarn zig zmx; do
   target_path="$(command -v "${command_name}" || true)"
   if [[ -n "${target_path}" ]]; then
     ln -sf "${target_path}" "/usr/local/bin/${command_name}"
@@ -295,6 +312,7 @@ fdfind --version
 find --version
 git --version
 gh --version
+google-chrome --version
 jq --version
 less --version
 make --version
@@ -327,7 +345,7 @@ cat /opt/selkies-version
 python3 -c 'import selkies_gstreamer'
 test -d /opt/gstreamer
 test -d /opt/gst-web
-su - "${DEVELOPER_USER}" -s /bin/bash -c 'for command_name in brew bun cargo claude codex curl fd git gh jq node npm pnpm python3 rg rustc yarn yq zig zmx zsh; do command -v "${command_name}" >/dev/null; done'
+su - "${DEVELOPER_USER}" -s /bin/bash -c 'for command_name in brew bun cargo claude codex curl fd git gh google-chrome jq node npm pnpm python3 rg rustc yarn yq zig zmx zsh; do command -v "${command_name}" >/dev/null; done'
 su - "${DEVELOPER_USER}" -s /bin/bash -c 'test -f /opt/selkies-version && python3 -c "import selkies_gstreamer"'
 su - "${DEVELOPER_USER}" -s /bin/bash -c '
   prefix="$(brew --prefix)"
