@@ -49,11 +49,13 @@ function statusMessage(status: string): string {
 
 export function PromptWorkspace({
 	isRunning,
+	ready,
 	status,
 	workspace,
 	project,
 }: {
 	isRunning: boolean;
+	ready: boolean;
 	status: string;
 	workspace: string;
 	project: string | null;
@@ -68,7 +70,7 @@ export function PromptWorkspace({
 	}, []);
 	const [provider, setProvider] = useState(PROVIDERS[0]);
 	const [providerOpen, setProviderOpen] = useState(false);
-	const canSubmit = isRunning && prompt.trim().length > 0;
+	const canSubmit = isRunning && ready && prompt.trim().length > 0;
 
 	const createTerminal = useMutation({
 		mutationFn: () =>
@@ -151,7 +153,7 @@ export function PromptWorkspace({
 						</button>
 					</div>
 				</div>
-				{isRunning ? (
+				{isRunning && ready ? (
 					<div className="flex items-center gap-3 mt-3">
 						<button
 							type="button"
@@ -173,7 +175,7 @@ export function PromptWorkspace({
 				) : (
 					<div className="flex items-center gap-2 mt-3 px-2 py-1 text-[11px] text-text-muted">
 						<Loader className="text-text-muted" />
-						<span>{statusMessage(status)}</span>
+						<span>{isRunning ? "Waiting for SSH..." : statusMessage(status)}</span>
 					</div>
 				)}
 			</div>

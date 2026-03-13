@@ -51,6 +51,7 @@ function WorkspaceView() {
 		return (
 			<TemplatingWorkspace
 				isRunning={isRunning}
+				ready={workspace.data.ready}
 				status={workspace.data.status}
 				workspace={workspace.data.name}
 				project={workspace.data.project}
@@ -63,6 +64,7 @@ function WorkspaceView() {
 	return isPrompt ? (
 		<PromptWorkspace
 			isRunning={isRunning}
+			ready={workspace.data.ready}
 			status={workspace.data.status}
 			workspace={workspace.data.name}
 			project={workspace.data.project}
