@@ -44,12 +44,12 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 	});
 
 	return (
-		<header className="h-8 w-full border-b border-border-light shrink-0 flex items-center relative">
-			<div className="relative flex items-center justify-between w-full px-3 h-8 z-10">
+		<header className="h-9 w-full border-b border-border-light shrink-0 flex items-center relative">
+			<div className="relative flex items-center justify-between w-full px-3 h-full z-10">
 				<span className="text-[11px] text-text-muted">
 					<span className="text-text">{workspace.project}</span> template
 				</span>
-				<div data-tauri-drag-region className="h-8 flex-1" />
+				<div data-tauri-drag-region className="h-full flex-1" />
 				<button
 					type="button"
 					disabled={save.isPending}
@@ -155,7 +155,7 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 	const targetBranch = branchWorkspace.target_branch;
 
 	return (
-		<header className="h-8 w-full border-b border-border-light shrink-0 flex items-center relative">
+		<header className="h-9 w-full border-b border-border-light shrink-0 flex items-center relative">
 			<div data-tauri-drag-region className="absolute inset-0" />
 			<div className="relative flex items-center gap-1.5 px-3 text-[11px] text-text-muted z-10">
 				<GitBranch size={12} className="shrink-0 text-text-placeholder" />

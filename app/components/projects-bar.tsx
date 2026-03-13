@@ -7,7 +7,7 @@ import {
 	Play,
 	Plus,
 	Save,
-	Settings,
+	Box,
 	Square,
 	Trash2,
 } from "lucide-react";
@@ -24,7 +24,7 @@ import {
 	workspaceLabel,
 } from "../../lib/workspaces";
 import { Popover, PopoverContent, PopoverTrigger } from "./popover";
-import { TerminalLoader } from "./terminal-loader";
+import { Loader } from "./loader";
 import { toast } from "./toaster";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
 import { WorkspaceIndicator } from "./workspace-status";
@@ -35,12 +35,14 @@ function ProjectRow({
 	onToggle,
 	hasTemplate,
 	templateWorkspace,
+	workspaceCount,
 }: {
 	project: ListedProject;
 	expanded: boolean;
 	onToggle: () => void;
 	hasTemplate: boolean;
 	templateWorkspace: Workspace | undefined;
+	workspaceCount: number;
 }) {
 	const router = useRouter();
 	const queryClient = useQueryClient();
@@ -159,15 +161,17 @@ function ProjectRow({
 					<div className="w-4 h-4 rounded bg-border-light shrink-0" />
 				)}
 				<span className="truncate">{project.name}</span>
-				<ChevronDown
-					size={10}
-					className={`shrink-0 text-text-placeholder transition-transform ${expanded ? "" : "-rotate-90"}`}
-				/>
+				{workspaceCount > 0 && (
+					<ChevronDown
+						size={10}
+						className={`shrink-0 text-text-placeholder transition-transform ${expanded ? "" : "-rotate-90"}`}
+					/>
+				)}
 			</span>
 			<span className="shrink-0 ml-auto flex items-center -mr-1">
 				{isCreatingTemplate ? (
 					<span className="p-1 flex items-center justify-center">
-						<TerminalLoader className="text-text-muted" />
+						<Loader className="text-text-muted" />
 					</span>
 				) : (
 					<Tooltip>
@@ -180,7 +184,7 @@ function ProjectRow({
 								}}
 								className="p-1 text-text-placeholder hover:text-text-bright opacity-0 group-hover:opacity-100 transition-opacity"
 							>
-								<Settings size={12} />
+								<Box size={12} />
 							</button>
 						</TooltipTrigger>
 						<TooltipContent side="right">
@@ -191,7 +195,7 @@ function ProjectRow({
 				{hasTemplate &&
 					(createWorkspace.isPending ? (
 						<span className="p-1 flex items-center justify-center">
-							<TerminalLoader className="text-text-muted" />
+							<Loader className="text-text-muted" />
 						</span>
 					) : (
 						<Tooltip>
@@ -219,7 +223,9 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 	const router = useRouter();
 	const searchParams = useSearchParams();
 	const queryClient = useQueryClient();
-	const isActive = searchParams.get("name") === workspace.name;
+	const isActive =
+		searchParams.get("name") === workspace.name ||
+		searchParams.get("workspace") === workspace.name;
 	const isRunning = workspace.status === "RUNNING";
 	const isStopped =
 		workspace.status === "TERMINATED" || workspace.status === "STOPPED";
@@ -325,7 +331,11 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 
 	const isStopping =
 		workspace.status === "STOPPING" || workspace.status === "SUSPENDING";
-	const isDisabled = stop.isPending || remove.isPending || isStopping;
+	const isStarting =
+		workspace.status === "STAGING" || workspace.status === "PROVISIONING";
+	const optimisticStopping = stop.isPending || remove.isPending;
+	const optimisticStarting = start.isPending;
+	const isDisabled = optimisticStopping || isStopping || optimisticStarting || isStarting;
 	const [menuOpen, setMenuOpen] = useState(false);
 
 	const navigate = () =>
@@ -347,15 +357,15 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 			}}
 			className={`group flex items-center w-full pl-5 pr-3 py-1.5 text-xs transition-colors cursor-pointer ${
 				isDisabled
-					? "opacity-30 pointer-events-none"
+					? "pointer-events-none"
 					: isActive
-						? "bg-btn-hover text-text-bright"
+						? "bg-surface text-text-bright"
 						: "text-text-muted hover:bg-btn-hover hover:text-text-bright"
 			}`}
 		>
 			<span className="flex items-center gap-2 min-w-0 flex-1">
-				<WorkspaceIndicator workspace={workspace} />
-				<span className="truncate">{workspaceLabel(workspace)}</span>
+				<WorkspaceIndicator workspace={{ ...workspace, isTemplate, optimisticStarting, optimisticStopping }} />
+				<span className={`truncate ${isDisabled ? "opacity-30" : ""}`}>{workspaceLabel(workspace)}</span>
 			</span>
 			<Popover open={menuOpen} onOpenChange={setMenuOpen}>
 				<PopoverTrigger asChild>
@@ -507,8 +517,8 @@ export function ProjectsBar() {
 		setExpanded((prev) => ({ ...prev, [name]: !isExpanded(name) }));
 
 	return (
-		<aside className="w-48 shrink-0 border-r border-border-light bg-surface flex flex-col">
-			<div data-tauri-drag-region className="h-8 shrink-0" />
+		<aside className="w-48 shrink-0 border-r border-border-light bg-bg flex flex-col">
+			<div data-tauri-drag-region className="h-9 shrink-0" />
 			<div className="flex-1 overflow-y-auto pb-1">
 				{projects.data.map((project) => {
 					const projectWorkspaces = (workspaces.data ?? []).filter(
@@ -529,6 +539,7 @@ export function ProjectsBar() {
 								onToggle={() => toggle(project.name)}
 								hasTemplate={hasTemplate}
 								templateWorkspace={templateWorkspace}
+								workspaceCount={projectWorkspaces.length}
 							/>
 							{isExpanded(project.name) &&
 								projectWorkspaces.map((w) => (
