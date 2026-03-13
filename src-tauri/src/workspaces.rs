@@ -1,5 +1,6 @@
 use crate::config::{ConfigStore, ProjectConfig, SiloConfig};
 use crate::river_names::DEFAULT_RIVER_NAMES;
+use crate::terminal;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -47,6 +48,7 @@ struct WorkspaceBase {
     created_at: String,
     status: String,
     zone: String,
+    ready: bool,
 }
 
 impl Workspace {
@@ -63,13 +65,6 @@ impl Workspace {
             target_branch,
             unread,
             working,
-        })
-    }
-
-    fn template(base: WorkspaceBase) -> Self {
-        Self::Template(TemplateWorkspace {
-            base,
-            template: true,
         })
     }
 
@@ -102,6 +97,10 @@ impl Workspace {
 
     pub(crate) fn project(&self) -> Option<&str> {
         self.base().project.as_deref()
+    }
+
+    pub(crate) fn ready(&self) -> bool {
+        self.base().ready
     }
 
     pub(crate) fn branch_name(&self) -> Option<&str> {
@@ -170,7 +169,7 @@ struct InstanceState {
 
 const TEMPLATE_SNAPSHOT_STATUS_READY: &str = "READY";
 const INSTANCE_STATUS_TERMINATED: &str = "TERMINATED";
-const TEMPLATE_STOP_POLL_ATTEMPTS: usize = 30;
+const TEMPLATE_STOP_POLL_ATTEMPTS: usize = 90;
 const TEMPLATE_STOP_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const TEMPLATE_SNAPSHOT_POLL_ATTEMPTS: usize = 60;
 const TEMPLATE_SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -232,6 +231,7 @@ pub async fn workspaces_create_workspace(project: String) -> Result<Workspace, S
     }
 
     log::info!("workspace {workspace_name} creation started for project {project}");
+    terminal::start_workspace_ssh_readiness(workspace_name.clone());
     match describe_workspace_in_project(&workspace_name, &gcloud.account, &gcloud.project).await {
         Ok(workspace) => Ok(workspace),
         Err(error) => {
@@ -263,7 +263,7 @@ pub async fn workspaces_start_workspace(workspace: String) -> Result<(), String>
             "compute".to_string(),
             "instances".to_string(),
             "start".to_string(),
-            workspace,
+            workspace.clone(),
             format!("--zone={}", lookup.workspace.zone()),
         ],
     )
@@ -272,6 +272,9 @@ pub async fn workspaces_start_workspace(workspace: String) -> Result<(), String>
     if !result.success {
         return Err(gcloud_error("failed to start workspace", &result.stderr));
     }
+
+    update_workspace_label_in_lookup(lookup.clone(), "ready", "false").await?;
+    terminal::start_workspace_ssh_readiness(workspace.clone());
 
     log::info!("workspace {} started", lookup.workspace.name());
     Ok(())
@@ -351,6 +354,15 @@ pub async fn workspaces_update_workspace_target_branch(
     }
 
     update_workspace_label_in_lookup(lookup, "target_branch", &target_branch).await
+}
+
+pub(crate) async fn set_workspace_label(
+    workspace: &str,
+    label: &str,
+    value: &str,
+) -> Result<(), String> {
+    let lookup = find_workspace(workspace).await?;
+    update_workspace_label_in_lookup(lookup, label, value).await
 }
 
 pub(crate) async fn find_workspace(name: &str) -> Result<WorkspaceLookup, String> {
@@ -477,6 +489,7 @@ fn pending_workspace(
             created_at,
             status: "PROVISIONING".to_string(),
             zone: zone.to_string(),
+            ready: false,
         },
         branch_label.to_string(),
         target_branch.to_string(),
@@ -498,6 +511,7 @@ fn pending_template_workspace(name: &str, project_label: &str, zone: &str) -> Te
             created_at,
             status: "PROVISIONING".to_string(),
             zone: zone.to_string(),
+            ready: false,
         },
         template: true,
     }
@@ -702,6 +716,7 @@ fn create_workspace_args(
         format!("project={}", sanitize_label_value(project_label)),
         format!("branch={}", sanitize_label_value(branch_label)),
         "unread=false".to_string(),
+        "ready=false".to_string(),
     ];
     let sanitized_target_branch = sanitize_label_value(target_branch);
     if !sanitized_target_branch.is_empty() {
@@ -758,7 +773,7 @@ pub(crate) fn create_template_workspace_args(
         format!("--boot-disk-size={}GB", gcloud.disk_size_gb),
         format!("--boot-disk-type={}", gcloud.disk_type),
         format!(
-            "--labels=project={},template=true",
+            "--labels=project={},template=true,ready=false",
             sanitize_label_value(project_label)
         ),
         "--async".to_string(),
@@ -1288,6 +1303,12 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         .get("last_active")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let ready = labels
+        .get("ready")
+        .and_then(Value::as_str)
+        .map(|value| parse_bool_label("ready", value))
+        .transpose()?
+        .unwrap_or(status == "RUNNING");
 
     let base = WorkspaceBase {
         name,
@@ -1296,10 +1317,14 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         created_at,
         status,
         zone,
+        ready,
     };
 
     if template {
-        Ok(Workspace::template(base))
+        Ok(Workspace::Template(TemplateWorkspace {
+            base,
+            template: true,
+        }))
     } else {
         let branch = labels
             .get("branch")
@@ -1644,6 +1669,7 @@ mod tests {
             created_at: "2026-03-11T10:00:00Z".to_string(),
             status: "RUNNING".to_string(),
             zone: "us-east1-b".to_string(),
+            ready: true,
         }
     }
 
@@ -1797,11 +1823,15 @@ mod tests {
         assert!(args.contains(&"--image-project=ubuntu-os-cloud".to_string()));
         assert!(args.contains(&"--async".to_string()));
         assert!(args.contains(
+            &"--labels=project=demo-project,branch=aare,unread=false,ready=false,target_branch=feature-inbox"
+                .to_string()
+        ));
+        assert!(args.contains(
             &"--service-account=silo-workspaces@proj.iam.gserviceaccount.com".to_string()
         ));
         assert!(args.contains(&"--scopes=https://www.googleapis.com/auth/compute".to_string()));
         assert!(args.contains(
-            &"--labels=project=demo-project,branch=aare,unread=false,target_branch=feature-inbox"
+            &"--labels=project=demo-project,branch=aare,unread=false,ready=false,target_branch=feature-inbox"
                 .to_string()
         ));
     }
@@ -1862,9 +1892,9 @@ mod tests {
         assert!(args.contains(&"--async".to_string()));
         assert!(args.contains(&"--no-service-account".to_string()));
         assert!(args.contains(&"--no-scopes".to_string()));
-        assert!(
-            args.contains(&"--labels=project=demo-project,branch=aare,unread=false".to_string())
-        );
+        assert!(args.contains(
+            &"--labels=project=demo-project,branch=aare,unread=false,ready=false".to_string()
+        ));
     }
 
     #[test]
@@ -1886,7 +1916,7 @@ mod tests {
 
         assert!(args.contains(&"--image-family=ubuntu-2404-lts-amd64".to_string()));
         assert!(args.contains(&"--image-project=ubuntu-os-cloud".to_string()));
-        assert!(args.contains(&"--labels=project=demo,template=true".to_string()));
+        assert!(args.contains(&"--labels=project=demo,template=true,ready=false".to_string()));
         assert!(!args.iter().any(|arg| arg.starts_with("--source-snapshot=")));
     }
 
@@ -2080,7 +2110,8 @@ mod tests {
             "creationTimestamp": "2026-03-11T13:00:00.000-04:00",
             "labels": {
                 "project": "demo",
-                "template": "true"
+                "template": "true",
+                "ready": "false"
             }
         }))
         .expect("workspace should parse");
@@ -2090,6 +2121,7 @@ mod tests {
         };
 
         assert!(workspace.template);
+        assert!(!workspace.base.ready);
         assert_eq!(workspace.base.name, "template-demo-123");
         assert_eq!(workspace.base.project.as_deref(), Some("demo"));
     }
