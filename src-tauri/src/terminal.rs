@@ -11,7 +11,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, EventTarget, State, WebviewWindow};
@@ -31,6 +31,11 @@ const REMOTE_BOOTSTRAP_STATE_FILE: &str = "/home/silo/.silo/workspace-bootstrap-
 const REMOTE_BOOTSTRAP_LOCK_DIR: &str = "/home/silo/.silo/workspace-bootstrap.lock";
 const REMOTE_CHROME_USER_DATA_DIR: &str = "/home/silo/.config/google-chrome";
 const WORKSPACE_BOOTSTRAP_VERSION: &str = "6";
+const TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS: usize = 60;
+const TEMPLATE_BOOTSTRAP_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+static TEMPLATE_CHROME_SYNC_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TerminalSessionSummary {
@@ -155,6 +160,7 @@ struct CommandResult {
     stderr: String,
 }
 
+#[derive(Debug, Clone)]
 struct WorkspaceBootstrap {
     remote_url: String,
     target_branch: String,
@@ -237,7 +243,7 @@ pub async fn terminal_attach_terminal(
         });
     }
 
-    if find_terminal_session(&lookup, &name).await?.is_none() {
+    if find_terminal_session(&lookup, &name).await?.is_none() && !lookup.workspace.is_template() {
         bootstrap_workspace(&lookup).await?;
     }
     let (scrollback_vt, scrollback_truncated) = load_scrollback(&lookup, &name).await?;
@@ -270,7 +276,7 @@ pub async fn terminal_run_terminal(
 ) -> Result<TerminalRunResult, String> {
     let lookup = workspaces::find_workspace(&workspace).await?;
     let created = find_terminal_session(&lookup, &name).await?.is_none();
-    if created {
+    if created && !lookup.workspace.is_template() {
         bootstrap_workspace(&lookup).await?;
     }
     let mut payload = command.into_bytes();
@@ -687,7 +693,6 @@ async fn resolve_attached_session(
 
 async fn bootstrap_workspace(lookup: &WorkspaceLookup) -> Result<(), String> {
     let bootstrap = workspace_bootstrap(lookup)?;
-    let bootstrap_signature = workspace_bootstrap_signature(lookup.workspace.name(), &bootstrap);
     let script = workspace_bootstrap_script(lookup, &bootstrap);
     let result = run_remote_command_with_stdin(
         lookup,
@@ -703,11 +708,73 @@ async fn bootstrap_workspace(lookup: &WorkspaceLookup) -> Result<(), String> {
     }
 
     if lookup.workspace.is_template() {
-        sync_template_chrome_profile(lookup, &bootstrap).await?;
+        spawn_template_chrome_profile_sync(lookup.clone(), bootstrap);
+    }
+    Ok(())
+}
+
+pub(crate) async fn bootstrap_template_workspace(workspace: &str) -> Result<(), String> {
+    for attempt in 0..TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS {
+        let lookup = match workspaces::find_workspace(workspace).await {
+            Ok(lookup) => lookup,
+            Err(error) => {
+                if attempt + 1 == TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS {
+                    return Err(error);
+                }
+                std::thread::sleep(TEMPLATE_BOOTSTRAP_POLL_INTERVAL);
+                continue;
+            }
+        };
+
+        if !lookup.workspace.is_template() {
+            return Err(format!("workspace {workspace} is not a template workspace"));
+        }
+
+        if lookup.workspace.status() != "RUNNING" {
+            std::thread::sleep(TEMPLATE_BOOTSTRAP_POLL_INTERVAL);
+            continue;
+        }
+
+        match bootstrap_workspace(&lookup).await {
+            Ok(()) => return Ok(()),
+            Err(error) if should_retry_template_bootstrap(&error) => {
+                if attempt + 1 == TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS {
+                    return Err(error);
+                }
+                std::thread::sleep(TEMPLATE_BOOTSTRAP_POLL_INTERVAL);
+            }
+            Err(error) => return Err(error),
+        }
     }
 
-    persist_workspace_bootstrap_state(lookup, &bootstrap_signature).await?;
-    Ok(())
+    Err(format!(
+        "template workspace {workspace} did not become ready for bootstrap after {} seconds",
+        TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS * TEMPLATE_BOOTSTRAP_POLL_INTERVAL.as_secs() as usize
+    ))
+}
+
+pub(crate) async fn wait_for_template_chrome_sync(workspace: &str) -> Result<(), String> {
+    for _ in 0..TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS {
+        if !template_chrome_sync_in_progress(workspace) {
+            return Ok(());
+        }
+        std::thread::sleep(TEMPLATE_BOOTSTRAP_POLL_INTERVAL);
+    }
+
+    Err(format!(
+        "chrome profile sync is still running for template workspace {workspace}"
+    ))
+}
+
+fn should_retry_template_bootstrap(error: &str) -> bool {
+    [
+        "Connection refused",
+        "System is booting up",
+        "not permitted to log in yet",
+        "port 22",
+    ]
+    .iter()
+    .any(|needle| error.contains(needle))
 }
 
 fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, String> {
@@ -1091,9 +1158,18 @@ fn hash_chrome_profile_entry(root: &Path, path: &Path, hasher: &mut Sha256) -> R
     if metadata.is_file() {
         hasher.update(b"F");
         hasher.update(relative.as_bytes());
-        let contents = fs::read(path)
-            .map_err(|error| format!("failed to read chrome file {}: {error}", path.display()))?;
-        hasher.update(&contents);
+        let mut file = fs::File::open(path)
+            .map_err(|error| format!("failed to open chrome file {}: {error}", path.display()))?;
+        let mut buffer = [0u8; 8192];
+        loop {
+            let count = file.read(&mut buffer).map_err(|error| {
+                format!("failed to read chrome file {}: {error}", path.display())
+            })?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+        }
         return Ok(());
     }
 
@@ -1283,24 +1359,46 @@ async fn sync_template_chrome_profile(
     Ok(())
 }
 
-async fn persist_workspace_bootstrap_state(
-    lookup: &WorkspaceLookup,
-    signature: &str,
-) -> Result<(), String> {
-    let state_path = shell_quote(REMOTE_BOOTSTRAP_STATE_FILE);
-    let signature = shell_quote(signature);
-    let command = format!(
-        "mkdir -p \"$HOME/.silo\" && BOOT_ID=\"$(cat /proc/sys/kernel/random/boot_id)\" && printf '%s\\n%s\\n' \"$BOOT_ID\" {signature} > {state_path} && chmod 600 {state_path}",
-    );
-    let result = run_remote_command(lookup, &run_terminal_user_command(&command)).await?;
-    if !result.success {
-        return Err(remote_command_error(
-            "failed to persist workspace bootstrap state",
-            &result.stderr,
-        ));
+fn spawn_template_chrome_profile_sync(lookup: WorkspaceLookup, bootstrap: WorkspaceBootstrap) {
+    if bootstrap.chrome_user_data_dir.is_empty() || bootstrap.chrome_user_data_hash.is_empty() {
+        return;
     }
 
-    Ok(())
+    let workspace_name = lookup.workspace.name().to_string();
+    let inserted = TEMPLATE_CHROME_SYNC_IN_FLIGHT
+        .lock()
+        .map(|mut in_flight| in_flight.insert(workspace_name.clone()))
+        .unwrap_or(false);
+    if !inserted {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        let result = sync_template_chrome_profile(&lookup, &bootstrap).await;
+        if let Err(error) = result {
+            log::warn!(
+                "background chrome profile sync failed for template workspace {}: {}",
+                workspace_name,
+                error
+            );
+        } else {
+            log::info!(
+                "background chrome profile sync completed for template workspace {}",
+                workspace_name
+            );
+        }
+
+        if let Ok(mut in_flight) = TEMPLATE_CHROME_SYNC_IN_FLIGHT.lock() {
+            in_flight.remove(&workspace_name);
+        }
+    });
+}
+
+fn template_chrome_sync_in_progress(workspace: &str) -> bool {
+    TEMPLATE_CHROME_SYNC_IN_FLIGHT
+        .lock()
+        .map(|in_flight| in_flight.contains(workspace))
+        .unwrap_or(false)
 }
 
 fn chrome_profile_remote_sync_command() -> String {

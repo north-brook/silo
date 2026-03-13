@@ -1,4 +1,5 @@
 use crate::config::ConfigStore;
+use crate::terminal;
 use crate::workspaces::{self, SnapshotTemplate, TemplateWorkspace, Workspace};
 
 #[tauri::command]
@@ -8,7 +9,25 @@ pub async fn templates_list_templates() -> Result<Vec<SnapshotTemplate>, String>
 
 #[tauri::command]
 pub async fn templates_create_template(project: String) -> Result<TemplateWorkspace, String> {
-    workspaces::create_template_workspace_for_project(&project, None).await
+    workspaces::create_template_workspace_for_project(&project, None).await?;
+    let workspace_name = workspaces::generate_template_workspace_name(&project);
+    terminal::bootstrap_template_workspace(&workspace_name).await?;
+
+    let config = ConfigStore::new()
+        .and_then(|store| store.load())
+        .map_err(|error| error.to_string())?;
+    let gcloud = workspaces::resolve_project_gcloud_config(&config, &project)?;
+    let workspace =
+        workspaces::find_workspace_in_project(&workspace_name, &gcloud.account, &gcloud.project)
+            .await?
+            .ok_or_else(|| format!("template workspace not found for project {project}"))?;
+
+    match workspace {
+        Workspace::Template(workspace) => Ok(workspace),
+        Workspace::Branch(_) => Err(format!(
+            "workspace name is already in use for project {project}: {workspace_name}"
+        )),
+    }
 }
 
 #[tauri::command]
@@ -42,6 +61,8 @@ pub async fn templates_save_template(project: String) -> Result<(), String> {
             "workspace name is already in use for project {project}: {workspace_name}"
         ));
     }
+
+    terminal::wait_for_template_chrome_sync(&workspace_name).await?;
 
     let zone = workspace.zone().to_string();
     workspaces::stop_and_snapshot_template_workspace(

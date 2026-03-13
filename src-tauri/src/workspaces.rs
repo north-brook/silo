@@ -96,6 +96,10 @@ impl Workspace {
         &self.base().zone
     }
 
+    pub(crate) fn status(&self) -> &str {
+        &self.base().status
+    }
+
     pub(crate) fn project(&self) -> Option<&str> {
         self.base().project.as_deref()
     }
