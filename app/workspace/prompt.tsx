@@ -1,12 +1,13 @@
 "use client";
 
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowUp, ChevronsUpDown, Laptop, Terminal } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "../../lib/invoke";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/popover";
-import { TerminalLoader } from "../components/terminal-loader";
+import { Loader } from "../components/loader";
+import { toast } from "../components/toaster";
 import { ClaudeIcon } from "../icons/claude";
 import { CodexIcon } from "../icons/codex";
 
@@ -58,6 +59,7 @@ export function PromptWorkspace({
 	project: string | null;
 }) {
 	const router = useRouter();
+	const queryClient = useQueryClient();
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const [prompt, setPrompt] = useState("");
 
@@ -74,9 +76,15 @@ export function PromptWorkspace({
 				workspace,
 			}),
 		onSuccess: (result) => {
+			queryClient.invalidateQueries({
+				queryKey: ["terminal_list_terminals", workspace],
+			});
 			router.push(
 				`/workspace/terminal?project=${encodeURIComponent(project ?? "")}&workspace=${encodeURIComponent(workspace)}&terminal=${encodeURIComponent(result.terminal)}`,
 			);
+		},
+		onError: (error) => {
+			toast({ variant: "error", title: "Failed to create terminal", description: error.message });
 		},
 	});
 
@@ -149,9 +157,9 @@ export function PromptWorkspace({
 							type="button"
 							disabled={createTerminal.isPending}
 							onClick={() => createTerminal.mutate()}
-							className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-text-muted hover:text-text transition-colors disabled:opacity-50"
+							className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-text-muted hover:text-text transition-colors"
 						>
-							<Terminal size={12} />
+							{createTerminal.isPending ? <Loader /> : <Terminal size={12} />}
 							Open Terminal
 						</button>
 						<button
@@ -164,7 +172,7 @@ export function PromptWorkspace({
 					</div>
 				) : (
 					<div className="flex items-center gap-2 mt-3 px-2 py-1 text-[11px] text-text-muted">
-						<TerminalLoader className="text-text-muted" />
+						<Loader className="text-text-muted" />
 						<span>{statusMessage(status)}</span>
 					</div>
 				)}

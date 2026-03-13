@@ -5,9 +5,10 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useRef } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import "@xterm/xterm/css/xterm.css";
 import { invoke } from "../../../lib/invoke";
+import { Loader } from "../../components/loader";
 import { attachTerminalBindings } from "./bindings";
 
 const DELETE_BYTE = 0x7f;
@@ -56,10 +57,10 @@ interface TerminalErrorPayload {
 }
 
 const THEME = {
-	background: "#0a0a0c",
+	background: "#0f1014",
 	foreground: "#b0b8c8",
 	cursor: "#638cff",
-	cursorAccent: "#0a0a0c",
+	cursorAccent: "#0f1014",
 	selectionBackground: "#638cff3d",
 	black: "#16181e",
 	red: "#f87171",
@@ -110,8 +111,10 @@ function WorkspaceTerminal({
 	const terminalRef = useRef<Terminal | null>(null);
 	const terminalIdRef = useRef<string | null>(null);
 	const pendingDetachRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const [loading, setLoading] = useState(true);
 
 	useEffect(() => {
+		setLoading(true);
 		if (!containerRef.current) return;
 		if (pendingDetachRef.current) {
 			clearTimeout(pendingDetachRef.current);
@@ -207,6 +210,7 @@ function WorkspaceTerminal({
 
 				attachedTerminal = result.terminal;
 				terminalIdRef.current = result.terminal;
+				setLoading(false);
 
 				if (result.scrollback_vt) {
 					term.write(result.scrollback_vt);
@@ -219,6 +223,7 @@ function WorkspaceTerminal({
 				});
 				term.focus();
 			} catch (error) {
+				setLoading(false);
 				if (!disposed) {
 					term.writeln(`\r\n[attach failed] ${String(error)}`);
 				}
@@ -279,5 +284,17 @@ function WorkspaceTerminal({
 		};
 	}, [workspace, terminal]);
 
-	return <div ref={containerRef} className="flex-1 min-h-0" />;
+	return (
+		<div className="flex-1 min-h-0 bg-surface relative">
+			{loading && (
+				<div className="absolute inset-0 flex items-center justify-center z-10">
+					<div className="flex items-center gap-2 text-[11px] text-text-muted">
+						<Loader />
+						Connecting to terminal...
+					</div>
+				</div>
+			)}
+			<div ref={containerRef} className="h-full w-full p-1.5" />
+		</div>
+	);
 }
