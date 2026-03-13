@@ -2,9 +2,18 @@ import type { Terminal } from "@xterm/xterm";
 
 const COMMAND_LEFT = "\u0001";
 const COMMAND_RIGHT = "\u0005";
-const COMMAND_BACKSPACE = "\u0015";
+const COMMAND_BACKSPACE = "\u001b[1337;1u";
 const ALT_LEFT = "\u001bb";
 const ALT_RIGHT = "\u001bf";
+const SHIFT_ENTER = "\n";
+
+interface TerminalBindingEvent {
+	altKey: boolean;
+	ctrlKey: boolean;
+	key: string;
+	metaKey: boolean;
+	shiftKey: boolean;
+}
 
 export function attachTerminalBindings(
 	term: Terminal,
@@ -30,7 +39,17 @@ export function attachTerminalBindings(
 	};
 }
 
-function sequenceForEvent(event: KeyboardEvent): string | null {
+export function sequenceForEvent(event: TerminalBindingEvent): string | null {
+	if (
+		event.shiftKey &&
+		!event.metaKey &&
+		!event.altKey &&
+		!event.ctrlKey &&
+		event.key === "Enter"
+	) {
+		return SHIFT_ENTER;
+	}
+
 	if (event.metaKey && !event.altKey && !event.ctrlKey) {
 		switch (event.key) {
 			case "ArrowLeft":
