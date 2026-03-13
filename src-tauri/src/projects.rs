@@ -319,7 +319,9 @@ fn resolve_project_env_files(project_root: &Path) -> Vec<String> {
                 continue;
             };
             if let Some(relative) = normalize_relative_path(relative) {
-                env_files.push(relative);
+                if is_git_ignored_path(project_root, &relative) {
+                    env_files.push(relative);
+                }
             }
         }
     }
@@ -412,6 +414,35 @@ fn normalize_relative_path(path: &Path) -> Option<String> {
     }
 
     (!normalized.is_empty()).then_some(normalized)
+}
+
+fn is_git_ignored_path(project_root: &Path, relative_path: &str) -> bool {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(["check-ignore", "--quiet", "--"])
+        .arg(relative_path)
+        .output();
+
+    let Ok(output) = output else {
+        return false;
+    };
+
+    if output.status.success() {
+        return true;
+    }
+
+    if output.status.code() == Some(1) {
+        return false;
+    }
+
+    log::warn!(
+        "git check-ignore failed for {} in {}: {}",
+        relative_path,
+        project_root.display(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    false
 }
 
 fn resolve_package_json_icon(project_root: &Path) -> Option<PathBuf> {
@@ -630,6 +661,11 @@ mod tests {
         let project_root = temp_dir.path.join("demo");
         init_repo_with_origin(&project_root);
         fs::create_dir_all(project_root.join("apps/web")).expect("nested app dir should exist");
+        fs::write(
+            project_root.join(".gitignore"),
+            ".env.local\napps/web/.env.development.local\n",
+        )
+        .expect("gitignore should be written");
         fs::write(project_root.join(".env.local"), "ROOT=1").expect("root env should be written");
         fs::write(
             project_root.join("apps/web/.env.development.local"),
@@ -653,6 +689,8 @@ mod tests {
         let temp_dir = TempDir::new();
         let project_root = temp_dir.path.join("demo");
         init_repo_with_origin(&project_root);
+        fs::write(project_root.join(".gitignore"), "src/.env.test\n")
+            .expect("gitignore should be written");
         fs::create_dir_all(project_root.join("node_modules/pkg"))
             .expect("ignored dir should be created");
         fs::create_dir_all(project_root.join("src")).expect("source dir should be created");
@@ -664,6 +702,33 @@ mod tests {
         let env_files = resolve_project_env_files(&project_root);
 
         assert_eq!(env_files, vec!["src/.env.test".to_string()]);
+    }
+
+    #[test]
+    fn resolve_project_env_files_skips_git_tracked_files() {
+        let temp_dir = TempDir::new();
+        let project_root = temp_dir.path.join("demo");
+        init_repo_with_origin(&project_root);
+        fs::write(
+            project_root.join(".gitignore"),
+            ".env.local\n.env.production\n",
+        )
+        .expect("gitignore should be written");
+        fs::write(project_root.join(".env.local"), "LOCAL=1").expect("ignored env should exist");
+        fs::write(project_root.join(".env.production"), "TRACKED=1")
+            .expect("tracked env should exist");
+
+        let add = Command::new("git")
+            .arg("-C")
+            .arg(&project_root)
+            .args(["add", "--force", ".env.production"])
+            .output()
+            .expect("git add should run");
+        assert!(add.status.success(), "git add should succeed");
+
+        let env_files = resolve_project_env_files(&project_root);
+
+        assert_eq!(env_files, vec![".env.local".to_string()]);
     }
 
     fn init_repo_with_origin(project_root: &Path) {
