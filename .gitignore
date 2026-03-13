@@ -14,6 +14,7 @@ dist-ssr
 out
 *.local
 .next
+tsconfig.tsbuildinfo
 
 # Editor directories and files
 .vscode/*
