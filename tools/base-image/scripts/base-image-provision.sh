@@ -232,10 +232,34 @@ fi
 cp "${DEVELOPER_HOME}/.oh-my-zsh/templates/zshrc.zsh-template" "${DEVELOPER_HOME}/.zshrc"
 sed -i 's|^export ZSH=.*|export ZSH="$HOME/.oh-my-zsh"|' "${DEVELOPER_HOME}/.zshrc"
 sed -i 's/^ZSH_THEME=.*/ZSH_THEME="robbyrussell"/' "${DEVELOPER_HOME}/.zshrc"
+grep -qxF 'PROMPT_EOL_MARK=""' "${DEVELOPER_HOME}/.zshrc" || \
+  printf 'PROMPT_EOL_MARK=""\n' >> "${DEVELOPER_HOME}/.zshrc"
 grep -qxF 'export PATH="/usr/local/bin:$PATH"' "${DEVELOPER_HOME}/.zshrc" || \
   printf '\nexport PATH="/usr/local/bin:$PATH"\n' >> "${DEVELOPER_HOME}/.zshrc"
 grep -qxF '[[ -f /etc/profile.d/silo-homebrew.sh ]] && source /etc/profile.d/silo-homebrew.sh' "${DEVELOPER_HOME}/.zshrc" || \
   printf '[[ -f /etc/profile.d/silo-homebrew.sh ]] && source /etc/profile.d/silo-homebrew.sh\n' >> "${DEVELOPER_HOME}/.zshrc"
+if ! grep -qxF 'if [[ $- == *i* ]] && [[ -t 0 ]] && [[ -t 1 ]]; then' "${DEVELOPER_HOME}/.zshrc"; then
+  cat >> "${DEVELOPER_HOME}/.zshrc" <<'EOF'
+if [[ $- == *i* ]] && [[ -t 0 ]] && [[ -t 1 ]]; then
+  # Normalize terminal line discipline for interactive shells.
+  stty sane 2>/dev/null || true
+  stty erase '^?' -ixon -ixoff icrnl -inlcr -igncr opost onlcr isig icanon iexten echo echoe echok echoctl 2>/dev/null || true
+
+  # Match common terminal editing shortcuts to zsh widgets.
+  bindkey '^A' beginning-of-line
+  bindkey '^E' end-of-line
+  bindkey '^U' backward-kill-line
+  bindkey '^[b' backward-word
+  bindkey '^[f' forward-word
+  bindkey '^[[1;3D' backward-word
+  bindkey '^[[1;3C' forward-word
+
+  # Match xterm.js capabilities for Silo-managed interactive SSH terminals.
+  export TERM=xterm-256color
+  export COLORTERM="${COLORTERM:-truecolor}"
+fi
+EOF
+fi
 chown -R "${DEVELOPER_USER}:${DEVELOPER_USER}" "${DEVELOPER_HOME}/.oh-my-zsh" "${DEVELOPER_HOME}/.zshrc"
 
 if command -v fdfind >/dev/null 2>&1; then

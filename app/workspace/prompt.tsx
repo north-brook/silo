@@ -19,12 +19,12 @@ const PROVIDERS = [
 	{
 		id: "codex",
 		label: "Codex",
-		icon: <CodexIcon height={14} color="#FFFFFF" />,
+		icon: <CodexIcon height={14} />,
 	},
 	{
 		id: "claude",
 		label: "Claude",
-		icon: <ClaudeIcon height={14} color="#D97757" />,
+		icon: <ClaudeIcon height={14} />,
 	},
 ] as Provider[];
 

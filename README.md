@@ -35,7 +35,6 @@ cd tools/base-image
 cargo run -- \
   --project silo-images \
   --family silo-base \
-  --member group:silo-users@example.com \
   --dry-run
 ```
 
@@ -45,16 +44,17 @@ Example publish:
 cd tools/base-image
 cargo run -- \
   --project silo-images \
-  --family silo-base \
-  --member group:silo-users@example.com
+  --family silo-base
 ```
+
+Published images are shared by default with `allAuthenticatedUsers`, so they can be used as a base image from any authenticated GCP project. Add extra `--member` flags only when you want additional explicit principals recorded alongside that default policy.
 
 The binary will:
 
 - create a temporary Ubuntu 24.04 builder VM
 - provision the shared toolchain, including Rust
 - create a new versioned image in the target family
-- grant `roles/compute.imageUser` on the image to each configured IAM member
+- grant `roles/compute.imageUser` on the image to `allAuthenticatedUsers` plus any additional configured IAM members
 - delete the builder VM unless `--keep-builder-on-failure` is set
 
 ## Recommended IDE Setup

@@ -15,6 +15,7 @@ const DEFAULT_MACHINE_TYPE: &str = "e2-standard-4";
 const DEFAULT_DISK_SIZE_GB: u32 = 80;
 const DEFAULT_BUILD_TIMEOUT_SECS: u64 = 45 * 60;
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 10;
+const DEFAULT_PUBLIC_IMAGE_MEMBER: &str = "allAuthenticatedUsers";
 const SUCCESS_MARKER: &str = "SILO_BASE_IMAGE_PROVISIONING_COMPLETE";
 const FAILURE_MARKER: &str = "SILO_BASE_IMAGE_PROVISIONING_FAILED";
 const PROVISION_SCRIPT: &str = include_str!("../scripts/base-image-provision.sh");
@@ -123,9 +124,6 @@ fn run_workflow(
     workflow_result?;
 
     println!("published image {} in family {}", image_name, config.family);
-    if config.members.is_empty() {
-        println!("warning: image was published without any shared IAM members");
-    }
     Ok(())
 }
 
@@ -147,7 +145,8 @@ Options:
   --source-image-family <id>  Source image family (default: {DEFAULT_SOURCE_IMAGE_FAMILY})
   --source-image-project <id> Source image project (default: {DEFAULT_SOURCE_IMAGE_PROJECT})
   --builder-name-prefix <id>  Prefix for the temporary builder VM (default: silo-base-image-builder)
-  --member <principal>        IAM member to grant roles/compute.imageUser on the new image
+  --member <principal>        Additional IAM member to grant roles/compute.imageUser on the new image
+                             Defaults always include {DEFAULT_PUBLIC_IMAGE_MEMBER} for cross-project image use
                              Example: --member group:silo-users@example.com
   --build-timeout-secs <n>    Wait timeout for startup provisioning (default: {DEFAULT_BUILD_TIMEOUT_SECS})
   --poll-interval-secs <n>    Serial console poll interval (default: {DEFAULT_POLL_INTERVAL_SECS})
@@ -189,7 +188,7 @@ impl BaseImageConfig {
             source_image_family: DEFAULT_SOURCE_IMAGE_FAMILY.to_string(),
             source_image_project: DEFAULT_SOURCE_IMAGE_PROJECT.to_string(),
             builder_name_prefix: "silo-base-image-builder".to_string(),
-            members: Vec::new(),
+            members: vec![DEFAULT_PUBLIC_IMAGE_MEMBER.to_string()],
             build_timeout_secs: DEFAULT_BUILD_TIMEOUT_SECS,
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             keep_builder_on_failure: false,
@@ -249,7 +248,7 @@ impl BaseImageConfig {
                             "--member must look like user:alice@example.com or group:team@example.com, got {value}"
                         ));
                     }
-                    config.members.push(value);
+                    push_member(&mut config.members, value);
                 }
                 "--build-timeout-secs" => {
                     index += 1;
@@ -327,6 +326,12 @@ fn render_members(members: &[String]) -> String {
         "none".to_string()
     } else {
         members.join(", ")
+    }
+}
+
+fn push_member(members: &mut Vec<String>, value: String) {
+    if !members.iter().any(|existing| existing == &value) {
+        members.push(value);
     }
 }
 
@@ -547,11 +552,29 @@ mod tests {
 
         assert_eq!(config.project, "silo-images");
         assert_eq!(config.family, DEFAULT_IMAGE_FAMILY);
-        assert_eq!(config.members.len(), 2);
+        assert_eq!(
+            config.members,
+            vec![
+                "allAuthenticatedUsers".to_string(),
+                "group:silo@example.com".to_string(),
+                "user:alice@example.com".to_string()
+            ]
+        );
     }
 
     #[test]
-    fn parse_accepts_all_authenticated_users_member() {
+    fn parse_defaults_to_public_image_access() {
+        let config = BaseImageConfig::parse(vec![
+            "--project".to_string(),
+            "silo-images".to_string(),
+        ])
+        .expect("config should parse");
+
+        assert_eq!(config.members, vec!["allAuthenticatedUsers".to_string()]);
+    }
+
+    #[test]
+    fn parse_deduplicates_all_authenticated_users_member() {
         let config = BaseImageConfig::parse(vec![
             "--project".to_string(),
             "silo-images".to_string(),

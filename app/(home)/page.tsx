@@ -39,7 +39,7 @@ export default function HomePage() {
 		<>
 			<div data-tauri-drag-region className="h-8 shrink-0" />
 			<div className="flex flex-col items-center justify-center flex-1 gap-6">
-				<SiloIcon height={32} color="#FFFFFF" />
+				<SiloIcon height={32} />
 				<button
 					type="button"
 					onClick={() => addProject.mutate()}

@@ -1,14 +1,35 @@
 "use client";
 
-import { useEffect, useRef, Suspense } from "react";
-import { useSearchParams } from "next/navigation";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
 import { Channel } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { FitAddon } from "@xterm/addon-fit";
+import { Terminal } from "@xterm/xterm";
+import { useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useRef } from "react";
 import "@xterm/xterm/css/xterm.css";
 import { invoke } from "../../../lib/invoke";
-import { normalizeTerminalOutput } from "./output";
+import { attachTerminalBindings } from "./bindings";
+
+const DELETE_BYTE = 0x7f;
+const BACKSPACE_ERASE_SEQUENCE = [0x08, 0x20, 0x08];
+
+function normalizeTerminalOutput(data: ArrayBuffer): Uint8Array {
+	const bytes = new Uint8Array(data);
+	if (!bytes.includes(DELETE_BYTE)) {
+		return bytes;
+	}
+
+	const normalized: number[] = [];
+	for (const byte of bytes) {
+		if (byte === DELETE_BYTE) {
+			normalized.push(...BACKSPACE_ERASE_SEQUENCE);
+			continue;
+		}
+		normalized.push(byte);
+	}
+
+	return Uint8Array.from(normalized);
+}
 
 interface TerminalAttachResult {
 	terminal: string;
@@ -121,6 +142,20 @@ function WorkspaceTerminal({
 		term.focus();
 
 		terminalRef.current = term;
+		const encoder = new TextEncoder();
+		const sendTerminalInput = (data: string | Uint8Array) => {
+			if (!terminalIdRef.current) {
+				return;
+			}
+
+			const bytes =
+				typeof data === "string" ? encoder.encode(data) : data;
+			void invoke("terminal_write_terminal", {
+				terminal: terminalIdRef.current,
+				data: Array.from(bytes),
+			});
+		};
+		const detachBindings = attachTerminalBindings(term, sendTerminalInput);
 
 		const output = new Channel<ArrayBuffer>();
 		output.onmessage = (data: ArrayBuffer) => {
@@ -192,25 +227,15 @@ function WorkspaceTerminal({
 		})();
 
 		term.onData((data) => {
-			if (terminalIdRef.current) {
-				void invoke("terminal_write_terminal", {
-					terminal: terminalIdRef.current,
-					data: Array.from(new TextEncoder().encode(data)),
-				});
-			}
+			sendTerminalInput(data);
 		});
 
 		term.onBinary((data) => {
-			if (terminalIdRef.current) {
-				const bytes = new Uint8Array(data.length);
-				for (let i = 0; i < data.length; i++) {
-					bytes[i] = data.charCodeAt(i);
-				}
-				void invoke("terminal_write_terminal", {
-					terminal: terminalIdRef.current,
-					data: Array.from(bytes),
-				});
+			const bytes = new Uint8Array(data.length);
+			for (let i = 0; i < data.length; i++) {
+				bytes[i] = data.charCodeAt(i);
 			}
+			sendTerminalInput(bytes);
 		});
 
 		term.onResize(({ cols, rows }) => {
@@ -231,6 +256,7 @@ function WorkspaceTerminal({
 		return () => {
 			disposed = true;
 			resizeObserver.disconnect();
+			detachBindings();
 			term.dispose();
 			terminalRef.current = null;
 			if (unlistenExit) {

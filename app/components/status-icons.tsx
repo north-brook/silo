@@ -3,6 +3,7 @@ import { GCloudIcon } from "../icons/gcloud";
 import { GHIcon } from "../icons/gh";
 import { CodexIcon } from "../icons/codex";
 import { ClaudeIcon } from "../icons/claude";
+import { ChromeIcon } from "../icons/chrome";
 import { Tooltip, TooltipTrigger, TooltipContent } from "./tooltip";
 import { toast } from "./toaster";
 import { invoke } from "../../lib/invoke";
@@ -54,7 +55,7 @@ function GCloudStatus() {
 			? "Google Cloud: click to authenticate"
 			: "Google Cloud: connected";
 
-	const icon = <GCloudIcon height={12} color="#4285F4" />;
+	const icon = <GCloudIcon height={12} />;
 
 	return (
 		<Tooltip>
@@ -103,19 +104,19 @@ function GHStatus() {
 		mutationFn: () => withTimeout(invoke("gh_authenticate"), 10000),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["gh_configured"] });
-			toast({ variant: "success", title: "GitHub CLI authenticated" });
+			toast({ variant: "success", title: "GitHub authenticated" });
 		},
 	});
 
 	const active = installed.data && configured.data;
 	const canAuth = installed.data && !configured.data;
 	const label = !installed.data
-		? "GitHub CLI: not installed"
+		? "GitHub: not installed"
 		: !configured.data
-			? "GitHub CLI: click to authenticate"
-			: "GitHub CLI: connected";
+			? "GitHub: click to authenticate"
+			: "GitHub: connected";
 
-	const icon = <GHIcon height={12} color="#FFFFFF" />;
+	const icon = <GHIcon height={12} />;
 
 	return (
 		<Tooltip>
@@ -163,7 +164,7 @@ function CodexStatus() {
 		? "Codex: connected"
 		: "Codex: click to authenticate";
 
-	const icon = <CodexIcon height={12} color="#FFFFFF" />;
+	const icon = <CodexIcon height={12} />;
 
 	return (
 		<Tooltip>
@@ -211,7 +212,7 @@ function ClaudeStatus() {
 		? "Claude: connected"
 		: "Claude: click to authenticate";
 
-	const icon = <ClaudeIcon height={12} color="#D97757" />;
+	const icon = <ClaudeIcon height={12} />;
 
 	return (
 		<Tooltip>
@@ -235,11 +236,25 @@ function ClaudeStatus() {
 	);
 }
 
+function ChromeStatus() {
+	return (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<span className="flex items-center opacity-50">
+					<ChromeIcon height={12} />
+				</span>
+			</TooltipTrigger>
+			<TooltipContent side="bottom">Chrome: not configured</TooltipContent>
+		</Tooltip>
+	);
+}
+
 export function StatusIcons() {
 	return (
 		<div className="flex items-center gap-2">
 			<GCloudStatus />
 			<GHStatus />
+			<ChromeStatus />
 			<CodexStatus />
 			<ClaudeStatus />
 		</div>
