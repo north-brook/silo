@@ -3,21 +3,30 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Check, Laptop, Terminal } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { invoke } from "../../lib/invoke";
 import { Loader } from "../components/loader";
 import { toast } from "../components/toaster";
+import { ChromeIcon } from "../icons/chrome";
+import { ClaudeIcon } from "../icons/claude";
+import { CodexIcon } from "../icons/codex";
+import { GCloudIcon } from "../icons/gcloud";
+import { GHIcon } from "../icons/gh";
 import { SiloIcon } from "../icons/silo";
 
 interface Step {
 	label: string;
+	icon: ReactNode;
 	state: "pending" | "active" | "done";
 }
 
-function useProvisioningSteps(status: string): { steps: Step[]; allDone: boolean } {
+const ICON_SIZE = 12;
+
+function useProvisioningSteps(
+	status: string,
+	ready: boolean,
+): { steps: Step[]; allDone: boolean } {
 	const [configIndex, setConfigIndex] = useState(-1);
-	const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
-	const startedRef = useRef(false);
 
 	const isRunning = status === "RUNNING";
 	const isProvisioning =
@@ -36,42 +45,52 @@ function useProvisioningSteps(status: string): { steps: Step[]; allDone: boolean
 			: "pending";
 
 	const configSteps = [
-		{ label: "Configuring git", delay: 3_000 },
-		{ label: "Configuring codex", delay: 5_000 },
-		{ label: "Configuring claude code", delay: 5_000 },
-		{ label: "Configuring chrome", delay: 30_000 },
+		{ label: "Configuring git", icon: <GHIcon height={ICON_SIZE} />, delay: 2_000 },
+		{ label: "Configuring codex", icon: <CodexIcon height={ICON_SIZE} />, delay: 2_000 },
+		{ label: "Configuring claude code", icon: <ClaudeIcon height={ICON_SIZE} />, delay: 2_000 },
+		{ label: "Configuring chrome", icon: <ChromeIcon height={ICON_SIZE} />, delay: 30_000 },
 	];
 
 	// Start config timers once VM is running
 	useEffect(() => {
-		if (!isRunning || startedRef.current) return;
-		startedRef.current = true;
+		if (!isRunning) return;
 		setConfigIndex(0);
 
+		const timers: ReturnType<typeof setTimeout>[] = [];
 		let cumulative = 0;
 		for (let i = 0; i < configSteps.length; i++) {
 			cumulative += configSteps[i].delay;
-			const timer = setTimeout(() => setConfigIndex(i + 1), cumulative);
-			timersRef.current.push(timer);
+			timers.push(setTimeout(() => setConfigIndex(i + 1), cumulative));
 		}
 
 		return () => {
-			for (const t of timersRef.current) clearTimeout(t);
+			for (const t of timers) clearTimeout(t);
 		};
 	}, [isRunning]);
 
+	// "Configuring secure access" runs until ready
+	const configsDone = configIndex >= configSteps.length;
+	const secureAccessState: Step["state"] = ready
+		? "done"
+		: configsDone
+			? "active"
+			: "pending";
+
 	const steps: Step[] = [
-		{ label: "Provisioning virtual machine", state: vmProvisionState },
-		{ label: "Starting virtual machine", state: vmStartState },
-		...configSteps.map(({ label }, i) => {
-			let state: Step["state"] = "pending";
-			if (configIndex > i) state = "done";
-			else if (configIndex === i) state = "active";
-			return { label, state };
+		{ label: "Provisioning virtual machine", icon: <GCloudIcon height={ICON_SIZE} />, state: vmProvisionState },
+		{ label: "Starting virtual machine", icon: <GCloudIcon height={ICON_SIZE} />, state: vmStartState },
+		...configSteps.map(({ label, icon }, i) => {
+			let state: Step["state"] = ready ? "done" : "pending";
+			if (!ready) {
+				if (configIndex > i) state = "done";
+				else if (configIndex === i) state = "active";
+			}
+			return { label, icon, state };
 		}),
+		{ label: "Configuring secure access", icon: <GCloudIcon height={ICON_SIZE} />, state: secureAccessState },
 	];
 
-	const allDone = configIndex >= configSteps.length;
+	const allDone = ready;
 
 	return { steps, allDone };
 }
@@ -79,14 +98,8 @@ function useProvisioningSteps(status: string): { steps: Step[]; allDone: boolean
 function StepRow({ step }: { step: Step }) {
 	return (
 		<div className="flex items-center gap-2.5 text-[11px]">
-			<span className="w-3 flex items-center justify-center shrink-0">
-				{step.state === "done" ? (
-					<Check size={12} className="text-green-500" />
-				) : step.state === "active" ? (
-					<Loader />
-				) : (
-					<span className="block w-1 h-1 rounded-full bg-text-placeholder" />
-				)}
+			<span className={`w-3 flex items-center justify-center shrink-0 ${step.state === "pending" ? "opacity-30" : ""}`}>
+				{step.icon}
 			</span>
 			<span
 				className={
@@ -99,24 +112,33 @@ function StepRow({ step }: { step: Step }) {
 			>
 				{step.label}
 			</span>
+			<span className="ml-auto w-3 flex items-center justify-center shrink-0">
+				{step.state === "done" ? (
+					<Check size={10} className="text-green-500" />
+				) : step.state === "active" ? (
+					<Loader />
+				) : null}
+			</span>
 		</div>
 	);
 }
 
 export function TemplatingWorkspace({
 	isRunning,
+	ready,
 	status,
 	workspace,
 	project,
 }: {
 	isRunning: boolean;
+	ready: boolean;
 	status: string;
 	workspace: string;
 	project: string | null;
 }) {
 	const router = useRouter();
 	const queryClient = useQueryClient();
-	const { steps, allDone } = useProvisioningSteps(status);
+	const { steps, allDone } = useProvisioningSteps(status, ready);
 
 	const createTerminal = useMutation({
 		mutationFn: () =>
@@ -141,11 +163,13 @@ export function TemplatingWorkspace({
 			<div className="flex flex-col items-center gap-5">
 				<SiloIcon height={24} className="opacity-40" />
 
-				<div className="flex flex-col gap-1.5">
-					{steps.map((step) => (
-						<StepRow key={step.label} step={step} />
-					))}
-				</div>
+				{!allDone && (
+					<div className="flex flex-col gap-1.5">
+						{steps.map((step) => (
+							<StepRow key={step.label} step={step} />
+						))}
+					</div>
+				)}
 
 				{allDone && (
 					<div className="flex items-center gap-3">
