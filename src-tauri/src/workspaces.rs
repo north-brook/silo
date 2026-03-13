@@ -1672,6 +1672,7 @@ mod tests {
                 image_project: "ubuntu-os-cloud".to_string(),
             },
             git: Default::default(),
+            chrome: Default::default(),
             codex: Default::default(),
             claude: Default::default(),
             projects: IndexMap::new(),
@@ -1682,6 +1683,7 @@ mod tests {
             image: None,
             remote_url: "git@github.com:example/demo.git".to_string(),
             target_branch: String::new(),
+            env_files: Vec::new(),
             gcloud: ProjectGcloudConfig {
                 project: Some("override-project".to_string()),
                 region: Some("us-west1".to_string()),
@@ -1729,6 +1731,7 @@ mod tests {
                 image_project: "ubuntu-os-cloud".to_string(),
             },
             git: Default::default(),
+            chrome: Default::default(),
             codex: Default::default(),
             claude: Default::default(),
             projects: IndexMap::new(),
@@ -1739,6 +1742,7 @@ mod tests {
             image: None,
             remote_url: "git@github.com:example/demo.git".to_string(),
             target_branch: String::new(),
+            env_files: Vec::new(),
             gcloud: ProjectGcloudConfig {
                 account: Some("someone-else@example.com".to_string()),
                 ..Default::default()

@@ -1,10 +1,15 @@
 use crate::config::ConfigStore;
 use crate::workspaces::{self, WorkspaceLookup};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::io::{Read, Write};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,7 +29,8 @@ const TERMINAL_WORKSPACE_DIR: &str = "/home/silo/workspace";
 const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
 const REMOTE_BOOTSTRAP_STATE_FILE: &str = "/home/silo/.silo/workspace-bootstrap-state";
 const REMOTE_BOOTSTRAP_LOCK_DIR: &str = "/home/silo/.silo/workspace-bootstrap.lock";
-const WORKSPACE_BOOTSTRAP_VERSION: &str = "5";
+const REMOTE_CHROME_USER_DATA_DIR: &str = "/home/silo/.config/google-chrome";
+const WORKSPACE_BOOTSTRAP_VERSION: &str = "6";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TerminalSessionSummary {
@@ -155,10 +161,20 @@ struct WorkspaceBootstrap {
     workspace_branch: Option<String>,
     gh_username: String,
     gh_token: String,
+    chrome_user_data_dir: String,
+    chrome_user_data_hash: String,
     codex_token: String,
     claude_token: String,
     git_user_name: String,
     git_user_email: String,
+    env_files: Vec<BootstrapEnvFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BootstrapEnvFile {
+    relative_path: String,
+    contents_base64: String,
+    contents_sha256: String,
 }
 
 #[tauri::command]
@@ -671,6 +687,7 @@ async fn resolve_attached_session(
 
 async fn bootstrap_workspace(lookup: &WorkspaceLookup) -> Result<(), String> {
     let bootstrap = workspace_bootstrap(lookup)?;
+    let bootstrap_signature = workspace_bootstrap_signature(lookup.workspace.name(), &bootstrap);
     let script = workspace_bootstrap_script(lookup, &bootstrap);
     let result = run_remote_command_with_stdin(
         lookup,
@@ -685,6 +702,11 @@ async fn bootstrap_workspace(lookup: &WorkspaceLookup) -> Result<(), String> {
         ));
     }
 
+    if lookup.workspace.is_template() {
+        sync_template_chrome_profile(lookup, &bootstrap).await?;
+    }
+
+    persist_workspace_bootstrap_state(lookup, &bootstrap_signature).await?;
     Ok(())
 }
 
@@ -742,16 +764,25 @@ fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, S
         Some(branch)
     };
 
+    let (chrome_user_data_dir, chrome_user_data_hash) = if lookup.workspace.is_template() {
+        load_bootstrap_chrome_profile(&config.chrome.user_data_dir)
+    } else {
+        (String::new(), String::new())
+    };
+
     Ok(WorkspaceBootstrap {
         remote_url: project.remote_url.clone(),
         target_branch,
         workspace_branch,
         gh_username: config.git.gh_username.clone(),
         gh_token: config.git.gh_token.clone(),
+        chrome_user_data_dir,
+        chrome_user_data_hash,
         codex_token: config.codex.token.clone(),
         claude_token: config.claude.token.clone(),
         git_user_name: config.git.user_name.clone(),
         git_user_email: config.git.user_email.clone(),
+        env_files: load_bootstrap_env_files(project_name, project),
     })
 }
 
@@ -761,20 +792,12 @@ fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBoo
     let claude_settings_json = claude_settings_json();
     let claude_state_json = claude_state_json();
     let gh_hosts_yml = gh_hosts_yml(&bootstrap.gh_username, &bootstrap.gh_token);
-    let bootstrap_signature = format!(
-        "version={}\nworkspace={}\nremote_url={}\ntarget_branch={}\nworkspace_branch={}\ngh_username={}\ngh_token={}\ncodex_token={}\nclaude_token={}\ngit_user_name={}\ngit_user_email={}",
-        WORKSPACE_BOOTSTRAP_VERSION,
-        lookup.workspace.name(),
-        bootstrap.remote_url,
-        bootstrap.target_branch,
-        bootstrap.workspace_branch.as_deref().unwrap_or(""),
-        bootstrap.gh_username,
-        bootstrap.gh_token,
-        bootstrap.codex_token,
-        bootstrap.claude_token,
-        bootstrap.git_user_name,
-        bootstrap.git_user_email,
-    );
+    let bootstrap_signature = workspace_bootstrap_signature(lookup.workspace.name(), bootstrap);
+    let env_file_sync = if lookup.workspace.is_template() {
+        workspace_env_file_sync_script(&bootstrap.env_files)
+    } else {
+        String::new()
+    };
     let credentials_lines = [
         format!("export GH_TOKEN={}", shell_quote(&bootstrap.gh_token)),
         format!("export GITHUB_TOKEN={}", shell_quote(&bootstrap.gh_token)),
@@ -888,8 +911,7 @@ if ! git config --global --get-all safe.directory 2>/dev/null | grep -Fxq \"$WOR
   git config --global --add safe.directory \"$WORKSPACE_DIR\"\n\
 fi\n\
 {branch_setup}\n\
-printf '%s\\n%s\\n' \"$BOOT_ID\" \"$SIGNATURE\" > \"$STATE_PATH\"\n\
-chmod 600 \"$STATE_PATH\"\n",
+{env_file_sync}",
         workspace_dir = shell_quote(TERMINAL_WORKSPACE_DIR),
         remote_url = shell_quote(&bootstrap.remote_url),
         target_branch = shell_quote(&bootstrap.target_branch),
@@ -907,7 +929,234 @@ chmod 600 \"$STATE_PATH\"\n",
         claude_settings_json = shell_quote(&claude_settings_json),
         claude_state_json = shell_quote(&claude_state_json),
         branch_setup = branch_setup,
+        env_file_sync = env_file_sync,
     )
+}
+
+fn workspace_bootstrap_signature(workspace_name: &str, bootstrap: &WorkspaceBootstrap) -> String {
+    format!(
+        "version={}\nworkspace={}\nremote_url={}\ntarget_branch={}\nworkspace_branch={}\ngh_username={}\ngh_token={}\nchrome_user_data_dir={}\nchrome_user_data_hash={}\ncodex_token={}\nclaude_token={}\ngit_user_name={}\ngit_user_email={}\nenv_files={}",
+        WORKSPACE_BOOTSTRAP_VERSION,
+        workspace_name,
+        bootstrap.remote_url,
+        bootstrap.target_branch,
+        bootstrap.workspace_branch.as_deref().unwrap_or(""),
+        bootstrap.gh_username,
+        bootstrap.gh_token,
+        bootstrap.chrome_user_data_dir,
+        bootstrap.chrome_user_data_hash,
+        bootstrap.codex_token,
+        bootstrap.claude_token,
+        bootstrap.git_user_name,
+        bootstrap.git_user_email,
+        bootstrap_env_files_signature(&bootstrap.env_files),
+    )
+}
+
+fn load_bootstrap_chrome_profile(configured_path: &str) -> (String, String) {
+    let trimmed = configured_path.trim();
+    if trimmed.is_empty() {
+        return (String::new(), String::new());
+    }
+
+    let source_dir = PathBuf::from(trimmed);
+    if !source_dir.is_dir() {
+        log::warn!(
+            "skipping missing chrome user data directory configured for bootstrap: {}",
+            source_dir.display()
+        );
+        return (String::new(), String::new());
+    }
+
+    let hash = match hash_chrome_profile_dir(&source_dir) {
+        Ok(hash) => hash,
+        Err(error) => {
+            log::warn!(
+                "skipping chrome profile bootstrap because hashing failed for {}: {}",
+                source_dir.display(),
+                error
+            );
+            return (String::new(), String::new());
+        }
+    };
+
+    (source_dir.to_string_lossy().into_owned(), hash)
+}
+
+fn load_bootstrap_env_files(
+    project_name: &str,
+    project: &crate::config::ProjectConfig,
+) -> Vec<BootstrapEnvFile> {
+    let project_root = Path::new(&project.path);
+    let mut env_files = Vec::new();
+    let mut seen = HashSet::new();
+
+    for configured_path in &project.env_files {
+        let Some(relative_path) = normalize_workspace_relative_path(configured_path) else {
+            log::warn!(
+                "skipping invalid env file path for project {}: {}",
+                project_name,
+                configured_path
+            );
+            continue;
+        };
+
+        if !seen.insert(relative_path.clone()) {
+            continue;
+        }
+
+        let local_path = project_root.join(Path::new(&relative_path));
+        let Ok(contents) = fs::read(&local_path) else {
+            log::warn!(
+                "skipping missing or unreadable env file for project {}: {}",
+                project_name,
+                local_path.display()
+            );
+            continue;
+        };
+
+        let contents_sha256 = hex_sha256(&contents);
+        env_files.push(BootstrapEnvFile {
+            relative_path,
+            contents_base64: BASE64_STANDARD.encode(contents),
+            contents_sha256,
+        });
+    }
+
+    env_files
+}
+
+fn normalize_workspace_relative_path(path: &str) -> Option<String> {
+    let mut normalized = String::new();
+
+    for component in Path::new(path).components() {
+        let Component::Normal(value) = component else {
+            return None;
+        };
+        if !normalized.is_empty() {
+            normalized.push('/');
+        }
+        normalized.push_str(value.to_str()?);
+    }
+
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn bootstrap_env_files_signature(env_files: &[BootstrapEnvFile]) -> String {
+    env_files
+        .iter()
+        .map(|env_file| format!("{}:{}", env_file.relative_path, env_file.contents_sha256))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn hash_chrome_profile_dir(source_dir: &Path) -> Result<String, String> {
+    let mut hasher = Sha256::new();
+    hash_chrome_profile_entry(source_dir, source_dir, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn hash_chrome_profile_entry(root: &Path, path: &Path, hasher: &mut Sha256) -> Result<(), String> {
+    let relative_path = path.strip_prefix(root).map_err(|error| {
+        format!(
+            "failed to normalize chrome path {}: {error}",
+            path.display()
+        )
+    })?;
+
+    if !relative_path.as_os_str().is_empty() && should_skip_chrome_profile_entry(relative_path) {
+        return Ok(());
+    }
+
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("failed to read chrome path {}: {error}", path.display()))?;
+    let relative = relative_path.to_string_lossy();
+
+    if metadata.file_type().is_symlink() {
+        hasher.update(b"L");
+        hasher.update(relative.as_bytes());
+        let link_target = fs::read_link(path).map_err(|error| {
+            format!("failed to read chrome symlink {}: {error}", path.display())
+        })?;
+        hasher.update(link_target.to_string_lossy().as_bytes());
+        return Ok(());
+    }
+
+    if metadata.is_file() {
+        hasher.update(b"F");
+        hasher.update(relative.as_bytes());
+        let contents = fs::read(path)
+            .map_err(|error| format!("failed to read chrome file {}: {error}", path.display()))?;
+        hasher.update(&contents);
+        return Ok(());
+    }
+
+    if metadata.is_dir() {
+        hasher.update(b"D");
+        hasher.update(relative.as_bytes());
+        let mut entries: Vec<PathBuf> = fs::read_dir(path)
+            .map_err(|error| {
+                format!(
+                    "failed to list chrome directory {}: {error}",
+                    path.display()
+                )
+            })?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect();
+        entries.sort();
+
+        for entry in entries {
+            hash_chrome_profile_entry(root, &entry, hasher)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn should_skip_chrome_profile_entry(relative_path: &Path) -> bool {
+    relative_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|name| {
+            matches!(
+                name,
+                "SingletonCookie" | "SingletonLock" | "SingletonSocket" | "DevToolsActivePort"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn workspace_env_file_sync_script(env_files: &[BootstrapEnvFile]) -> String {
+    if env_files.is_empty() {
+        return String::new();
+    }
+
+    let mut script = String::from("# sync project env files into the template workspace\n");
+
+    for (index, env_file) in env_files.iter().enumerate() {
+        if let Some((parent_dir, _)) = env_file.relative_path.rsplit_once('/') {
+            script.push_str(&format!(
+                "mkdir -p {}\n",
+                shell_quote(&format!("{TERMINAL_WORKSPACE_DIR}/{parent_dir}"))
+            ));
+        }
+
+        let target_path = format!("{TERMINAL_WORKSPACE_DIR}/{}", env_file.relative_path);
+        script.push_str(&format!(
+            "cat <<'EOF_ENV_{index}' | base64 --decode > {target_path}\n{contents}\nEOF_ENV_{index}\nchmod 600 {target_path}\n",
+            target_path = shell_quote(&target_path),
+            contents = env_file.contents_base64,
+        ));
+    }
+
+    script
 }
 
 fn codex_auth_json(token: &str) -> String {
@@ -1005,6 +1254,62 @@ fn terminal_shell_command(command: &str) -> String {
     )
 }
 
+async fn sync_template_chrome_profile(
+    lookup: &WorkspaceLookup,
+    bootstrap: &WorkspaceBootstrap,
+) -> Result<(), String> {
+    if bootstrap.chrome_user_data_dir.is_empty() {
+        return Ok(());
+    }
+
+    let source_dir = PathBuf::from(&bootstrap.chrome_user_data_dir);
+    if !source_dir.is_dir() {
+        log::warn!(
+            "skipping missing chrome user data directory during template bootstrap: {}",
+            source_dir.display()
+        );
+        return Ok(());
+    }
+
+    let remote_command = chrome_profile_remote_sync_command();
+    let result = run_remote_command_with_tar_stream(lookup, &remote_command, &source_dir).await?;
+    if !result.success {
+        return Err(remote_command_error(
+            "failed to sync chrome profile into template workspace",
+            &result.stderr,
+        ));
+    }
+
+    Ok(())
+}
+
+async fn persist_workspace_bootstrap_state(
+    lookup: &WorkspaceLookup,
+    signature: &str,
+) -> Result<(), String> {
+    let state_path = shell_quote(REMOTE_BOOTSTRAP_STATE_FILE);
+    let signature = shell_quote(signature);
+    let command = format!(
+        "mkdir -p \"$HOME/.silo\" && BOOT_ID=\"$(cat /proc/sys/kernel/random/boot_id)\" && printf '%s\\n%s\\n' \"$BOOT_ID\" {signature} > {state_path} && chmod 600 {state_path}",
+    );
+    let result = run_remote_command(lookup, &run_terminal_user_command(&command)).await?;
+    if !result.success {
+        return Err(remote_command_error(
+            "failed to persist workspace bootstrap state",
+            &result.stderr,
+        ));
+    }
+
+    Ok(())
+}
+
+fn chrome_profile_remote_sync_command() -> String {
+    let remote_dir = shell_quote(REMOTE_CHROME_USER_DATA_DIR);
+    run_terminal_user_command(&format!(
+        "mkdir -p \"$HOME/.config\" && rm -rf {remote_dir} && mkdir -p {remote_dir} && tar -xzf - -C {remote_dir} --strip-components=1 && chmod 700 \"$HOME/.config\" {remote_dir} && chmod -R u=rwX,go= {remote_dir}",
+    ))
+}
+
 async fn run_remote_command(
     lookup: &WorkspaceLookup,
     remote_command: &str,
@@ -1031,21 +1336,8 @@ async fn run_gcloud_ssh_command(
     let zone = lookup.workspace.zone().to_string();
 
     tauri::async_runtime::spawn_blocking(move || {
-        let mut command = Command::new("gcloud");
-        command.arg(format!("--account={account}"));
-        command.arg(format!("--project={project}"));
-        command.arg("compute");
-        command.arg("ssh");
-        command.arg(workspace);
-        command.arg(format!("--zone={zone}"));
-
-        if let Some(remote_command) = remote_command {
-            command.arg(format!(
-                "--command={}",
-                wrap_remote_shell_command(&remote_command)
-            ));
-        }
-
+        let mut command =
+            build_gcloud_ssh_command(&account, &project, &workspace, &zone, remote_command);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         if stdin_bytes.is_some() {
             command.stdin(Stdio::piped());
@@ -1075,6 +1367,122 @@ async fn run_gcloud_ssh_command(
     })
     .await
     .map_err(|error| format!("gcloud ssh task failed: {error}"))?
+}
+
+async fn run_remote_command_with_tar_stream(
+    lookup: &WorkspaceLookup,
+    remote_command: &str,
+    source_dir: &Path,
+) -> Result<CommandResult, String> {
+    let account = lookup.account.clone();
+    let project = lookup.gcloud_project.clone();
+    let workspace = lookup.workspace.name().to_string();
+    let zone = lookup.workspace.zone().to_string();
+    let remote_command = remote_command.to_string();
+    let source_dir = source_dir.to_path_buf();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let parent = source_dir.parent().ok_or_else(|| {
+            format!(
+                "chrome user data directory has no parent: {}",
+                source_dir.display()
+            )
+        })?;
+        let file_name = source_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                format!(
+                    "chrome user data directory has no terminal path segment: {}",
+                    source_dir.display()
+                )
+            })?;
+
+        let mut tar = Command::new("tar");
+        tar.arg("-C").arg(parent);
+        for pattern in [
+            "SingletonCookie",
+            "SingletonLock",
+            "SingletonSocket",
+            "DevToolsActivePort",
+        ] {
+            tar.arg(format!("--exclude={pattern}"));
+        }
+        tar.arg("-czf").arg("-").arg(file_name);
+        tar.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let mut tar_child = tar
+            .spawn()
+            .map_err(|error| format!("failed to start tar for chrome profile sync: {error}"))?;
+
+        let mut command =
+            build_gcloud_ssh_command(&account, &project, &workspace, &zone, Some(remote_command));
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut gcloud = command
+            .spawn()
+            .map_err(|error| format!("failed to execute gcloud ssh: {error}"))?;
+
+        let mut tar_stdout = tar_child
+            .stdout
+            .take()
+            .ok_or_else(|| "failed to capture tar stdout".to_string())?;
+        let mut gcloud_stdin = gcloud
+            .stdin
+            .take()
+            .ok_or_else(|| "failed to open gcloud ssh stdin".to_string())?;
+        std::io::copy(&mut tar_stdout, &mut gcloud_stdin)
+            .map_err(|error| format!("failed to stream chrome profile archive: {error}"))?;
+        drop(gcloud_stdin);
+
+        let tar_output = tar_child
+            .wait_with_output()
+            .map_err(|error| format!("failed to read tar output: {error}"))?;
+        if !tar_output.status.success() {
+            return Err(format!(
+                "failed to create chrome profile archive: {}",
+                String::from_utf8_lossy(&tar_output.stderr).trim()
+            ));
+        }
+
+        let output = gcloud
+            .wait_with_output()
+            .map_err(|error| format!("failed to read gcloud ssh output: {error}"))?;
+        Ok(CommandResult {
+            success: output.status.success(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    })
+    .await
+    .map_err(|error| format!("gcloud ssh task failed: {error}"))?
+}
+
+fn build_gcloud_ssh_command(
+    account: &str,
+    project: &str,
+    workspace: &str,
+    zone: &str,
+    remote_command: Option<String>,
+) -> Command {
+    let mut command = Command::new("gcloud");
+    command.arg(format!("--account={account}"));
+    command.arg(format!("--project={project}"));
+    command.arg("compute");
+    command.arg("ssh");
+    command.arg(workspace);
+    command.arg(format!("--zone={zone}"));
+
+    if let Some(remote_command) = remote_command {
+        command.arg(format!(
+            "--command={}",
+            wrap_remote_shell_command(&remote_command)
+        ));
+    }
+
+    command
 }
 
 fn wrap_remote_shell_command(command: &str) -> String {
@@ -1235,6 +1643,10 @@ fn terminal_command_bytes(command: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProjectConfig;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn shell_quote_escapes_single_quotes() {
@@ -1274,6 +1686,132 @@ mod tests {
         assert_eq!(terminal_command_bytes("pwd"), b"pwd\n");
         assert_eq!(terminal_command_bytes("pwd\n"), b"pwd\n");
         assert!(terminal_command_bytes("").is_empty());
+    }
+
+    #[test]
+    fn normalize_workspace_relative_path_rejects_non_relative_paths() {
+        assert_eq!(
+            normalize_workspace_relative_path("apps/web/.env.local"),
+            Some("apps/web/.env.local".to_string())
+        );
+        assert_eq!(
+            normalize_workspace_relative_path(".env"),
+            Some(".env".to_string())
+        );
+        assert_eq!(normalize_workspace_relative_path("../.env"), None);
+        assert_eq!(normalize_workspace_relative_path("/tmp/.env"), None);
+    }
+
+    #[test]
+    fn load_bootstrap_env_files_reads_and_hashes_configured_files() {
+        let temp_dir = TempDir::new();
+        let project_root = temp_dir.path.join("demo");
+        fs::create_dir_all(project_root.join("apps/web")).expect("nested env dir should exist");
+        fs::write(project_root.join(".env.local"), "ROOT=1\n").expect("root env should exist");
+        fs::write(project_root.join("apps/web/.env"), "WEB=1\n").expect("nested env should exist");
+
+        let project = ProjectConfig {
+            name: "demo".to_string(),
+            path: project_root.to_string_lossy().into_owned(),
+            image: None,
+            remote_url: "git@github.com:example/demo.git".to_string(),
+            target_branch: "main".to_string(),
+            env_files: vec![
+                ".env.local".to_string(),
+                "apps/web/.env".to_string(),
+                "../ignored".to_string(),
+            ],
+            gcloud: Default::default(),
+        };
+
+        let env_files = load_bootstrap_env_files("demo", &project);
+
+        assert_eq!(env_files.len(), 2);
+        assert_eq!(env_files[0].relative_path, ".env.local");
+        assert_eq!(env_files[0].contents_sha256, hex_sha256(b"ROOT=1\n"));
+        assert_eq!(env_files[1].relative_path, "apps/web/.env");
+        assert_eq!(env_files[1].contents_sha256, hex_sha256(b"WEB=1\n"));
+    }
+
+    #[test]
+    fn workspace_env_file_sync_script_preserves_relative_paths() {
+        let script = workspace_env_file_sync_script(&[BootstrapEnvFile {
+            relative_path: "apps/web/.env.local".to_string(),
+            contents_base64: BASE64_STANDARD.encode("WEB=1\n"),
+            contents_sha256: "digest".to_string(),
+        }]);
+
+        assert!(script.contains("mkdir -p '/home/silo/workspace/apps/web'"));
+        assert!(script.contains("base64 --decode > '/home/silo/workspace/apps/web/.env.local'"));
+        assert!(script.contains("chmod 600 '/home/silo/workspace/apps/web/.env.local'"));
+    }
+
+    #[test]
+    fn load_bootstrap_chrome_profile_hashes_directory_and_skips_transient_files() {
+        let temp_dir = TempDir::new();
+        let chrome_dir = temp_dir.path.join("Chrome");
+        fs::create_dir_all(chrome_dir.join("Default")).expect("chrome profile dir should exist");
+        fs::write(
+            chrome_dir.join("Default/Preferences"),
+            "{\"theme\":\"dark\"}",
+        )
+        .expect("preferences file should exist");
+        fs::write(chrome_dir.join("SingletonLock"), "host-specific")
+            .expect("singleton lock should exist");
+
+        let (source_dir, original_hash) =
+            load_bootstrap_chrome_profile(&chrome_dir.to_string_lossy());
+        assert_eq!(source_dir, chrome_dir.to_string_lossy());
+        assert!(!original_hash.is_empty());
+
+        fs::write(chrome_dir.join("SingletonLock"), "changed-host-specific")
+            .expect("singleton lock should update");
+        let (_, hash_with_transient_change) =
+            load_bootstrap_chrome_profile(&chrome_dir.to_string_lossy());
+        assert_eq!(hash_with_transient_change, original_hash);
+
+        fs::write(
+            chrome_dir.join("Default/Preferences"),
+            "{\"theme\":\"light\"}",
+        )
+        .expect("preferences should update");
+        let (_, hash_with_real_change) =
+            load_bootstrap_chrome_profile(&chrome_dir.to_string_lossy());
+        assert_ne!(hash_with_real_change, original_hash);
+    }
+
+    #[test]
+    fn chrome_profile_remote_sync_command_targets_google_chrome_dir() {
+        let command = chrome_profile_remote_sync_command();
+        assert!(command.contains(REMOTE_CHROME_USER_DATA_DIR));
+        assert!(command.contains("tar -xzf -"));
+        assert!(command.contains("rm -rf"));
+    }
+
+    #[test]
+    fn workspace_bootstrap_signature_includes_chrome_profile_state() {
+        let bootstrap = WorkspaceBootstrap {
+            remote_url: "git@github.com:example/demo.git".to_string(),
+            target_branch: "main".to_string(),
+            workspace_branch: Some("feature/test".to_string()),
+            gh_username: "octocat".to_string(),
+            gh_token: "gh-token".to_string(),
+            chrome_user_data_dir: "/Users/test/Library/Application Support/Google/Chrome"
+                .to_string(),
+            chrome_user_data_hash: "chrome-digest".to_string(),
+            codex_token: "codex-token".to_string(),
+            claude_token: "claude-token".to_string(),
+            git_user_name: "Test User".to_string(),
+            git_user_email: "test@example.com".to_string(),
+            env_files: Vec::new(),
+        };
+
+        let signature = workspace_bootstrap_signature("demo-silo-workspace", &bootstrap);
+
+        assert!(signature.contains(
+            "chrome_user_data_dir=/Users/test/Library/Application Support/Google/Chrome"
+        ));
+        assert!(signature.contains("chrome_user_data_hash=chrome-digest"));
     }
 
     #[test]
@@ -1415,6 +1953,32 @@ mod tests {
 
         fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
             Box::new(NoopKiller)
+        }
+    }
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new() -> Self {
+            let unique = format!(
+                "silo-terminal-test-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or(0)
+            );
+            let path = std::env::temp_dir().join(unique);
+            fs::create_dir_all(&path).expect("temp dir should be created");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(Path::new(&self.path));
         }
     }
 }
