@@ -5,7 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { Suspense } from "react";
 import { invoke } from "../../lib/invoke";
 import { isTemplateWorkspace, type Workspace } from "../../lib/workspaces";
-import { PendingWorkspace } from "./pending";
+import { TemplatingWorkspace } from "./templating";
 import { PromptWorkspace } from "./prompt";
 
 export default function WorkspacePage() {
@@ -49,7 +49,7 @@ function WorkspaceView() {
 
 	if (isTemplateWorkspace(workspace.data)) {
 		return (
-			<PendingWorkspace
+			<TemplatingWorkspace
 				isRunning={isRunning}
 				status={workspace.data.status}
 				workspace={workspace.data.name}
