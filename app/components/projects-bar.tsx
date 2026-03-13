@@ -335,7 +335,8 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 		workspace.status === "STAGING" || workspace.status === "PROVISIONING";
 	const optimisticStopping = stop.isPending || remove.isPending;
 	const optimisticStarting = start.isPending;
-	const isDisabled = optimisticStopping || isStopping || optimisticStarting || isStarting;
+	const isDisabled =
+		optimisticStopping || isStopping || optimisticStarting || isStarting;
 	const [menuOpen, setMenuOpen] = useState(false);
 
 	const navigate = () =>
@@ -364,8 +365,17 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 			}`}
 		>
 			<span className="flex items-center gap-2 min-w-0 flex-1">
-				<WorkspaceIndicator workspace={{ ...workspace, isTemplate, optimisticStarting, optimisticStopping }} />
-				<span className={`truncate ${isDisabled ? "opacity-30" : ""}`}>{workspaceLabel(workspace)}</span>
+				<WorkspaceIndicator
+					workspace={{
+						...workspace,
+						isTemplate,
+						optimisticStarting,
+						optimisticStopping,
+					}}
+				/>
+				<span className={`truncate ${isDisabled ? "opacity-30" : ""}`}>
+					{workspaceLabel(workspace)}
+				</span>
 			</span>
 			<Popover open={menuOpen} onOpenChange={setMenuOpen}>
 				<PopoverTrigger asChild>
@@ -548,6 +558,7 @@ export function ProjectsBar() {
 						</div>
 					);
 				})}
+				<div data-tauri-drag-region className="w-full flex-1" />
 			</div>
 			<BarFooter />
 		</aside>

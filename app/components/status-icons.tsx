@@ -236,14 +236,44 @@ function ClaudeStatus() {
 }
 
 function ChromeStatus() {
+	const installed = useQuery({
+		queryKey: ["chrome_installed"],
+		queryFn: () =>
+			invoke<boolean>("chrome_installed", {
+				log: "state_changes_only",
+				key: "poll:chrome_installed",
+			}),
+		refetchInterval: 5000,
+	});
+	const configured = useQuery({
+		queryKey: ["chrome_configured"],
+		queryFn: () =>
+			invoke<boolean>("chrome_configured", {
+				log: "state_changes_only",
+				key: "poll:chrome_configured",
+			}),
+		enabled: installed.data === true,
+		refetchInterval: 5000,
+	});
+
+	const active = installed.data && configured.data;
+	const label = !installed.data
+		? "Chrome: not installed"
+		: !configured.data
+			? "Chrome: not configured"
+			: "Chrome: connected";
+
 	return (
 		<Tooltip>
 			<TooltipTrigger asChild>
-				<span className="flex items-center opacity-50">
+				<span
+					style={{ opacity: active ? 1 : 0.5 }}
+					className="flex items-center"
+				>
 					<ChromeIcon height={12} />
 				</span>
 			</TooltipTrigger>
-			<TooltipContent side="bottom">Chrome: not configured</TooltipContent>
+			<TooltipContent side="bottom">{label}</TooltipContent>
 		</Tooltip>
 	);
 }
