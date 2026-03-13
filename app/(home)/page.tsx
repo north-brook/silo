@@ -3,13 +3,17 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FolderOpen } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { invoke } from "../../lib/invoke";
+import type { Workspace } from "../../lib/workspaces";
+import { Loader } from "../components/loader";
 import { StatusIcons } from "../components/status-icons";
 import { toast } from "../components/toaster";
 import { SiloIcon } from "../icons/silo";
 
 export default function HomePage() {
 	const queryClient = useQueryClient();
+	const router = useRouter();
 	const addProject = useMutation({
 		mutationFn: async () => {
 			const selected = await open({ directory: true, multiple: false });
@@ -19,17 +23,29 @@ export default function HomePage() {
 			const name = path.split("/").pop() || path;
 
 			await invoke("projects_add_project", { name, path });
-			return name;
+			const workspace = await invoke<Workspace>(
+				"templates_create_template",
+				{ project: name },
+			);
+			return { name, workspace };
 		},
-		onSuccess: (name) => {
+		onSuccess: ({ name, workspace }) => {
 			queryClient.invalidateQueries({ queryKey: ["projects_list_projects"] });
-			toast({ variant: "success", title: `Added project ${name}` });
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_list_workspaces"],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["templates_list_templates"],
+			});
+			router.push(
+				`/workspace?project=${encodeURIComponent(name)}&name=${encodeURIComponent(workspace.name)}`,
+			);
 		},
 		onError: (error) => {
 			if (error.message === "No folder selected") return;
 			toast({
 				variant: "error",
-				title: "Failed to add project",
+				title: "Failed to open project",
 				description: error.message,
 			});
 		},
@@ -46,7 +62,11 @@ export default function HomePage() {
 					disabled={addProject.isPending}
 					className="flex items-center gap-2 px-4 py-2 text-sm rounded-lg bg-btn border border-border-light text-text-bright hover:bg-btn-hover hover:border-border-hover transition-colors disabled:opacity-50"
 				>
-					<FolderOpen size={16} />
+					{addProject.isPending ? (
+						<Loader className="text-text-muted" />
+					) : (
+						<FolderOpen size={16} />
+					)}
 					Open Project
 				</button>
 			</div>
