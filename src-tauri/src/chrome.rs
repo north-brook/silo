@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const MACOS_CHROME_USER_DATA_DIR: &str = "Library/Application Support/Google/Chrome";
+const MACOS_CHROME_APP_PATH: &str = "/Applications/Google Chrome.app";
 
 pub(crate) fn detect_chrome_user_data_dir(home_dir: &Path) -> Option<String> {
     let path = home_dir.join(MACOS_CHROME_USER_DATA_DIR);
@@ -16,15 +17,9 @@ pub(crate) fn detect_chrome_user_data_dir(home_dir: &Path) -> Option<String> {
 #[tauri::command]
 pub async fn chrome_installed() -> bool {
     log::trace!("checking whether google-chrome is installed");
-    tauri::async_runtime::spawn_blocking(move || {
-        Command::new("google-chrome")
-            .arg("--version")
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false)
+    tauri::async_runtime::spawn_blocking(move || chrome_installed_on_host())
+        .await
+        .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -45,12 +40,27 @@ pub(crate) fn chrome_source_dir_exists(path: &str) -> bool {
     PathBuf::from(trimmed).is_dir()
 }
 
+fn chrome_installed_on_host() -> bool {
+    if cfg!(target_os = "macos") {
+        return Path::new(MACOS_CHROME_APP_PATH).is_dir();
+    }
+
+    Command::new("google-chrome")
+        .arg("--version")
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{chrome_source_dir_exists, detect_chrome_user_data_dir};
+    use super::{
+        chrome_installed_on_host, chrome_source_dir_exists, detect_chrome_user_data_dir,
+        MACOS_CHROME_APP_PATH,
+    };
     use std::env;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -81,6 +91,16 @@ mod tests {
         assert!(chrome_source_dir_exists(&chrome_dir.to_string_lossy()));
         assert!(!chrome_source_dir_exists(""));
         assert!(!chrome_source_dir_exists("/tmp/does-not-exist"));
+    }
+
+    #[test]
+    fn chrome_installed_on_host_matches_platform_check() {
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                chrome_installed_on_host(),
+                Path::new(MACOS_CHROME_APP_PATH).is_dir()
+            );
+        }
     }
 
     struct TestDir {
