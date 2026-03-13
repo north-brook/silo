@@ -2,6 +2,7 @@ use crate::config::ConfigStore;
 use crate::workspaces::{self, WorkspaceLookup};
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
+use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -9,6 +10,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, EventTarget, State, WebviewWindow};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use uuid::Uuid;
 
 const TERMINAL_EXIT_EVENT: &str = "terminal://exit";
@@ -21,6 +23,8 @@ const TERMINAL_USER: &str = "silo";
 const TERMINAL_WORKSPACE_DIR: &str = "/home/silo/workspace";
 const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
 const REMOTE_BOOTSTRAP_STATE_FILE: &str = "/home/silo/.silo/workspace-bootstrap-state";
+const REMOTE_BOOTSTRAP_LOCK_DIR: &str = "/home/silo/.silo/workspace-bootstrap.lock";
+const WORKSPACE_BOOTSTRAP_VERSION: &str = "5";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TerminalSessionSummary {
@@ -149,6 +153,7 @@ struct WorkspaceBootstrap {
     remote_url: String,
     target_branch: String,
     workspace_branch: Option<String>,
+    gh_username: String,
     gh_token: String,
     codex_token: String,
     claude_token: String,
@@ -741,6 +746,7 @@ fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, S
         remote_url: project.remote_url.clone(),
         target_branch,
         workspace_branch,
+        gh_username: config.git.gh_username.clone(),
         gh_token: config.git.gh_token.clone(),
         codex_token: config.codex.token.clone(),
         claude_token: config.claude.token.clone(),
@@ -750,12 +756,19 @@ fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, S
 }
 
 fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBootstrap) -> String {
+    let codex_auth_json = codex_auth_json(&bootstrap.codex_token);
+    let codex_config_toml = codex_config_toml();
+    let claude_settings_json = claude_settings_json();
+    let claude_state_json = claude_state_json();
+    let gh_hosts_yml = gh_hosts_yml(&bootstrap.gh_username, &bootstrap.gh_token);
     let bootstrap_signature = format!(
-        "workspace={}\nremote_url={}\ntarget_branch={}\nworkspace_branch={}\ngh_token={}\ncodex_token={}\nclaude_token={}\ngit_user_name={}\ngit_user_email={}",
+        "version={}\nworkspace={}\nremote_url={}\ntarget_branch={}\nworkspace_branch={}\ngh_username={}\ngh_token={}\ncodex_token={}\nclaude_token={}\ngit_user_name={}\ngit_user_email={}",
+        WORKSPACE_BOOTSTRAP_VERSION,
         lookup.workspace.name(),
         bootstrap.remote_url,
         bootstrap.target_branch,
         bootstrap.workspace_branch.as_deref().unwrap_or(""),
+        bootstrap.gh_username,
         bootstrap.gh_token,
         bootstrap.codex_token,
         bootstrap.claude_token,
@@ -764,14 +777,22 @@ fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBoo
     );
     let credentials_lines = [
         format!("export GH_TOKEN={}", shell_quote(&bootstrap.gh_token)),
+        format!("export GITHUB_TOKEN={}", shell_quote(&bootstrap.gh_token)),
         format!(
-            "export OPENAI_API_KEY={}",
-            shell_quote(&bootstrap.codex_token)
-        ),
-        format!(
-            "export ANTHROPIC_API_KEY={}",
+            "export CLAUDE_CODE_OAUTH_TOKEN={}",
             shell_quote(&bootstrap.claude_token)
         ),
+        "export GIT_ASKPASS=\"$HOME/.silo/git-askpass.sh\"".to_string(),
+        "export GIT_TERMINAL_PROMPT=0".to_string(),
+        "unset ANTHROPIC_API_KEY".to_string(),
+        "unset ANTHROPIC_AUTH_TOKEN".to_string(),
+        "unset ANTHROPIC_BASE_URL".to_string(),
+        "unset CLAUDE_API_KEY".to_string(),
+        "unset CLAUDE_CODE_USE_BEDROCK".to_string(),
+        "unset CLAUDE_CODE_USE_VERTEX".to_string(),
+        "unset AWS_BEARER_TOKEN_BEDROCK".to_string(),
+        "unset VERTEX_REGION_CLAUDE_CODE".to_string(),
+        "alias cc='IS_SANDBOX=1 claude --dangerously-skip-permissions'".to_string(),
     ]
     .join("\n");
     let branch_setup = if lookup.workspace.is_template() {
@@ -795,8 +816,26 @@ WORKSPACE_DIR={workspace_dir}\n\
 REMOTE_URL={remote_url}\n\
 TARGET_BRANCH={target_branch}\n\
 WORKSPACE_BRANCH={workspace_branch}\n\
+GIT_USER_NAME={git_user_name}\n\
+GIT_USER_EMAIL={git_user_email}\n\
 mkdir -p \"$HOME/.silo\"\n\
 chmod 700 \"$HOME/.silo\"\n\
+LOCK_DIR={lock_dir}\n\
+ASKPASS_PATH=\"$HOME/.silo/git-askpass.sh\"\n\
+cleanup() {{\n\
+  rm -rf \"$LOCK_DIR\"\n\
+}}\n\
+for _ in $(seq 1 60); do\n\
+  if mkdir \"$LOCK_DIR\" 2>/dev/null; then\n\
+    trap cleanup EXIT\n\
+    break\n\
+  fi\n\
+  sleep 1\n\
+done\n\
+if [ ! -d \"$LOCK_DIR\" ]; then\n\
+  echo 'timed out waiting for workspace bootstrap lock' >&2\n\
+  exit 1\n\
+fi\n\
 BOOT_ID=\"$(cat /proc/sys/kernel/random/boot_id)\"\n\
 STATE_PATH={state_path}\n\
 SIGNATURE={signature}\n\
@@ -807,21 +846,46 @@ if [ -f \"$STATE_PATH\" ]; then\n\
     exit 0\n\
   fi\n\
 fi\n\
+cat > \"$ASKPASS_PATH\" <<'EOF_GIT_ASKPASS'\n\
+#!/bin/sh\n\
+case \"$1\" in\n\
+  *Username*) printf '%s\\n' 'x-access-token' ;;\n\
+  *Password*) printf '%s\\n' \"${{GH_TOKEN:-}}\" ;;\n\
+  *) printf '%s\\n' \"${{GH_TOKEN:-}}\" ;;\n\
+esac\n\
+EOF_GIT_ASKPASS\n\
+chmod 700 \"$ASKPASS_PATH\"\n\
 cat > {credentials_path} <<'EOF'\n\
 {credentials_lines}\n\
 EOF\n\
 chmod 600 {credentials_path}\n\
+. {credentials_path}\n\
 for rc in \"$HOME/.zshrc\" \"$HOME/.bashrc\"; do\n\
   touch \"$rc\"\n\
   if ! grep -Fqx '[[ -f \"$HOME/.silo/credentials.sh\" ]] && source \"$HOME/.silo/credentials.sh\"' \"$rc\"; then\n\
     printf '\\n[[ -f \"$HOME/.silo/credentials.sh\" ]] && source \"$HOME/.silo/credentials.sh\"\\n' >> \"$rc\"\n\
   fi\n\
 done\n\
-if [ -n {git_user_name} ]; then\n\
-  git config --global user.name {git_user_name}\n\
+mkdir -p \"$HOME/.config/gh\"\n\
+printf '%s\\n' {gh_hosts_yml} > \"$HOME/.config/gh/hosts.yml\"\n\
+chmod 700 \"$HOME/.config\" \"$HOME/.config/gh\"\n\
+chmod 600 \"$HOME/.config/gh/hosts.yml\"\n\
+mkdir -p \"$HOME/.codex\" \"$HOME/.claude\"\n\
+printf '%s\\n' {codex_auth_json} > \"$HOME/.codex/auth.json\"\n\
+printf '%s\\n' {codex_config_toml} > \"$HOME/.codex/config.toml\"\n\
+printf '%s\\n' {claude_settings_json} > \"$HOME/.claude/settings.json\"\n\
+printf '%s\\n' {claude_state_json} > \"$HOME/.claude.json\"\n\
+chmod 700 \"$HOME/.codex\" \"$HOME/.claude\"\n\
+chmod 600 \"$HOME/.codex/auth.json\" \"$HOME/.codex/config.toml\" \"$HOME/.claude/settings.json\" \"$HOME/.claude.json\"\n\
+rm -f \"$HOME/.gitconfig.lock\"\n\
+if [ -n \"$GIT_USER_NAME\" ] && [ \"$(git config --global --get user.name || true)\" != \"$GIT_USER_NAME\" ]; then\n\
+  git config --global user.name \"$GIT_USER_NAME\"\n\
 fi\n\
-if [ -n {git_user_email} ]; then\n\
-  git config --global user.email {git_user_email}\n\
+if [ -n \"$GIT_USER_EMAIL\" ] && [ \"$(git config --global --get user.email || true)\" != \"$GIT_USER_EMAIL\" ]; then\n\
+  git config --global user.email \"$GIT_USER_EMAIL\"\n\
+fi\n\
+if ! git config --global --get-all safe.directory 2>/dev/null | grep -Fxq \"$WORKSPACE_DIR\"; then\n\
+  git config --global --add safe.directory \"$WORKSPACE_DIR\"\n\
 fi\n\
 {branch_setup}\n\
 printf '%s\\n%s\\n' \"$BOOT_ID\" \"$SIGNATURE\" > \"$STATE_PATH\"\n\
@@ -830,13 +894,93 @@ chmod 600 \"$STATE_PATH\"\n",
         remote_url = shell_quote(&bootstrap.remote_url),
         target_branch = shell_quote(&bootstrap.target_branch),
         workspace_branch = shell_quote(bootstrap.workspace_branch.as_deref().unwrap_or("")),
+        git_user_name = shell_quote(&bootstrap.git_user_name),
+        git_user_email = shell_quote(&bootstrap.git_user_email),
+        lock_dir = shell_quote(REMOTE_BOOTSTRAP_LOCK_DIR),
         state_path = shell_quote(REMOTE_BOOTSTRAP_STATE_FILE),
         signature = shell_quote(&bootstrap_signature),
         credentials_path = shell_quote(REMOTE_CREDENTIALS_FILE),
         credentials_lines = credentials_lines,
-        git_user_name = shell_quote(&bootstrap.git_user_name),
-        git_user_email = shell_quote(&bootstrap.git_user_email),
+        gh_hosts_yml = shell_quote(&gh_hosts_yml),
+        codex_auth_json = shell_quote(&codex_auth_json),
+        codex_config_toml = shell_quote(&codex_config_toml),
+        claude_settings_json = shell_quote(&claude_settings_json),
+        claude_state_json = shell_quote(&claude_state_json),
         branch_setup = branch_setup,
+    )
+}
+
+fn codex_auth_json(token: &str) -> String {
+    let last_refresh = OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+
+    json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": serde_json::Value::Null,
+        "tokens": {
+            "id_token": token,
+            "access_token": token,
+            "refresh_token": token,
+            "account_id": ""
+        },
+        "last_refresh": last_refresh
+    })
+    .to_string()
+}
+
+fn codex_config_toml() -> String {
+    r#"personality = "pragmatic"
+model = "gpt-5.4"
+model_reasoning_effort = "high"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+
+[projects."/home/silo/workspace"]
+trust_level = "trusted"
+
+[notice]
+hide_full_access_warning = true
+"#
+    .to_string()
+}
+
+fn claude_settings_json() -> String {
+    json!({
+        "model": "opus",
+        "alwaysThinkingEnabled": true,
+        "effortLevel": "high",
+        "skipDangerousModePermissionPrompt": true
+    })
+    .to_string()
+}
+
+fn claude_state_json() -> String {
+    json!({
+        "installMethod": "native",
+        "autoUpdates": false,
+        "hasCompletedOnboarding": true,
+        "projects": {
+            TERMINAL_WORKSPACE_DIR: {
+                "allowedTools": [],
+                "mcpContextUris": [],
+                "mcpServers": {},
+                "enabledMcpjsonServers": [],
+                "disabledMcpjsonServers": [],
+                "hasTrustDialogAccepted": true,
+                "projectOnboardingSeenCount": 1,
+                "hasCompletedProjectOnboarding": true,
+                "hasClaudeMdExternalIncludesApproved": false,
+                "hasClaudeMdExternalIncludesWarningShown": false
+            }
+        }
+    })
+    .to_string()
+}
+
+fn gh_hosts_yml(username: &str, token: &str) -> String {
+    format!(
+        "github.com:\n    user: {username}\n    oauth_token: {token}\n    git_protocol: https\n"
     )
 }
 
@@ -1130,6 +1274,21 @@ mod tests {
         assert_eq!(terminal_command_bytes("pwd"), b"pwd\n");
         assert_eq!(terminal_command_bytes("pwd\n"), b"pwd\n");
         assert!(terminal_command_bytes("").is_empty());
+    }
+
+    #[test]
+    fn codex_auth_json_contains_access_token() {
+        let payload = codex_auth_json("codex-token");
+        assert!(payload.contains("\"access_token\":\"codex-token\""));
+        assert!(payload.contains("\"auth_mode\":\"chatgpt\""));
+    }
+
+    #[test]
+    fn claude_state_json_marks_workspace_as_trusted_and_onboarded() {
+        let payload = claude_state_json();
+        assert!(payload.contains(TERMINAL_WORKSPACE_DIR));
+        assert!(payload.contains("\"hasTrustDialogAccepted\":true"));
+        assert!(payload.contains("\"hasCompletedOnboarding\":true"));
     }
 
     #[test]

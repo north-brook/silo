@@ -530,8 +530,11 @@ fn ensure_unix_permissions(path: &Path, mode: u32) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::thread;
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn first_load_creates_default_config() {
@@ -883,9 +886,11 @@ mod tests {
         }
 
         fn new_without_config() -> Self {
+            let counter = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
             let unique = format!(
-                "silo-config-test-{}-{}",
+                "silo-config-test-{}-{}-{}",
                 std::process::id(),
+                counter,
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map(|duration| duration.as_nanos())
