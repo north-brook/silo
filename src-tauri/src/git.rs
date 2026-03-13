@@ -224,7 +224,9 @@ fn git_error(context: &str, stderr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ClaudeConfig, CodexConfig, GcloudConfig, GitConfig, SiloConfig};
+    use crate::config::{
+        ChromeConfig, ClaudeConfig, CodexConfig, GcloudConfig, GitConfig, SiloConfig,
+    };
     use indexmap::IndexMap;
 
     #[test]
@@ -244,6 +246,7 @@ mod tests {
         let config = SiloConfig {
             gcloud: GcloudConfig::default(),
             git: GitConfig::default(),
+            chrome: ChromeConfig::default(),
             codex: CodexConfig::default(),
             claude: ClaudeConfig::default(),
             projects: IndexMap::from_iter([(
@@ -254,6 +257,7 @@ mod tests {
                     image: None,
                     remote_url: "git@github.com:example/demo.git".to_string(),
                     target_branch: "main".to_string(),
+                    env_files: Vec::new(),
                     gcloud: Default::default(),
                 },
             )]),
