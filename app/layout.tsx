@@ -1,12 +1,12 @@
 "use client";
 
 import "./globals.css";
-import { useEffect, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ProjectsBar } from "./components/projects-bar";
-import { TooltipProvider } from "./components/tooltip";
-import { Toaster } from "./components/toaster";
+import { useEffect, useState } from "react";
 import { initializeFrontendLogging } from "../lib/invoke";
+import { ProjectsBar } from "./components/projects-bar";
+import { Toaster } from "./components/toaster";
+import { TooltipProvider } from "./components/tooltip";
 
 export default function RootLayout({
 	children,
@@ -23,11 +23,17 @@ export default function RootLayout({
 	return (
 		<html lang="en">
 			<QueryClientProvider client={queryClient}>
-				<TooltipProvider delayDuration={0} skipDelayDuration={Infinity} disableHoverableContent>
+				<TooltipProvider
+					delayDuration={0}
+					skipDelayDuration={Infinity}
+					disableHoverableContent
+				>
 					<body className="flex flex-col h-screen overflow-hidden">
 						<div className="flex flex-1 min-h-0">
 							<ProjectsBar />
-							<main className="flex-1 min-w-0 overflow-auto flex flex-col">{children}</main>
+							<main className="flex-1 min-w-0 overflow-auto flex flex-col">
+								{children}
+							</main>
 						</div>
 						<Toaster />
 					</body>

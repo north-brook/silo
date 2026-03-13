@@ -1,12 +1,12 @@
 "use client";
 
-import { Suspense } from "react";
-import { useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { PromptWorkspace } from "./prompt";
-import { PendingWorkspace } from "./pending";
+import { useSearchParams } from "next/navigation";
+import { Suspense } from "react";
 import { invoke } from "../../lib/invoke";
 import { isTemplateWorkspace, type Workspace } from "../../lib/workspaces";
+import { PendingWorkspace } from "./pending";
+import { PromptWorkspace } from "./prompt";
 
 export default function WorkspacePage() {
 	return (

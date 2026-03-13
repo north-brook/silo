@@ -44,7 +44,10 @@ export function initializeFrontendLogging() {
 }
 
 export function invoke<T>(command: string): Promise<T>;
-export function invoke<T>(command: string, options: InvokeOptions<T>): Promise<T>;
+export function invoke<T>(
+	command: string,
+	options: InvokeOptions<T>,
+): Promise<T>;
 export function invoke<T>(command: string, args: InvokeArgs): Promise<T>;
 export function invoke<T>(
 	command: string,
@@ -120,7 +123,9 @@ function isInvokeOptions<T>(
 	const keys = Object.keys(value);
 	return (
 		keys.length > 0 &&
-		keys.every((key) => key === "log" || key === "key" || key === "stateChanged")
+		keys.every(
+			(key) => key === "log" || key === "key" || key === "stateChanged",
+		)
 	);
 }
 

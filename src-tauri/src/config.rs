@@ -23,7 +23,7 @@ const CONFIG_FILE_NAME: &str = "config.toml";
 #[serde(default)]
 pub(crate) struct SiloConfig {
     pub(crate) gcloud: GcloudConfig,
-    pub(crate) gh: GhConfig,
+    pub(crate) git: GitConfig,
     pub(crate) codex: CodexConfig,
     pub(crate) claude: ClaudeConfig,
     pub(crate) projects: IndexMap<String, ProjectConfig>,
@@ -87,9 +87,11 @@ pub(crate) struct ProjectGcloudConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(default)]
-pub(crate) struct GhConfig {
-    pub(crate) username: String,
-    pub(crate) token: String,
+pub(crate) struct GitConfig {
+    pub(crate) gh_username: String,
+    pub(crate) gh_token: String,
+    pub(crate) user_name: String,
+    pub(crate) user_email: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -110,6 +112,7 @@ pub(crate) struct ProjectConfig {
     pub(crate) name: String,
     pub(crate) path: String,
     pub(crate) image: Option<String>,
+    pub(crate) remote_url: String,
     pub(crate) target_branch: String,
     pub(crate) gcloud: ProjectGcloudConfig,
 }
@@ -384,7 +387,7 @@ fn config_to_value(config: &SiloConfig) -> Result<Value, ConfigError> {
         .entry("gcloud".to_string())
         .or_insert_with(|| Value::Table(Table::new()));
     table
-        .entry("gh".to_string())
+        .entry("git".to_string())
         .or_insert_with(|| Value::Table(Table::new()));
     table
         .entry("codex".to_string())
@@ -417,9 +420,14 @@ fn detect_initial_config(home_dir: &Path) -> SiloConfig {
 
     SiloConfig {
         gcloud,
-        gh: GhConfig {
-            username: command_output("gh", ["api", "user", "--jq", ".login"]).unwrap_or_default(),
-            token: command_output("gh", ["auth", "token"]).unwrap_or_default(),
+        git: GitConfig {
+            gh_username: command_output("gh", ["api", "user", "--jq", ".login"])
+                .unwrap_or_default(),
+            gh_token: command_output("gh", ["auth", "token"]).unwrap_or_default(),
+            user_name: command_output("git", ["config", "--global", "user.name"])
+                .unwrap_or_default(),
+            user_email: command_output("git", ["config", "--global", "user.email"])
+                .unwrap_or_default(),
         },
         codex: CodexConfig {
             token: detect_codex_token(home_dir).unwrap_or_default(),
@@ -543,7 +551,7 @@ mod tests {
         let contents =
             fs::read_to_string(temp_dir.config_path()).expect("config file should be readable");
         assert!(contents.contains("[gcloud]"));
-        assert!(contents.contains("[gh]"));
+        assert!(contents.contains("[git]"));
         assert!(contents.contains("[codex]"));
         assert!(contents.contains("[claude]"));
         assert!(contents.contains("[projects]"));
@@ -685,7 +693,10 @@ mod tests {
         let config = temp_dir.store().load().expect("partial config should load");
 
         assert_eq!(config.claude.token, "partial");
-        assert_eq!(config.gh.username, "");
+        assert_eq!(config.git.gh_username, "");
+        assert_eq!(config.git.gh_token, "");
+        assert_eq!(config.git.user_name, "");
+        assert_eq!(config.git.user_email, "");
         assert_eq!(config.gcloud.project, "");
         assert_eq!(config.gcloud.service_account, "");
         assert_eq!(config.gcloud.service_account_key_file, "");
@@ -697,6 +708,7 @@ mod tests {
                 name: "Demo".to_string(),
                 path: "/tmp/demo".to_string(),
                 image: None,
+                remote_url: String::new(),
                 target_branch: String::new(),
                 gcloud: ProjectGcloudConfig::default(),
             })
@@ -787,9 +799,11 @@ mod tests {
                     project: "default-project".to_string(),
                     ..GcloudConfig::default()
                 },
-                gh: GhConfig {
-                    username: "octocat".to_string(),
-                    token: "gh-token".to_string(),
+                git: GitConfig {
+                    gh_username: "octocat".to_string(),
+                    gh_token: "gh-token".to_string(),
+                    user_name: "Monalisa Octocat".to_string(),
+                    user_email: "octocat@example.com".to_string(),
                 },
                 codex: CodexConfig {
                     token: "codex-token".to_string(),
@@ -803,8 +817,10 @@ mod tests {
         assert_eq!(config.gcloud.account, "default-account@example.com");
         assert_eq!(config.gcloud.project, "default-project");
         assert_eq!(config.gcloud.service_account, "");
-        assert_eq!(config.gh.username, "octocat");
-        assert_eq!(config.gh.token, "gh-token");
+        assert_eq!(config.git.gh_username, "octocat");
+        assert_eq!(config.git.gh_token, "gh-token");
+        assert_eq!(config.git.user_name, "Monalisa Octocat");
+        assert_eq!(config.git.user_email, "octocat@example.com");
         assert_eq!(config.codex.token, "codex-token");
         assert_eq!(config.claude.token, "");
     }
@@ -820,9 +836,11 @@ mod tests {
                 project: "existing-project".to_string(),
                 ..GcloudConfig::default()
             },
-            gh: GhConfig {
-                username: "existing-user".to_string(),
-                token: "existing-gh-token".to_string(),
+            git: GitConfig {
+                gh_username: "existing-user".to_string(),
+                gh_token: "existing-gh-token".to_string(),
+                user_name: "Existing User".to_string(),
+                user_email: "existing@example.com".to_string(),
             },
             codex: CodexConfig {
                 token: "existing-codex-token".to_string(),

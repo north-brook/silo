@@ -1,14 +1,14 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { useRouter } from "next/navigation";
 import { ArrowUp, ChevronsUpDown, Laptop, Terminal } from "lucide-react";
-import { Popover, PopoverTrigger, PopoverContent } from "../components/popover";
+import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
+import { invoke } from "../../lib/invoke";
+import { Popover, PopoverContent, PopoverTrigger } from "../components/popover";
 import { TerminalLoader } from "../components/terminal-loader";
 import { ClaudeIcon } from "../icons/claude";
 import { CodexIcon } from "../icons/codex";
-import { invoke } from "../../lib/invoke";
 
 type Provider = {
 	id: "codex" | "claude";
@@ -68,17 +68,17 @@ export function PromptWorkspace({
 	const [providerOpen, setProviderOpen] = useState(false);
 	const canSubmit = isRunning && prompt.trim().length > 0;
 
-		const createTerminal = useMutation({
-			mutationFn: () =>
-				invoke<{ terminal: string }>("terminal_create_terminal", {
-					workspace,
-				}),
-			onSuccess: (result) => {
-				router.push(
-					`/workspace/terminal?project=${encodeURIComponent(project ?? "")}&workspace=${encodeURIComponent(workspace)}&terminal=${encodeURIComponent(result.terminal)}`,
-				);
-			},
-		});
+	const createTerminal = useMutation({
+		mutationFn: () =>
+			invoke<{ terminal: string }>("terminal_create_terminal", {
+				workspace,
+			}),
+		onSuccess: (result) => {
+			router.push(
+				`/workspace/terminal?project=${encodeURIComponent(project ?? "")}&workspace=${encodeURIComponent(workspace)}&terminal=${encodeURIComponent(result.terminal)}`,
+			);
+		},
+	});
 
 	return (
 		<div className="flex-1 flex flex-col items-center justify-center p-6">

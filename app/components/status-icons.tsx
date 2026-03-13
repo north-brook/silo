@@ -1,18 +1,18 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { invoke } from "../../lib/invoke";
+import { ChromeIcon } from "../icons/chrome";
+import { ClaudeIcon } from "../icons/claude";
+import { CodexIcon } from "../icons/codex";
 import { GCloudIcon } from "../icons/gcloud";
 import { GHIcon } from "../icons/gh";
-import { CodexIcon } from "../icons/codex";
-import { ClaudeIcon } from "../icons/claude";
-import { ChromeIcon } from "../icons/chrome";
-import { Tooltip, TooltipTrigger, TooltipContent } from "./tooltip";
 import { toast } from "./toaster";
-import { invoke } from "../../lib/invoke";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 	return Promise.race([
 		promise,
 		new Promise<never>((_, reject) =>
-			setTimeout(() => reject(new Error("Timeout")), ms)
+			setTimeout(() => reject(new Error("Timeout")), ms),
 		),
 	]);
 }
@@ -39,8 +39,7 @@ function GCloudStatus() {
 		refetchInterval: 5000,
 	});
 	const authenticate = useMutation({
-		mutationFn: () =>
-			withTimeout(invoke("gcloud_authenticate"), 10000),
+		mutationFn: () => withTimeout(invoke("gcloud_authenticate"), 10000),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["gcloud_configured"] });
 			toast({ variant: "success", title: "Google Cloud authenticated" });
@@ -69,7 +68,10 @@ function GCloudStatus() {
 						{icon}
 					</button>
 				) : (
-					<span style={{ opacity: active ? 1 : 0.5 }} className="flex items-center">
+					<span
+						style={{ opacity: active ? 1 : 0.5 }}
+						className="flex items-center"
+					>
 						{icon}
 					</span>
 				)}
@@ -82,28 +84,28 @@ function GCloudStatus() {
 function GHStatus() {
 	const queryClient = useQueryClient();
 	const installed = useQuery({
-		queryKey: ["gh_installed"],
+		queryKey: ["git_installed"],
 		queryFn: () =>
-			invoke<boolean>("gh_installed", {
+			invoke<boolean>("git_installed", {
 				log: "state_changes_only",
-				key: "poll:gh_installed",
+				key: "poll:git_installed",
 			}),
 		refetchInterval: 5000,
 	});
 	const configured = useQuery({
-		queryKey: ["gh_configured"],
+		queryKey: ["git_configured"],
 		queryFn: () =>
-			invoke<boolean>("gh_configured", {
+			invoke<boolean>("git_configured", {
 				log: "state_changes_only",
-				key: "poll:gh_configured",
+				key: "poll:git_configured",
 			}),
 		enabled: installed.data === true,
 		refetchInterval: 5000,
 	});
 	const authenticate = useMutation({
-		mutationFn: () => withTimeout(invoke("gh_authenticate"), 10000),
+		mutationFn: () => withTimeout(invoke("git_authenticate"), 10000),
 		onSuccess: () => {
-			queryClient.invalidateQueries({ queryKey: ["gh_configured"] });
+			queryClient.invalidateQueries({ queryKey: ["git_configured"] });
 			toast({ variant: "success", title: "GitHub authenticated" });
 		},
 	});
@@ -130,7 +132,10 @@ function GHStatus() {
 						{icon}
 					</button>
 				) : (
-					<span style={{ opacity: active ? 1 : 0.5 }} className="flex items-center">
+					<span
+						style={{ opacity: active ? 1 : 0.5 }}
+						className="flex items-center"
+					>
 						{icon}
 					</span>
 				)}
@@ -152,8 +157,7 @@ function CodexStatus() {
 		refetchInterval: 5000,
 	});
 	const authenticate = useMutation({
-		mutationFn: () =>
-			withTimeout(invoke("codex_authenticate"), 10000),
+		mutationFn: () => withTimeout(invoke("codex_authenticate"), 10000),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["codex_configured"] });
 			toast({ variant: "success", title: "Codex authenticated" });
@@ -178,9 +182,7 @@ function CodexStatus() {
 						{icon}
 					</button>
 				) : (
-					<span className="flex items-center">
-						{icon}
-					</span>
+					<span className="flex items-center">{icon}</span>
 				)}
 			</TooltipTrigger>
 			<TooltipContent side="bottom">{label}</TooltipContent>
@@ -200,8 +202,7 @@ function ClaudeStatus() {
 		refetchInterval: 5000,
 	});
 	const authenticate = useMutation({
-		mutationFn: () =>
-			withTimeout(invoke("claude_authenticate"), 10000),
+		mutationFn: () => withTimeout(invoke("claude_authenticate"), 10000),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["claude_configured"] });
 			toast({ variant: "success", title: "Claude authenticated" });
@@ -226,9 +227,7 @@ function ClaudeStatus() {
 						{icon}
 					</button>
 				) : (
-					<span className="flex items-center">
-						{icon}
-					</span>
+					<span className="flex items-center">{icon}</span>
 				)}
 			</TooltipTrigger>
 			<TooltipContent side="bottom">{label}</TooltipContent>

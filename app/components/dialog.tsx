@@ -1,7 +1,7 @@
 "use client";
 
-import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
+import * as React from "react";
 import { cn } from "../../lib/utils";
 
 const Dialog = DialogPrimitive.Root;
@@ -55,7 +55,10 @@ function DialogHeader({
 }: React.HTMLAttributes<HTMLDivElement>) {
 	return (
 		<div
-			className={cn("flex flex-col gap-1.5 text-center sm:text-left", className)}
+			className={cn(
+				"flex flex-col gap-1.5 text-center sm:text-left",
+				className,
+			)}
 			{...props}
 		/>
 	);

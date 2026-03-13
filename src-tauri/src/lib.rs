@@ -2,7 +2,7 @@ mod claude;
 mod codex;
 mod config;
 mod gcloud;
-mod gh;
+mod git;
 mod logging;
 mod projects;
 mod river_names;
@@ -43,10 +43,11 @@ pub fn run() {
             claude::claude_configured,
             codex::codex_authenticate,
             codex::codex_configured,
-            gh::gh_installed,
-            gh::gh_configured,
-            gh::gh_username,
-            gh::gh_project_branches,
+            git::git_authenticate,
+            git::git_installed,
+            git::git_configured,
+            git::git_username,
+            git::git_project_branches,
             gcloud::gcloud_authenticate,
             gcloud::gcloud_configure,
             gcloud::gcloud_installed,

@@ -1,44 +1,44 @@
 {
-  "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Silo",
-  "version": "0.1.0",
-  "identifier": "new.silo.app",
-  "build": {
-    "beforeDevCommand": "bun run dev",
-    "devUrl": "http://localhost:3000",
-    "beforeBuildCommand": "bun run build",
-    "frontendDist": "../out"
-  },
-  "app": {
-    "windows": [
-      {
-        "title": "",
-        "width": 800,
-        "height": 600,
-        "titleBarStyle": "Overlay",
-        "visible": false,
-        "backgroundColor": "#0a0a0c",
-        "transparent": true,
-        "theme": "Dark"
-      }
-    ],
-    "security": {
-      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost",
-      "assetProtocol": {
-        "enable": true,
-        "scope": ["**"]
-      }
-    }
-  },
-  "bundle": {
-    "active": true,
-    "targets": "all",
-    "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
-    ]
-  }
+	"$schema": "https://schema.tauri.app/config/2",
+	"productName": "Silo",
+	"version": "0.1.0",
+	"identifier": "new.silo.app",
+	"build": {
+		"beforeDevCommand": "bun run dev",
+		"devUrl": "http://localhost:3000",
+		"beforeBuildCommand": "bun run build",
+		"frontendDist": "../out"
+	},
+	"app": {
+		"windows": [
+			{
+				"title": "",
+				"width": 800,
+				"height": 600,
+				"titleBarStyle": "Overlay",
+				"visible": false,
+				"backgroundColor": "#0a0a0c",
+				"transparent": true,
+				"theme": "Dark"
+			}
+		],
+		"security": {
+			"csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost",
+			"assetProtocol": {
+				"enable": true,
+				"scope": ["**"]
+			}
+		}
+	},
+	"bundle": {
+		"active": true,
+		"targets": "all",
+		"icon": [
+			"icons/32x32.png",
+			"icons/128x128.png",
+			"icons/128x128@2x.png",
+			"icons/icon.icns",
+			"icons/icon.ico"
+		]
+	}
 }

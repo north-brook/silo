@@ -1,13 +1,13 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ChevronRight, ChevronsUpDown, GitBranch, Save } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { GitBranch, ChevronRight, ChevronsUpDown, Save } from "lucide-react";
-import { Popover, PopoverTrigger, PopoverContent } from "./popover";
-import { toast } from "./toaster";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "../../lib/invoke";
 import { isTemplateWorkspace, type Workspace } from "../../lib/workspaces";
+import { Popover, PopoverContent, PopoverTrigger } from "./popover";
+import { toast } from "./toaster";
 
 export function TopBar({ workspace }: { workspace: Workspace }) {
 	if (isTemplateWorkspace(workspace)) {
@@ -75,9 +75,9 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 	const [targetOpen, setTargetOpen] = useState(false);
 
 	const branches = useQuery({
-		queryKey: ["gh_project_branches", workspace.project],
+		queryKey: ["git_project_branches", workspace.project],
 		queryFn: () =>
-			invoke<string[]>("gh_project_branches", { project: workspace.project }),
+			invoke<string[]>("git_project_branches", { project: workspace.project }),
 		enabled: !!workspace.project && !!branchWorkspace,
 	});
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -12,5 +12,9 @@ export function TerminalLoader({ className }: { className?: string }) {
 		return () => clearInterval(id);
 	}, []);
 
-	return <span className={`shrink-0 leading-none ${className ?? "text-accent"}`}>{FRAMES[frame]}</span>;
+	return (
+		<span className={`shrink-0 leading-none ${className ?? "text-accent"}`}>
+			{FRAMES[frame]}
+		</span>
+	);
 }

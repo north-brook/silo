@@ -1,10 +1,11 @@
 "use client";
 
 import { useMutation } from "@tanstack/react-query";
-import { useRouter } from "next/navigation";
 import { Laptop, Terminal } from "lucide-react";
-import { TerminalLoader } from "../components/terminal-loader";
+import { useRouter } from "next/navigation";
 import { invoke } from "../../lib/invoke";
+import { TerminalLoader } from "../components/terminal-loader";
+import { SiloIcon } from "../icons/silo";
 
 function statusMessage(status: string): string {
 	switch (status) {
@@ -37,21 +38,23 @@ export function PendingWorkspace({
 }) {
 	const router = useRouter();
 
-		const createTerminal = useMutation({
-			mutationFn: () =>
-				invoke<{ terminal: string }>("terminal_create_terminal", {
-					workspace,
-				}),
-			onSuccess: (result) => {
-				router.push(
-					`/workspace/terminal?project=${encodeURIComponent(project ?? "")}&workspace=${encodeURIComponent(workspace)}&terminal=${encodeURIComponent(result.terminal)}`,
-				);
-			},
-		});
+	const createTerminal = useMutation({
+		mutationFn: () =>
+			invoke<{ terminal: string }>("terminal_create_terminal", {
+				workspace,
+			}),
+		onSuccess: (result) => {
+			router.push(
+				`/workspace/terminal?project=${encodeURIComponent(project ?? "")}&workspace=${encodeURIComponent(workspace)}&terminal=${encodeURIComponent(result.terminal)}`,
+			);
+		},
+	});
 
 	return (
 		<div className="flex-1 flex flex-col items-center justify-center p-6">
-			<div className="w-full max-w-2xl">
+			<div className="flex flex-col items-center gap-5">
+				<SiloIcon height={24} className="opacity-40" />
+
 				{isRunning ? (
 					<div className="flex items-center gap-3">
 						<button

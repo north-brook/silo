@@ -148,8 +148,7 @@ function WorkspaceTerminal({
 				return;
 			}
 
-			const bytes =
-				typeof data === "string" ? encoder.encode(data) : data;
+			const bytes = typeof data === "string" ? encoder.encode(data) : data;
 			void invoke("terminal_write_terminal", {
 				terminal: terminalIdRef.current,
 				data: Array.from(bytes),

@@ -60,6 +60,7 @@ pub fn projects_add_project(path: String) -> Result<(), String> {
     let project_root = resolve_project_root(Path::new(&path))?;
     let name = project_key_from_root(&project_root)?;
     let image = resolve_project_image_path(&project_root);
+    let remote_url = resolve_project_remote_url(&project_root)?;
     let target_branch = resolve_project_target_branch(&project_root);
 
     if config.projects.contains_key(&name) {
@@ -72,6 +73,7 @@ pub fn projects_add_project(path: String) -> Result<(), String> {
             name,
             path: project_root.to_string_lossy().into_owned(),
             image,
+            remote_url,
             target_branch,
             gcloud: Default::default(),
         },
@@ -95,9 +97,14 @@ pub fn projects_update_project(
         .projects
         .get_mut(&name)
         .ok_or_else(|| format!("project not found: {name}"))?;
+    let current_path = project.path.clone();
     project.name = name.clone();
     project.path = path;
     project.image = image;
+    if project.path != current_path {
+        let project_root = resolve_project_root(Path::new(&project.path))?;
+        project.remote_url = resolve_project_remote_url(&project_root)?;
+    }
 
     store.save(&config).map_err(|error| error.to_string())?;
     log::info!("project {name} updated");
@@ -222,6 +229,31 @@ fn resolve_project_target_branch(project_root: &Path) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+fn resolve_project_remote_url(project_root: &Path) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .map_err(|error| format!("failed to resolve git remote origin: {error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "project path must have an origin remote".to_string()
+        } else {
+            format!("project path must have an origin remote: {stderr}")
+        });
+    }
+
+    let remote_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if remote_url.is_empty() {
+        return Err("project path must have an origin remote".to_string());
+    }
+
+    Ok(remote_url)
+}
+
 fn resolve_project_image_path(project_root: &Path) -> Option<String> {
     find_existing_candidate(project_root, PROJECT_IMAGE_CANDIDATES)
         .or_else(|| find_nested_project_image_path(project_root))
@@ -310,7 +342,7 @@ fn resolve_package_json_icon(project_root: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::config::{
-        ClaudeConfig, CodexConfig, GcloudConfig, GhConfig, ProjectConfig, SiloConfig,
+        ClaudeConfig, CodexConfig, GcloudConfig, GitConfig, ProjectConfig, SiloConfig,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -318,7 +350,7 @@ mod tests {
     fn list_projects_uses_saved_order() {
         let config = SiloConfig {
             gcloud: GcloudConfig::default(),
-            gh: GhConfig::default(),
+            git: GitConfig::default(),
             codex: CodexConfig::default(),
             claude: ClaudeConfig::default(),
             projects: IndexMap::from_iter([
@@ -328,6 +360,7 @@ mod tests {
                         name: "Beta".to_string(),
                         path: "/tmp/beta".to_string(),
                         image: Some("/tmp/beta.png".to_string()),
+                        remote_url: "git@github.com:example/beta.git".to_string(),
                         target_branch: String::new(),
                         gcloud: Default::default(),
                     },
@@ -338,6 +371,7 @@ mod tests {
                         name: "Alpha".to_string(),
                         path: "/tmp/alpha".to_string(),
                         image: None,
+                        remote_url: "git@github.com:example/alpha.git".to_string(),
                         target_branch: String::new(),
                         gcloud: Default::default(),
                     },
@@ -353,7 +387,7 @@ mod tests {
     fn reorder_projects_updates_saved_order() {
         let config = SiloConfig {
             gcloud: GcloudConfig::default(),
-            gh: GhConfig::default(),
+            git: GitConfig::default(),
             codex: CodexConfig::default(),
             claude: ClaudeConfig::default(),
             projects: IndexMap::from_iter([
@@ -363,6 +397,7 @@ mod tests {
                         name: "Alpha".to_string(),
                         path: "/tmp/alpha".to_string(),
                         image: None,
+                        remote_url: "git@github.com:example/alpha.git".to_string(),
                         target_branch: String::new(),
                         gcloud: Default::default(),
                     },
@@ -373,6 +408,7 @@ mod tests {
                         name: "Beta".to_string(),
                         path: "/tmp/beta".to_string(),
                         image: None,
+                        remote_url: "git@github.com:example/beta.git".to_string(),
                         target_branch: String::new(),
                         gcloud: Default::default(),
                     },
@@ -390,7 +426,7 @@ mod tests {
     fn reorder_projects_rejects_unknown_or_duplicate_names() {
         let config = SiloConfig {
             gcloud: GcloudConfig::default(),
-            gh: GhConfig::default(),
+            git: GitConfig::default(),
             codex: CodexConfig::default(),
             claude: ClaudeConfig::default(),
             projects: IndexMap::from_iter([
@@ -400,6 +436,7 @@ mod tests {
                         name: "Alpha".to_string(),
                         path: "/tmp/alpha".to_string(),
                         image: None,
+                        remote_url: "git@github.com:example/alpha.git".to_string(),
                         target_branch: String::new(),
                         gcloud: Default::default(),
                     },
@@ -410,6 +447,7 @@ mod tests {
                         name: "Beta".to_string(),
                         path: "/tmp/beta".to_string(),
                         image: None,
+                        remote_url: "git@github.com:example/beta.git".to_string(),
                         target_branch: String::new(),
                         gcloud: Default::default(),
                     },
@@ -429,22 +467,24 @@ mod tests {
     fn add_project_derives_name_and_image_from_repo_root() {
         let temp_dir = TempDir::new();
         let project_root = temp_dir.path.join("demo");
-        fs::create_dir_all(project_root.join(".git")).expect("git dir should be created");
+        init_repo_with_origin(&project_root);
         fs::write(project_root.join("favicon.png"), b"png").expect("favicon should be written");
 
         let root = resolve_project_root(&project_root).expect("project root should resolve");
         let name = project_key_from_root(&root).expect("name should resolve");
         let image = resolve_project_image_path(&root).expect("image should resolve");
+        let remote_url = resolve_project_remote_url(&root).expect("remote url should resolve");
 
         assert_eq!(name, "demo");
         assert_eq!(image, project_root.join("favicon.png").to_string_lossy());
+        assert_eq!(remote_url, "git@github.com:example/demo.git");
     }
 
     #[test]
     fn add_project_accepts_dot_git_path() {
         let temp_dir = TempDir::new();
         let project_root = temp_dir.path.join("demo");
-        fs::create_dir_all(project_root.join(".git")).expect("git dir should be created");
+        init_repo_with_origin(&project_root);
 
         let root =
             resolve_project_root(&project_root.join(".git")).expect("project root should resolve");
@@ -455,16 +495,7 @@ mod tests {
     fn resolve_project_target_branch_reads_checked_out_branch() {
         let temp_dir = TempDir::new();
         let project_root = temp_dir.path.join("demo");
-        fs::create_dir_all(&project_root).expect("project root should be created");
-
-        let init = Command::new("git")
-            .arg("init")
-            .arg("-b")
-            .arg("main")
-            .arg(&project_root)
-            .output()
-            .expect("git should run");
-        assert!(init.status.success(), "git init should succeed");
+        init_repo_with_origin(&project_root);
 
         assert_eq!(resolve_project_target_branch(&project_root), "main");
     }
@@ -473,7 +504,7 @@ mod tests {
     fn resolves_package_json_icon_when_no_direct_icon_exists() {
         let temp_dir = TempDir::new();
         let project_root = temp_dir.path.join("demo");
-        fs::create_dir_all(project_root.join(".git")).expect("git dir should be created");
+        init_repo_with_origin(&project_root);
         fs::create_dir_all(project_root.join("assets")).expect("assets dir should be created");
         fs::write(project_root.join("assets/icon.png"), b"png").expect("icon should be written");
         fs::write(
@@ -487,6 +518,27 @@ mod tests {
             image,
             project_root.join("assets/icon.png").to_string_lossy()
         );
+    }
+
+    fn init_repo_with_origin(project_root: &Path) {
+        fs::create_dir_all(project_root).expect("project root should be created");
+
+        let init = Command::new("git")
+            .arg("init")
+            .arg("-b")
+            .arg("main")
+            .arg(project_root)
+            .output()
+            .expect("git should run");
+        assert!(init.status.success(), "git init should succeed");
+
+        let remote = Command::new("git")
+            .arg("-C")
+            .arg(project_root)
+            .args(["remote", "add", "origin", "git@github.com:example/demo.git"])
+            .output()
+            .expect("git should add origin");
+        assert!(remote.status.success(), "git remote add should succeed");
     }
 
     struct TempDir {

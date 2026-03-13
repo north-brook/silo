@@ -3,10 +3,10 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FolderOpen } from "lucide-react";
-import { SiloIcon } from "../icons/silo";
+import { invoke } from "../../lib/invoke";
 import { StatusIcons } from "../components/status-icons";
 import { toast } from "../components/toaster";
-import { invoke } from "../../lib/invoke";
+import { SiloIcon } from "../icons/silo";
 
 export default function HomePage() {
 	const queryClient = useQueryClient();

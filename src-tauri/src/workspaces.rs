@@ -95,6 +95,24 @@ impl Workspace {
     pub(crate) fn zone(&self) -> &str {
         &self.base().zone
     }
+
+    pub(crate) fn project(&self) -> Option<&str> {
+        self.base().project.as_deref()
+    }
+
+    pub(crate) fn branch_name(&self) -> Option<&str> {
+        match self {
+            Self::Branch(workspace) => Some(workspace.branch.as_str()),
+            Self::Template(_) => None,
+        }
+    }
+
+    pub(crate) fn target_branch(&self) -> Option<&str> {
+        match self {
+            Self::Branch(workspace) => Some(workspace.target_branch.as_str()),
+            Self::Template(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1653,7 +1671,7 @@ mod tests {
                 image_family: "ubuntu".to_string(),
                 image_project: "ubuntu-os-cloud".to_string(),
             },
-            gh: Default::default(),
+            git: Default::default(),
             codex: Default::default(),
             claude: Default::default(),
             projects: IndexMap::new(),
@@ -1662,6 +1680,7 @@ mod tests {
             name: "demo".to_string(),
             path: "/tmp/demo".to_string(),
             image: None,
+            remote_url: "git@github.com:example/demo.git".to_string(),
             target_branch: String::new(),
             gcloud: ProjectGcloudConfig {
                 project: Some("override-project".to_string()),
@@ -1709,7 +1728,7 @@ mod tests {
                 image_family: "ubuntu".to_string(),
                 image_project: "ubuntu-os-cloud".to_string(),
             },
-            gh: Default::default(),
+            git: Default::default(),
             codex: Default::default(),
             claude: Default::default(),
             projects: IndexMap::new(),
@@ -1718,6 +1737,7 @@ mod tests {
             name: "demo".to_string(),
             path: "/tmp/demo".to_string(),
             image: None,
+            remote_url: "git@github.com:example/demo.git".to_string(),
             target_branch: String::new(),
             gcloud: ProjectGcloudConfig {
                 account: Some("someone-else@example.com".to_string()),

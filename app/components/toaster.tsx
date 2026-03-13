@@ -1,8 +1,8 @@
 "use client";
 
-import * as React from "react";
 import * as ToastPrimitive from "@radix-ui/react-toast";
 import { X } from "lucide-react";
+import * as React from "react";
 import { cn } from "../../lib/utils";
 
 const TOAST_LIMIT = 3;
@@ -75,9 +75,7 @@ function reducer(state: State, action: Action): State {
 			return {
 				...state,
 				toasts: state.toasts.map((t) =>
-					t.id === toastId || toastId === undefined
-						? { ...t, open: false }
-						: t,
+					t.id === toastId || toastId === undefined ? { ...t, open: false } : t,
 				),
 			};
 		}
@@ -151,42 +149,48 @@ export function Toaster() {
 
 	return (
 		<ToastPrimitive.Provider>
-			{toasts.map(({ id, title, description, action, variant = "default", ...props }, index) => (
-				<ToastPrimitive.Root
-					key={id}
-					duration={2000}
-					className={cn(
-						"group pointer-events-auto absolute bottom-0 right-0 flex w-full items-center gap-3 overflow-hidden rounded-lg border p-3 font-mono shadow-lg",
-						"data-[state=open]:toast-enter data-[state=closed]:toast-exit",
-						"data-[swipe=cancel]:translate-x-0 data-[swipe=end]:translate-x-[var(--radix-toast-swipe-end-x)] data-[swipe=move]:translate-x-[var(--radix-toast-swipe-move-x)] data-[swipe=move]:transition-none",
-						variantStyles[variant],
-					)}
-					style={{
-						transition: "transform 400ms cubic-bezier(0.16, 1, 0.3, 1), opacity 400ms cubic-bezier(0.16, 1, 0.3, 1)",
-						transform: `translateY(${-index * 10}px) scale(${1 - index * 0.04})`,
-						opacity: 1 - index * 0.15,
-						zIndex: toasts.length - index,
-					}}
-					{...props}
-				>
-					<div className="flex flex-col gap-1">
-						{title && (
-							<ToastPrimitive.Title className="text-xs font-medium text-text-bright">
-								{title}
-							</ToastPrimitive.Title>
+			{toasts.map(
+				(
+					{ id, title, description, action, variant = "default", ...props },
+					index,
+				) => (
+					<ToastPrimitive.Root
+						key={id}
+						duration={2000}
+						className={cn(
+							"group pointer-events-auto absolute bottom-0 right-0 flex w-full items-center gap-3 overflow-hidden rounded-lg border p-3 font-mono shadow-lg",
+							"data-[state=open]:toast-enter data-[state=closed]:toast-exit",
+							"data-[swipe=cancel]:translate-x-0 data-[swipe=end]:translate-x-[var(--radix-toast-swipe-end-x)] data-[swipe=move]:translate-x-[var(--radix-toast-swipe-move-x)] data-[swipe=move]:transition-none",
+							variantStyles[variant],
 						)}
-						{description && (
-							<ToastPrimitive.Description className="text-xs text-text-muted">
-								{description}
-							</ToastPrimitive.Description>
-						)}
-					</div>
-					{action}
-					<ToastPrimitive.Close className="absolute right-2 top-2 rounded-sm text-text-muted opacity-0 transition-opacity hover:text-text-bright group-hover:opacity-100">
-						<X size={14} />
-					</ToastPrimitive.Close>
-				</ToastPrimitive.Root>
-			))}
+						style={{
+							transition:
+								"transform 400ms cubic-bezier(0.16, 1, 0.3, 1), opacity 400ms cubic-bezier(0.16, 1, 0.3, 1)",
+							transform: `translateY(${-index * 10}px) scale(${1 - index * 0.04})`,
+							opacity: 1 - index * 0.15,
+							zIndex: toasts.length - index,
+						}}
+						{...props}
+					>
+						<div className="flex flex-col gap-1">
+							{title && (
+								<ToastPrimitive.Title className="text-xs font-medium text-text-bright">
+									{title}
+								</ToastPrimitive.Title>
+							)}
+							{description && (
+								<ToastPrimitive.Description className="text-xs text-text-muted">
+									{description}
+								</ToastPrimitive.Description>
+							)}
+						</div>
+						{action}
+						<ToastPrimitive.Close className="absolute right-2 top-2 rounded-sm text-text-muted opacity-0 transition-opacity hover:text-text-bright group-hover:opacity-100">
+							<X size={14} />
+						</ToastPrimitive.Close>
+					</ToastPrimitive.Root>
+				),
+			)}
 			<ToastPrimitive.Viewport className="fixed bottom-3 right-3 z-[100] flex max-h-screen w-64" />
 		</ToastPrimitive.Provider>
 	);

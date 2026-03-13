@@ -1,1 +1,0 @@
-/Users/brycedbjork/git/silo/tools/base-image/target/debug/silo-base-image: /Users/brycedbjork/git/silo/tools/base-image/scripts/base-image-provision.sh /Users/brycedbjork/git/silo/tools/base-image/src/main.rs

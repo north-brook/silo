@@ -1,3 +1,4 @@
+use crate::config::ConfigStore;
 use crate::workspaces::{self, WorkspaceLookup};
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
@@ -17,6 +18,9 @@ const DEFAULT_TERMINAL_ROWS: u16 = 24;
 const MAX_SCROLLBACK_BYTES: usize = 512 * 1024;
 const ATTACH_COMMAND_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const TERMINAL_USER: &str = "silo";
+const TERMINAL_WORKSPACE_DIR: &str = "/home/silo/workspace";
+const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
+const REMOTE_BOOTSTRAP_STATE_FILE: &str = "/home/silo/.silo/workspace-bootstrap-state";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TerminalSessionSummary {
@@ -141,6 +145,17 @@ struct CommandResult {
     stderr: String,
 }
 
+struct WorkspaceBootstrap {
+    remote_url: String,
+    target_branch: String,
+    workspace_branch: Option<String>,
+    gh_token: String,
+    codex_token: String,
+    claude_token: String,
+    git_user_name: String,
+    git_user_email: String,
+}
+
 #[tauri::command]
 pub async fn terminal_create_terminal(workspace: String) -> Result<TerminalCreateResult, String> {
     log::trace!("creating terminal attachment id for workspace {workspace}");
@@ -180,9 +195,9 @@ pub async fn terminal_attach_terminal(
         workspace: workspace.clone(),
         name: name.clone(),
     };
-    let (scrollback_vt, scrollback_truncated) = load_scrollback(&lookup, &name).await?;
 
     if let Some(existing) = state.get_by_key(&key) {
+        let (scrollback_vt, scrollback_truncated) = load_scrollback(&lookup, &name).await?;
         if let Ok(mut current_output) = existing.output.lock() {
             *current_output = output;
         }
@@ -200,6 +215,11 @@ pub async fn terminal_attach_terminal(
             scrollback_truncated,
         });
     }
+
+    if find_terminal_session(&lookup, &name).await?.is_none() {
+        bootstrap_workspace(&lookup).await?;
+    }
+    let (scrollback_vt, scrollback_truncated) = load_scrollback(&lookup, &name).await?;
 
     let attachment = spawn_terminal_attachment(
         app,
@@ -229,17 +249,17 @@ pub async fn terminal_run_terminal(
 ) -> Result<TerminalRunResult, String> {
     let lookup = workspaces::find_workspace(&workspace).await?;
     let created = find_terminal_session(&lookup, &name).await?.is_none();
+    if created {
+        bootstrap_workspace(&lookup).await?;
+    }
     let mut payload = command.into_bytes();
     if !payload.ends_with(b"\n") {
         payload.push(b'\n');
     }
 
-    let result = run_remote_command_with_stdin(
-        &lookup,
-        &run_terminal_user_command(&format!("zmx run {}", shell_quote(&name))),
-        payload,
-    )
-    .await?;
+    let result =
+        run_remote_command_with_stdin(&lookup, &terminal_run_remote_command(&name), payload)
+            .await?;
     if !result.success {
         return Err(remote_command_error(
             "failed to run terminal command",
@@ -371,10 +391,7 @@ fn spawn_terminal_attachment(
         "--ssh-flag=-tt".to_string(),
         format!(
             "--command={}",
-            wrap_remote_shell_command(&run_terminal_user_command(&format!(
-                "exec zmx attach {}",
-                shell_quote(&key.name)
-            )))
+            wrap_remote_shell_command(&terminal_attach_remote_command(&key.name))
         ),
     ]);
 
@@ -647,6 +664,203 @@ async fn resolve_attached_session(
     Ok(pending_terminal_session(name))
 }
 
+async fn bootstrap_workspace(lookup: &WorkspaceLookup) -> Result<(), String> {
+    let bootstrap = workspace_bootstrap(lookup)?;
+    let script = workspace_bootstrap_script(lookup, &bootstrap);
+    let result = run_remote_command_with_stdin(
+        lookup,
+        &run_terminal_user_command("bash -se"),
+        script.into_bytes(),
+    )
+    .await?;
+    if !result.success {
+        return Err(remote_command_error(
+            "failed to bootstrap workspace",
+            &result.stderr,
+        ));
+    }
+
+    Ok(())
+}
+
+fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, String> {
+    let project_name = lookup.workspace.project().ok_or_else(|| {
+        format!(
+            "workspace {} is missing a project label",
+            lookup.workspace.name()
+        )
+    })?;
+    let config = ConfigStore::new()
+        .and_then(|store| store.load())
+        .map_err(|error| error.to_string())?;
+    let project = config.projects.get(project_name).ok_or_else(|| {
+        format!(
+            "project not found for workspace {}: {project_name}",
+            lookup.workspace.name()
+        )
+    })?;
+
+    if project.remote_url.trim().is_empty() {
+        return Err(format!("project {project_name} is missing remote_url"));
+    }
+
+    let target_branch = if lookup.workspace.is_template() {
+        project.target_branch.trim().to_string()
+    } else {
+        lookup
+            .workspace
+            .target_branch()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(project.target_branch.as_str())
+            .trim()
+            .to_string()
+    };
+    if target_branch.is_empty() {
+        return Err(format!("project {project_name} is missing a target branch"));
+    }
+
+    let workspace_branch = if lookup.workspace.is_template() {
+        None
+    } else {
+        let branch = lookup
+            .workspace
+            .branch_name()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        if branch.is_empty() {
+            return Err(format!(
+                "workspace {} is missing a branch label",
+                lookup.workspace.name()
+            ));
+        }
+        Some(branch)
+    };
+
+    Ok(WorkspaceBootstrap {
+        remote_url: project.remote_url.clone(),
+        target_branch,
+        workspace_branch,
+        gh_token: config.git.gh_token.clone(),
+        codex_token: config.codex.token.clone(),
+        claude_token: config.claude.token.clone(),
+        git_user_name: config.git.user_name.clone(),
+        git_user_email: config.git.user_email.clone(),
+    })
+}
+
+fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBootstrap) -> String {
+    let bootstrap_signature = format!(
+        "workspace={}\nremote_url={}\ntarget_branch={}\nworkspace_branch={}\ngh_token={}\ncodex_token={}\nclaude_token={}\ngit_user_name={}\ngit_user_email={}",
+        lookup.workspace.name(),
+        bootstrap.remote_url,
+        bootstrap.target_branch,
+        bootstrap.workspace_branch.as_deref().unwrap_or(""),
+        bootstrap.gh_token,
+        bootstrap.codex_token,
+        bootstrap.claude_token,
+        bootstrap.git_user_name,
+        bootstrap.git_user_email,
+    );
+    let credentials_lines = [
+        format!("export GH_TOKEN={}", shell_quote(&bootstrap.gh_token)),
+        format!(
+            "export OPENAI_API_KEY={}",
+            shell_quote(&bootstrap.codex_token)
+        ),
+        format!(
+            "export ANTHROPIC_API_KEY={}",
+            shell_quote(&bootstrap.claude_token)
+        ),
+    ]
+    .join("\n");
+    let branch_setup = if lookup.workspace.is_template() {
+        format!(
+            "if [ ! -d \"$WORKSPACE_DIR/.git\" ]; then\n  rm -rf \"$WORKSPACE_DIR\"\n  git clone --branch \"$TARGET_BRANCH\" \"$REMOTE_URL\" \"$WORKSPACE_DIR\"\nelse\n  git -C \"$WORKSPACE_DIR\" remote set-url origin \"$REMOTE_URL\"\n  git -C \"$WORKSPACE_DIR\" fetch origin \"$TARGET_BRANCH\"\n  git -C \"$WORKSPACE_DIR\" checkout \"$TARGET_BRANCH\"\n  git -C \"$WORKSPACE_DIR\" reset --hard \"origin/$TARGET_BRANCH\"\n  git -C \"$WORKSPACE_DIR\" clean -fd\nfi",
+        )
+    } else {
+        format!(
+            "if [ ! -d \"$WORKSPACE_DIR/.git\" ]; then\n  rm -rf \"$WORKSPACE_DIR\"\n  git clone --branch \"$TARGET_BRANCH\" \"$REMOTE_URL\" \"$WORKSPACE_DIR\"\nfi\n\
+git -C \"$WORKSPACE_DIR\" remote set-url origin \"$REMOTE_URL\"\n\
+git -C \"$WORKSPACE_DIR\" fetch origin \"$TARGET_BRANCH\"\n\
+git -C \"$WORKSPACE_DIR\" checkout \"$TARGET_BRANCH\"\n\
+git -C \"$WORKSPACE_DIR\" pull --ff-only origin \"$TARGET_BRANCH\"\n\
+if git -C \"$WORKSPACE_DIR\" show-ref --verify --quiet \"refs/heads/$WORKSPACE_BRANCH\"; then\n  git -C \"$WORKSPACE_DIR\" checkout \"$WORKSPACE_BRANCH\"\nelse\n  git -C \"$WORKSPACE_DIR\" checkout -b \"$WORKSPACE_BRANCH\" \"$TARGET_BRANCH\"\nfi",
+        )
+    };
+
+    format!(
+        "set -euo pipefail\n\
+WORKSPACE_DIR={workspace_dir}\n\
+REMOTE_URL={remote_url}\n\
+TARGET_BRANCH={target_branch}\n\
+WORKSPACE_BRANCH={workspace_branch}\n\
+mkdir -p \"$HOME/.silo\"\n\
+chmod 700 \"$HOME/.silo\"\n\
+BOOT_ID=\"$(cat /proc/sys/kernel/random/boot_id)\"\n\
+STATE_PATH={state_path}\n\
+SIGNATURE={signature}\n\
+if [ -f \"$STATE_PATH\" ]; then\n\
+  CURRENT_BOOT_ID=\"$(sed -n '1p' \"$STATE_PATH\")\"\n\
+  CURRENT_SIGNATURE=\"$(sed -n '2,$p' \"$STATE_PATH\")\"\n\
+  if [ \"$CURRENT_BOOT_ID\" = \"$BOOT_ID\" ] && [ \"$CURRENT_SIGNATURE\" = \"$SIGNATURE\" ]; then\n\
+    exit 0\n\
+  fi\n\
+fi\n\
+cat > {credentials_path} <<'EOF'\n\
+{credentials_lines}\n\
+EOF\n\
+chmod 600 {credentials_path}\n\
+for rc in \"$HOME/.zshrc\" \"$HOME/.bashrc\"; do\n\
+  touch \"$rc\"\n\
+  if ! grep -Fqx '[[ -f \"$HOME/.silo/credentials.sh\" ]] && source \"$HOME/.silo/credentials.sh\"' \"$rc\"; then\n\
+    printf '\\n[[ -f \"$HOME/.silo/credentials.sh\" ]] && source \"$HOME/.silo/credentials.sh\"\\n' >> \"$rc\"\n\
+  fi\n\
+done\n\
+if [ -n {git_user_name} ]; then\n\
+  git config --global user.name {git_user_name}\n\
+fi\n\
+if [ -n {git_user_email} ]; then\n\
+  git config --global user.email {git_user_email}\n\
+fi\n\
+{branch_setup}\n\
+printf '%s\\n%s\\n' \"$BOOT_ID\" \"$SIGNATURE\" > \"$STATE_PATH\"\n\
+chmod 600 \"$STATE_PATH\"\n",
+        workspace_dir = shell_quote(TERMINAL_WORKSPACE_DIR),
+        remote_url = shell_quote(&bootstrap.remote_url),
+        target_branch = shell_quote(&bootstrap.target_branch),
+        workspace_branch = shell_quote(bootstrap.workspace_branch.as_deref().unwrap_or("")),
+        state_path = shell_quote(REMOTE_BOOTSTRAP_STATE_FILE),
+        signature = shell_quote(&bootstrap_signature),
+        credentials_path = shell_quote(REMOTE_CREDENTIALS_FILE),
+        credentials_lines = credentials_lines,
+        git_user_name = shell_quote(&bootstrap.git_user_name),
+        git_user_email = shell_quote(&bootstrap.git_user_email),
+        branch_setup = branch_setup,
+    )
+}
+
+fn terminal_attach_remote_command(name: &str) -> String {
+    run_terminal_user_command(&terminal_shell_command(&format!(
+        "exec zmx attach {}",
+        shell_quote(name)
+    )))
+}
+
+fn terminal_run_remote_command(name: &str) -> String {
+    let command = format!("zmx run {}", shell_quote(name));
+    run_terminal_user_command(&terminal_shell_command(&command))
+}
+
+fn terminal_shell_command(command: &str) -> String {
+    format!(
+        "if [ -f {credentials_path} ]; then source {credentials_path}; fi; cd {workspace_dir}; {command}",
+        credentials_path = shell_quote(REMOTE_CREDENTIALS_FILE),
+        workspace_dir = shell_quote(TERMINAL_WORKSPACE_DIR),
+        command = command,
+    )
+}
+
 async fn run_remote_command(
     lookup: &WorkspaceLookup,
     remote_command: &str,
@@ -724,10 +938,7 @@ fn wrap_remote_shell_command(command: &str) -> String {
 }
 
 fn run_terminal_user_command(command: &str) -> String {
-    format!(
-        "sudo -iu {TERMINAL_USER} bash -lc {}",
-        shell_quote(command)
-    )
+    format!("sudo -iu {TERMINAL_USER} bash -lc {}", shell_quote(command))
 }
 
 fn shell_quote(value: &str) -> String {

@@ -1,11 +1,20 @@
 "use client";
 
-import { Suspense } from "react";
-import { useSearchParams } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { TopBar } from "../components/top-bar";
+import { Terminal } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense } from "react";
 import { invoke } from "../../lib/invoke";
-import { type Workspace } from "../../lib/workspaces";
+import type { Workspace } from "../../lib/workspaces";
+import { TopBar } from "../components/top-bar";
+
+interface TerminalSessionSummary {
+	name: string;
+	pid: number | null;
+	clients: number;
+	started_in: string | null;
+	created_at: string | null;
+}
 
 export default function WorkspaceLayout({
 	children,
@@ -32,10 +41,9 @@ function LayoutSkeleton({ children }: { children: React.ReactNode }) {
 	);
 }
 
-function WorkspaceLayoutInner({
-	children,
-}: { children: React.ReactNode }) {
+function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 	const searchParams = useSearchParams();
+	const router = useRouter();
 	const workspaceName =
 		searchParams.get("name") ?? searchParams.get("workspace") ?? "";
 
@@ -54,6 +62,25 @@ function WorkspaceLayoutInner({
 		refetchInterval: 10000,
 	});
 
+	const terminals = useQuery({
+		queryKey: ["terminal_list_terminals", workspaceName],
+		queryFn: () =>
+			invoke<TerminalSessionSummary[]>(
+				"terminal_list_terminals",
+				{ workspace: workspaceName },
+				{
+					log: "state_changes_only",
+					key: `poll:terminal_list_terminals:${workspaceName}`,
+				},
+			),
+		enabled: !!workspaceName && workspace.data?.status === "RUNNING",
+		refetchInterval: 5000,
+	});
+
+	const activeTerminal = searchParams.get("terminal");
+	const project = searchParams.get("project") ?? workspace.data?.project ?? "";
+	const terminalList = terminals.data ?? [];
+
 	return (
 		<>
 			{workspace.data ? (
@@ -66,6 +93,32 @@ function WorkspaceLayoutInner({
 						<div className="h-3 w-16 rounded bg-border-light animate-pulse" />
 					</div>
 				</header>
+			)}
+			{terminalList.length > 0 && (
+				<div className="h-7 w-full border-b border-border-light shrink-0 flex items-center gap-0 px-2 overflow-x-auto">
+					{terminalList.map((session) => {
+						const isActive = activeTerminal === session.name;
+						return (
+							<button
+								key={session.name}
+								type="button"
+								onClick={() =>
+									router.push(
+										`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspaceName)}&terminal=${encodeURIComponent(session.name)}`,
+									)
+								}
+								className={`h-full flex items-center gap-1.5 px-2.5 text-[11px] shrink-0 border-b-2 transition-colors ${
+									isActive
+										? "text-text-bright border-text-bright"
+										: "text-text-muted border-transparent hover:text-text-bright"
+								}`}
+							>
+								<Terminal size={12} />
+								{session.name}
+							</button>
+						);
+					})}
+				</div>
 			)}
 			{children}
 		</>

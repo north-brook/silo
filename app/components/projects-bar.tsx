@@ -1,7 +1,5 @@
-import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { useRouter, useSearchParams } from "next/navigation";
 import {
 	ChevronDown,
 	Cpu,
@@ -13,20 +11,22 @@ import {
 	Square,
 	Trash2,
 } from "lucide-react";
-import { Popover, PopoverTrigger, PopoverContent } from "./popover";
-import { Tooltip, TooltipTrigger, TooltipContent } from "./tooltip";
-import { toast } from "./toaster";
 import Image from "next/image";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useState } from "react";
 import { invoke } from "../../lib/invoke";
 import type { ListedProject } from "../../lib/projects";
+import type { SnapshotTemplate } from "../../lib/templates";
 import {
 	createWorkspace as createWorkspaceCommand,
 	isTemplateWorkspace,
-	workspaceLabel,
 	type Workspace,
+	workspaceLabel,
 } from "../../lib/workspaces";
-import type { SnapshotTemplate } from "../../lib/templates";
+import { Popover, PopoverContent, PopoverTrigger } from "./popover";
 import { TerminalLoader } from "./terminal-loader";
+import { toast } from "./toaster";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
 import { WorkspaceIndicator } from "./workspace-status";
 
 function ProjectRow({
