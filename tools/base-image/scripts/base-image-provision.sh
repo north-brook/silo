@@ -248,7 +248,7 @@ if [[ $- == *i* ]] && [[ -t 0 ]] && [[ -t 1 ]]; then
   # Match common terminal editing shortcuts to zsh widgets.
   bindkey '^A' beginning-of-line
   bindkey '^E' end-of-line
-  bindkey '^U' backward-kill-line
+  bindkey '^[[1337;1u' backward-kill-line
   bindkey '^[b' backward-word
   bindkey '^[f' forward-word
   bindkey '^[[1;3D' backward-word
