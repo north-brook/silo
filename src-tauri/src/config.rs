@@ -19,6 +19,7 @@ static CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
 const SILO_DIR_NAME: &str = ".silo";
 const CONFIG_FILE_NAME: &str = "config.toml";
+const SERVICE_ACCOUNT_KEY_SUFFIX: &str = "-silo-workspaces.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(default)]
@@ -428,6 +429,8 @@ fn detect_initial_config(home_dir: &Path) -> SiloConfig {
         command_output("gcloud", ["config", "get-value", "project"]).unwrap_or_default();
     if gcloud.account.ends_with(".gserviceaccount.com") {
         gcloud.service_account = gcloud.account.clone();
+        gcloud.service_account_key_file =
+            detect_service_account_key_file(home_dir, &gcloud.project).unwrap_or_default();
     }
 
     SiloConfig {
@@ -450,6 +453,29 @@ fn detect_initial_config(home_dir: &Path) -> SiloConfig {
         claude: ClaudeConfig::default(),
         projects: IndexMap::new(),
     }
+}
+
+fn detect_service_account_key_file(home_dir: &Path, project: &str) -> Option<String> {
+    let trimmed = project.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let safe_project = trimmed
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let path = home_dir
+        .join(SILO_DIR_NAME)
+        .join(format!("{safe_project}{SERVICE_ACCOUNT_KEY_SUFFIX}"));
+
+    path.is_file().then(|| path.to_string_lossy().into_owned())
 }
 
 fn validate_config(config: &SiloConfig) -> Result<(), ConfigError> {
@@ -761,6 +787,34 @@ mod tests {
     }
 
     #[test]
+    fn detect_initial_config_seeds_service_account_key_file_when_present() {
+        let temp_dir = TestDir::new_without_config();
+        let key_path = temp_dir
+            .root
+            .join(SILO_DIR_NAME)
+            .join("demo-project-silo-workspaces.json");
+        write_file(&key_path, "{\"type\":\"service_account\"}")
+            .expect("service account key file should be written");
+
+        let config = detect_initial_config_with(
+            &temp_dir.root,
+            |program, args| match (program, args.as_slice()) {
+                ("gcloud", ["config", "get-value", "account"]) => {
+                    Some("svc@demo-project.iam.gserviceaccount.com".to_string())
+                }
+                ("gcloud", ["config", "get-value", "project"]) => Some("demo-project".to_string()),
+                _ => None,
+            },
+            |_| None,
+        );
+
+        assert_eq!(
+            config.gcloud.service_account_key_file,
+            key_path.to_string_lossy()
+        );
+    }
+
+    #[test]
     fn invalid_toml_returns_parse_error() {
         let temp_dir = TestDir::new();
         let store = temp_dir.store();
@@ -938,6 +992,44 @@ mod tests {
 
         fn config_path(&self) -> PathBuf {
             self.silo_dir().join(CONFIG_FILE_NAME)
+        }
+    }
+
+    fn detect_initial_config_with<C, D>(home_dir: &Path, command: C, detect_codex: D) -> SiloConfig
+    where
+        C: Fn(&str, Vec<&str>) -> Option<String>,
+        D: Fn(&Path) -> Option<String>,
+    {
+        let mut gcloud = GcloudConfig::default();
+        gcloud.account =
+            command("gcloud", vec!["config", "get-value", "account"]).unwrap_or_default();
+        gcloud.project =
+            command("gcloud", vec!["config", "get-value", "project"]).unwrap_or_default();
+        if gcloud.account.ends_with(".gserviceaccount.com") {
+            gcloud.service_account = gcloud.account.clone();
+            gcloud.service_account_key_file =
+                detect_service_account_key_file(home_dir, &gcloud.project).unwrap_or_default();
+        }
+
+        SiloConfig {
+            gcloud,
+            git: GitConfig {
+                gh_username: command("gh", vec!["api", "user", "--jq", ".login"])
+                    .unwrap_or_default(),
+                gh_token: command("gh", vec!["auth", "token"]).unwrap_or_default(),
+                user_name: command("git", vec!["config", "--global", "user.name"])
+                    .unwrap_or_default(),
+                user_email: command("git", vec!["config", "--global", "user.email"])
+                    .unwrap_or_default(),
+            },
+            chrome: ChromeConfig {
+                user_data_dir: detect_chrome_user_data_dir(home_dir).unwrap_or_default(),
+            },
+            codex: CodexConfig {
+                token: detect_codex(home_dir).unwrap_or_default(),
+            },
+            claude: ClaudeConfig::default(),
+            projects: IndexMap::new(),
         }
     }
 
