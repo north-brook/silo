@@ -7,6 +7,7 @@ export interface WorkspaceBase {
 	created_at: string;
 	status: string;
 	zone: string;
+	ready: boolean;
 }
 
 export interface BranchWorkspace extends WorkspaceBase {
