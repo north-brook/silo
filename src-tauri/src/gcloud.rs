@@ -60,6 +60,10 @@ fn has_service_account_identity(config: &crate::config::GcloudConfig) -> bool {
         && !config.project.trim().is_empty()
 }
 
+fn has_local_gcloud_identity(config: &crate::config::GcloudConfig) -> bool {
+    has_service_account_identity(config) && Path::new(&config.service_account_key_file).is_file()
+}
+
 fn configured_service_account(config: &crate::config::GcloudConfig) -> Option<&str> {
     let service_account = config.service_account.trim();
     if service_account.is_empty() {
@@ -353,7 +357,6 @@ async fn ensure_service_account_key(
         });
     }
 
-    activate_service_account(service_account, &key_path, project).await?;
     Ok(key_path)
 }
 
@@ -429,6 +432,12 @@ pub async fn gcloud_authenticate() -> Result<(), String> {
     save_gcloud_identity(&account, &project, &service_account, &key_path_string)?;
     log::info!("gcloud service account {service_account} saved for project {project}");
 
+    activate_service_account(&service_account, &key_path, &project)
+        .await
+        .map_err(|error| {
+            format!("service account key was provisioned and saved, but activation failed: {error}")
+        })?;
+
     gcloud_service_account_usable(&service_account, &project)
         .await
         .map_err(|error| {
@@ -450,17 +459,7 @@ pub async fn gcloud_configured() -> bool {
         return false;
     };
 
-    if !has_service_account_identity(&config.gcloud) {
-        return false;
-    }
-
-    if !Path::new(&config.gcloud.service_account_key_file).is_file() {
-        return false;
-    }
-
-    gcloud_service_account_usable(&config.gcloud.service_account, &config.gcloud.project)
-        .await
-        .is_ok()
+    has_local_gcloud_identity(&config.gcloud)
 }
 
 #[tauri::command]
@@ -551,6 +550,36 @@ mod tests {
 
         config.project = "demo-project".to_string();
         assert!(has_service_account_identity(&config));
+    }
+
+    #[test]
+    fn has_local_gcloud_identity_requires_key_file_to_exist() {
+        let temp_home = std::env::temp_dir().join(format!(
+            "silo-gcloud-local-identity-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_home).unwrap();
+        let key_path = temp_home.join("demo-project-silo-workspaces.json");
+
+        let mut config = GcloudConfig {
+            service_account: "svc@demo-project.iam.gserviceaccount.com".to_string(),
+            service_account_key_file: key_path.to_string_lossy().into_owned(),
+            project: "demo-project".to_string(),
+            ..GcloudConfig::default()
+        };
+
+        assert!(!has_local_gcloud_identity(&config));
+
+        fs::write(&key_path, "{\"type\":\"service_account\"}").unwrap();
+        assert!(has_local_gcloud_identity(&config));
+
+        config.service_account.clear();
+        assert!(!has_local_gcloud_identity(&config));
+
+        let _ = fs::remove_dir_all(temp_home);
     }
 
     #[test]
