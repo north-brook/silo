@@ -60,6 +60,10 @@ interface GitBarContextValue {
 	workspace: string;
 	project: string;
 	isInBranchWorkspace: boolean;
+	prStatus: import("../../lib/git").PullRequestStatus | null;
+	prStatusLoading: boolean;
+	observation: import("../../lib/git").PullRequestObservation | null;
+	observationLoading: boolean;
 }
 
 const GitBarContext = createContext<GitBarContextValue>({
@@ -70,6 +74,10 @@ const GitBarContext = createContext<GitBarContextValue>({
 	workspace: "",
 	project: "",
 	isInBranchWorkspace: false,
+	prStatus: null,
+	prStatusLoading: false,
+	observation: null,
+	observationLoading: false,
 });
 
 export function useGitBar() {
@@ -112,6 +120,22 @@ function GitBarProviderInner({ children }: { children: ReactNode }) {
 		(diff.data?.overview.deletions ?? 0) > 0 ||
 		(diff.data?.overview.files_changed ?? 0) > 0;
 
+	const prStatusQuery = useQuery({
+		queryKey: ["git_pr_status", workspaceName],
+		queryFn: () => gitPrStatus(workspaceName),
+		enabled: isInBranchWorkspace,
+		refetchInterval: 10000,
+	});
+
+	const hasPr = prStatusQuery.data?.status === "open";
+
+	const observationQuery = useQuery({
+		queryKey: ["git_pr_observe", workspaceName],
+		queryFn: () => gitPrObserve(workspaceName),
+		enabled: isInBranchWorkspace && hasPr,
+		refetchInterval: 15000,
+	});
+
 	const [isOpen, setIsOpen] = useState(false);
 
 	useEffect(() => {
@@ -133,6 +157,10 @@ function GitBarProviderInner({ children }: { children: ReactNode }) {
 		workspace: workspaceName,
 		project,
 		isInBranchWorkspace,
+		prStatus: prStatusQuery.data ?? null,
+		prStatusLoading: prStatusQuery.isLoading,
+		observation: observationQuery.data ?? null,
+		observationLoading: observationQuery.isLoading,
 	};
 
 	return (
@@ -180,9 +208,9 @@ export function GitToggle() {
 				<span className="flex items-center gap-1.5">
 					Toggle Git Bar
 					<span className="flex items-center gap-0.5">
-						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text-muted">⌘</kbd>
-						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text-muted">⇧</kbd>
-						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text-muted">B</kbd>
+						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">⌘</kbd>
+						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">⇧</kbd>
+						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">B</kbd>
 					</span>
 				</span>
 			</TooltipContent>
@@ -212,21 +240,14 @@ export function GitBar() {
 // ---------------------------------------------------------------------------
 
 function GitBarHeader() {
-	const { workspace, project } = useGitBar();
+	const { workspace, project, prStatus: pr, prStatusLoading } = useGitBar();
 	const router = useRouter();
 	const queryClient = useQueryClient();
-
-	const prStatus = useQuery({
-		queryKey: ["git_pr_status", workspace],
-		queryFn: () => gitPrStatus(workspace),
-		enabled: !!workspace,
-		refetchInterval: 10000,
-	});
 
 	const treeDirty = useQuery({
 		queryKey: ["git_tree_dirty", workspace],
 		queryFn: () => gitTreeDirty(workspace),
-		enabled: !!workspace && prStatus.data?.status === "open",
+		enabled: !!workspace && pr?.status === "open",
 		refetchInterval: 5000,
 	});
 
@@ -285,16 +306,12 @@ function GitBarHeader() {
 
 	const merge = useMutation({
 		mutationFn: () => gitMergePr(workspace),
-		onSuccess: () => {
+		onSuccess: async () => {
+			await invoke("workspaces_delete_workspace", { workspace });
 			queryClient.invalidateQueries({
-				queryKey: ["git_pr_status", workspace],
+				queryKey: ["workspaces_list_workspaces"],
 			});
-			queryClient.invalidateQueries({
-				queryKey: ["git_diff", workspace],
-			});
-			queryClient.invalidateQueries({
-				queryKey: ["git_pr_observe", workspace],
-			});
+			router.push("/");
 			toast({ variant: "success", title: "PR merged" });
 		},
 		onError: (error) => {
@@ -306,11 +323,39 @@ function GitBarHeader() {
 		},
 	});
 
-	const pr = prStatus.data;
 	const dirty = treeDirty.data ?? true;
 	const isLoading =
-		prStatus.isLoading ||
+		prStatusLoading ||
 		(pr?.status === "open" && treeDirty.isLoading);
+
+	const showCreatePr = !isLoading && !pr;
+	const showMerge = !isLoading && pr?.status === "open" && !dirty;
+	const showPush = !isLoading && pr?.status === "open" && dirty;
+
+	useEffect(() => {
+		const handler = (e: KeyboardEvent) => {
+			if (!e.metaKey || !e.shiftKey) return;
+			if (e.key === "p") {
+				e.preventDefault();
+				if (showCreatePr && !createPr.isPending) createPr.mutate();
+				else if (showPush && !push.isPending) push.mutate();
+			}
+			if (e.key === "m") {
+				e.preventDefault();
+				if (showMerge && !merge.isPending) merge.mutate();
+			}
+		};
+		window.addEventListener("keydown", handler);
+		return () => window.removeEventListener("keydown", handler);
+	}, [showCreatePr, showPush, showMerge, createPr, push, merge]);
+
+	const hotkeyKbd = (keys: string[]) => (
+		<span className="flex items-center gap-0.5">
+			{keys.map((k) => (
+				<kbd key={k} className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">{k}</kbd>
+			))}
+		</span>
+	);
 
 	return (
 		<div className="h-9 flex items-center justify-between px-3 border-b border-border-light shrink-0">
@@ -333,50 +378,65 @@ function GitBarHeader() {
 			</div>
 			<div>
 				{isLoading && <Loader />}
-				{!isLoading && !pr && (
-					<button
-						type="button"
-						disabled={createPr.isPending}
-						onClick={() => createPr.mutate()}
-						className="flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium bg-green-600 text-white hover:bg-green-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-					>
-						{createPr.isPending ? (
-							<Loader className="text-white" />
-						) : (
-							<GitPullRequestCreateArrow size={10} />
-						)}
-						Open PR
-					</button>
+				{showCreatePr && (
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<button
+								type="button"
+								disabled={createPr.isPending}
+								onClick={() => createPr.mutate()}
+								className="flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium bg-green-600 text-white hover:bg-green-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+							>
+								{createPr.isPending ? (
+									<Loader className="text-white" />
+								) : (
+									<GitPullRequestCreateArrow size={10} />
+								)}
+								Open PR
+							</button>
+						</TooltipTrigger>
+						<TooltipContent side="left">{hotkeyKbd(["⌘", "⇧", "P"])}</TooltipContent>
+					</Tooltip>
 				)}
-				{!isLoading && pr?.status === "open" && !dirty && (
-					<button
-						type="button"
-						disabled={merge.isPending}
-						onClick={() => merge.mutate()}
-						className="flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium bg-green-600 text-white hover:bg-green-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-					>
-						{merge.isPending ? (
-							<Loader className="text-white" />
-						) : (
-							<GitMerge size={10} />
-						)}
-						Merge
-					</button>
+				{showMerge && (
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<button
+								type="button"
+								disabled={merge.isPending}
+								onClick={() => merge.mutate()}
+								className="flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium bg-green-600 text-white hover:bg-green-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+							>
+								{merge.isPending ? (
+									<Loader className="text-white" />
+								) : (
+									<GitMerge size={10} />
+								)}
+								Merge
+							</button>
+						</TooltipTrigger>
+						<TooltipContent side="left">{hotkeyKbd(["⌘", "⇧", "M"])}</TooltipContent>
+					</Tooltip>
 				)}
-				{!isLoading && pr?.status === "open" && dirty && (
-					<button
-						type="button"
-						disabled={push.isPending}
-						onClick={() => push.mutate()}
-						className="flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium bg-btn text-text hover:bg-btn-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-					>
-						{push.isPending ? (
-							<Loader />
-						) : (
-							<ArrowUpFromLine size={10} />
-						)}
-						Push
-					</button>
+				{showPush && (
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<button
+								type="button"
+								disabled={push.isPending}
+								onClick={() => push.mutate()}
+								className="flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium bg-btn text-text hover:bg-btn-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+							>
+								{push.isPending ? (
+									<Loader />
+								) : (
+									<ArrowUpFromLine size={10} />
+								)}
+								Push
+							</button>
+						</TooltipTrigger>
+						<TooltipContent side="left">{hotkeyKbd(["⌘", "⇧", "P"])}</TooltipContent>
+					</Tooltip>
 				)}
 			</div>
 		</div>
@@ -388,32 +448,18 @@ function GitBarHeader() {
 // ---------------------------------------------------------------------------
 
 function GitBarTabs() {
-	const { workspace, diff } = useGitBar();
+	const { diff, prStatus, observation, observationLoading } = useGitBar();
 	const [activeTab, setActiveTab] = useState<"diff" | "checks">("diff");
 
-	const prStatus = useQuery({
-		queryKey: ["git_pr_status", workspace],
-		queryFn: () => gitPrStatus(workspace),
-		enabled: !!workspace,
-		refetchInterval: 10000,
-	});
-
-	const hasPr = prStatus.data?.status === "open";
-
-	const observation = useQuery({
-		queryKey: ["git_pr_observe", workspace],
-		queryFn: () => gitPrObserve(workspace),
-		enabled: !!workspace && hasPr,
-		refetchInterval: 15000,
-	});
+	const hasPr = prStatus?.status === "open";
 
 	const additions = diff?.overview.additions ?? 0;
 	const deletions = diff?.overview.deletions ?? 0;
 
 	const checksIndicator = (() => {
 		if (!hasPr) return null;
-		if (observation.isLoading) return <Loader />;
-		const checks = observation.data?.checks ?? [];
+		if (observationLoading) return <Loader />;
+		const checks = observation?.checks ?? [];
 		if (checks.length === 0) return null;
 		const failStates: CheckState[] = ["failure", "startup_failure", "timed_out", "cancelled"];
 		const pendingStates: CheckState[] = ["in_progress", "pending", "queued", "waiting", "requested"];
@@ -458,7 +504,7 @@ function GitBarTabs() {
 			</div>
 			<div className="flex-1 overflow-y-auto bg-surface">
 				{activeTab === "diff" && <DiffTab />}
-				{activeTab === "checks" && hasPr && <ChecksTab observation={observation.data ?? null} isLoading={observation.isLoading} />}
+				{activeTab === "checks" && hasPr && <ChecksTab observation={observation} isLoading={observationLoading} />}
 			</div>
 		</>
 	);
@@ -490,19 +536,16 @@ function DiffSectionView({
 	return (
 		<div className="border-b border-border-light last:border-b-0">
 			<div className="flex items-center justify-between px-3 py-1.5 text-[11px]">
-				<span className="text-text-muted font-medium">{label}</span>
+				<span className="text-[10px] text-text-muted font-medium uppercase tracking-wide">{label}</span>
 				<span className="text-text-muted">
-					{section.overview.files_changed} file
-					{section.overview.files_changed !== 1 ? "s" : ""}
 					{section.overview.additions > 0 && (
 						<span className="text-emerald-400">
-							{" "}
 							+{section.overview.additions}
 						</span>
 					)}
+					{section.overview.additions > 0 && section.overview.deletions > 0 && " "}
 					{section.overview.deletions > 0 && (
 						<span className="text-red-400">
-							{" "}
 							-{section.overview.deletions}
 						</span>
 					)}

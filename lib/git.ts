@@ -98,23 +98,51 @@ export interface GitTerminalResult {
 }
 
 export function gitDiff(workspace: string): Promise<Diff> {
-	return invoke<Diff>("git_diff", { workspace });
+	return invoke<Diff>(
+		"git_diff",
+		{ workspace },
+		{
+			log: "state_changes_only",
+			key: `poll:git_diff:${workspace}`,
+		},
+	);
 }
 
 export function gitPrStatus(
 	workspace: string,
 ): Promise<PullRequestStatus | null> {
-	return invoke<PullRequestStatus | null>("git_pr_status", { workspace });
+	return invoke<PullRequestStatus | null>(
+		"git_pr_status",
+		{ workspace },
+		{
+			log: "state_changes_only",
+			key: `poll:git_pr_status:${workspace}`,
+		},
+	);
 }
 
 export function gitPrObserve(
 	workspace: string,
 ): Promise<PullRequestObservation | null> {
-	return invoke<PullRequestObservation | null>("git_pr_observe", { workspace });
+	return invoke<PullRequestObservation | null>(
+		"git_pr_observe",
+		{ workspace },
+		{
+			log: "state_changes_only",
+			key: `poll:git_pr_observe:${workspace}`,
+		},
+	);
 }
 
 export function gitTreeDirty(workspace: string): Promise<boolean> {
-	return invoke<boolean>("git_tree_dirty", { workspace });
+	return invoke<boolean>(
+		"git_tree_dirty",
+		{ workspace },
+		{
+			log: "state_changes_only",
+			key: `poll:git_tree_dirty:${workspace}`,
+		},
+	);
 }
 
 export function gitPush(workspace: string): Promise<GitTerminalResult> {
