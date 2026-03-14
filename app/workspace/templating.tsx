@@ -3,7 +3,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Check, Laptop, Terminal } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { invoke } from "../../lib/invoke";
 import { Loader } from "../components/loader";
 import { toast } from "../components/toaster";
@@ -124,7 +124,6 @@ function StepRow({ step }: { step: Step }) {
 }
 
 export function TemplatingWorkspace({
-	isRunning,
 	ready,
 	status,
 	workspace,
