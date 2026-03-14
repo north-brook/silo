@@ -12,7 +12,7 @@ import { SiloIcon } from "../icons/silo";
 
 function Kbd({ children }: { children: React.ReactNode }) {
 	return (
-		<kbd className="inline-flex items-center justify-center w-6 h-6 rounded border border-border-light text-[11px] text-text-placeholder">
+		<kbd className="inline-flex items-center justify-center w-5 h-5 rounded border border-border-light bg-btn text-[11px] text-text-placeholder">
 			{children}
 		</kbd>
 	);

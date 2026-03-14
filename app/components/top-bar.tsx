@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "../../lib/invoke";
 import { isTemplateWorkspace, type Workspace } from "../../lib/workspaces";
+import { GitToggle } from "./git-bar";
 import { Loader } from "./loader";
 import { Popover, PopoverContent, PopoverTrigger } from "./popover";
 import { toast } from "./toaster";
@@ -162,81 +163,84 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 
 	return (
 		<header className="h-9 w-full border-b border-border-light shrink-0 flex items-center relative">
-			<div data-tauri-drag-region className="absolute inset-0" />
-			<div className="relative flex items-center gap-1.5 px-3 text-[11px] text-text-muted z-10">
-				<GitBranch size={12} className="shrink-0 text-text-placeholder" />
-				{editingBranch ? (
-					<input
-						ref={inputRef}
-						value={branchDraft}
-						onChange={(e) => setBranchDraft(e.target.value)}
-						onBlur={commitBranch}
-						onKeyDown={(e) => {
-							if (e.key === "Enter") commitBranch();
-							if (e.key === "Escape") {
-								setBranchDraft(branchWorkspace.branch);
-								setEditingBranch(false);
-							}
-						}}
-						className="bg-transparent border-0 outline-none text-[11px] text-text-bright p-0 m-0 w-24 rounded-none"
-					/>
-				) : (
-					<button
-						type="button"
-						onClick={() => {
-							setBranchDraft(branchWorkspace.branch);
-							setEditingBranch(true);
-						}}
-						className="text-text hover:text-text-bright transition-colors"
-					>
-						{branchWorkspace.branch || "branch"}
-					</button>
-				)}
-				<ChevronRight size={10} className="shrink-0 text-text-placeholder" />
-				<Popover open={targetOpen} onOpenChange={setTargetOpen}>
-					<PopoverTrigger asChild>
+			<div className="relative flex items-center justify-between w-full pl-3 pr-2 h-full z-10">
+				<div className="flex items-center gap-1.5 text-[11px] text-text-muted">
+					<GitBranch size={12} className="shrink-0 text-text-placeholder" />
+					{editingBranch ? (
+						<input
+							ref={inputRef}
+							value={branchDraft}
+							onChange={(e) => setBranchDraft(e.target.value)}
+							onBlur={commitBranch}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") commitBranch();
+								if (e.key === "Escape") {
+									setBranchDraft(branchWorkspace.branch);
+									setEditingBranch(false);
+								}
+							}}
+							className="bg-transparent border-0 outline-none text-[11px] text-text-bright p-0 m-0 w-24 rounded-none"
+						/>
+					) : (
 						<button
 							type="button"
-							className="flex items-center gap-1 text-text hover:text-text-bright transition-colors"
+							onClick={() => {
+								setBranchDraft(branchWorkspace.branch);
+								setEditingBranch(true);
+							}}
+							className="text-text hover:text-text-bright transition-colors"
 						>
-							{targetBranch || "target branch"}
-							<ChevronsUpDown size={10} className="text-text-placeholder" />
+							{branchWorkspace.branch || "branch"}
 						</button>
-					</PopoverTrigger>
-					<PopoverContent
-						side="bottom"
-						align="start"
-						className="w-52 p-1 max-h-64 overflow-y-auto"
-					>
-						{branches.isLoading && (
-							<span className="block px-2 py-1.5 text-xs text-text-muted">
-								Loading...
-							</span>
-						)}
-						{sortedBranches.map((b) => (
+					)}
+					<ChevronRight size={10} className="shrink-0 text-text-placeholder" />
+					<Popover open={targetOpen} onOpenChange={setTargetOpen}>
+						<PopoverTrigger asChild>
 							<button
-								key={b}
 								type="button"
-								onClick={() => {
-									updateTargetBranch.mutate(b);
-									setTargetOpen(false);
-								}}
-								className={`block w-full text-left px-2 py-1.5 text-xs rounded transition-colors truncate ${
-									b === targetBranch
-										? "text-text-bright bg-btn-hover"
-										: "text-text hover:bg-btn-hover hover:text-text-bright"
-								}`}
+								className="flex items-center gap-1 text-text hover:text-text-bright transition-colors"
 							>
-								{b}
+								{targetBranch || "target branch"}
+								<ChevronsUpDown size={10} className="text-text-placeholder" />
 							</button>
-						))}
-						{branches.data?.length === 0 && (
-							<span className="block px-2 py-1.5 text-xs text-text-muted">
-								No branches found
-							</span>
-						)}
-					</PopoverContent>
-				</Popover>
+						</PopoverTrigger>
+						<PopoverContent
+							side="bottom"
+							align="start"
+							className="w-52 p-1 max-h-64 overflow-y-auto"
+						>
+							{branches.isLoading && (
+								<span className="block px-2 py-1.5 text-xs text-text-muted">
+									Loading...
+								</span>
+							)}
+							{sortedBranches.map((b) => (
+								<button
+									key={b}
+									type="button"
+									onClick={() => {
+										updateTargetBranch.mutate(b);
+										setTargetOpen(false);
+									}}
+									className={`block w-full text-left px-2 py-1.5 text-xs rounded transition-colors truncate ${
+										b === targetBranch
+											? "text-text-bright bg-btn-hover"
+											: "text-text hover:bg-btn-hover hover:text-text-bright"
+									}`}
+								>
+									{b}
+								</button>
+							))}
+							{branches.data?.length === 0 && (
+								<span className="block px-2 py-1.5 text-xs text-text-muted">
+									No branches found
+								</span>
+							)}
+						</PopoverContent>
+					</Popover>
+				</div>
+				<div data-tauri-drag-region className="h-full flex-1" />
+				<GitToggle />
 			</div>
 		</header>
 	);
