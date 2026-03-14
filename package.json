@@ -9,7 +9,9 @@
 		"start": "next start --port 3000",
 		"tauri": "tauri",
 		"check": "bun x @biomejs/biome check .",
-		"check:fix": "bun x @biomejs/biome check --write ."
+		"check:fix": "bun x @biomejs/biome check --write .",
+		"reset": "rm -rf \"$HOME/.silo\"",
+		"reset:gcp": "python3 tools/reset_gcp.py"
 	},
 	"dependencies": {
 		"@radix-ui/react-dialog": "^1.1.15",
