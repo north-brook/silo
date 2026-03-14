@@ -4,6 +4,7 @@ import "./globals.css";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { initializeFrontendLogging } from "../lib/invoke";
+import { GitBar, GitBarProvider } from "./components/git-bar";
 import { NewWorkspaceProvider } from "./components/new-workspace";
 import { OpenProjectProvider } from "./components/open-project";
 import { ProjectsBar } from "./components/projects-bar";
@@ -31,16 +32,19 @@ export default function RootLayout({
 					disableHoverableContent
 				>
 					<body className="flex flex-col h-screen overflow-hidden">
-						<OpenProjectProvider>
-							<NewWorkspaceProvider>
-								<div className="flex flex-1 min-h-0">
-									<ProjectsBar />
-									<main className="flex-1 min-w-0 overflow-hidden flex flex-col">
-										{children}
-									</main>
-								</div>
-							</NewWorkspaceProvider>
-						</OpenProjectProvider>
+						<GitBarProvider>
+							<OpenProjectProvider>
+								<NewWorkspaceProvider>
+									<div className="flex flex-1 min-h-0">
+										<ProjectsBar />
+										<main className="flex-1 min-w-0 overflow-hidden flex flex-col">
+											{children}
+										</main>
+										<GitBar />
+									</div>
+								</NewWorkspaceProvider>
+							</OpenProjectProvider>
+						</GitBarProvider>
 						<Toaster />
 					</body>
 				</TooltipProvider>

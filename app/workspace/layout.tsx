@@ -151,7 +151,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 			)}
 			{terminalList.length > 0 && (
 				<div className="w-full bg-bg shrink-0 flex items-end overflow-x-auto">
-					{terminalList.map((session, index) => {
+					{terminalList.map((session) => {
 						const isActive = activeTerminal === session.name;
 						return (
 							// biome-ignore lint/a11y/noStaticElementInteractions: can't use <button> because it contains interactive children
