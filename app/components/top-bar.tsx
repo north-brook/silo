@@ -54,15 +54,17 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 					<span className="text-text">{workspace.project}</span> template
 				</span>
 				<div data-tauri-drag-region className="h-full flex-1" />
-				<button
-					type="button"
-					disabled={save.isPending}
-					onClick={() => save.mutate()}
-					className="flex items-center gap-1.5 justify-center px-3 py-0.5 rounded text-[11px] font-medium bg-green-600 text-white transition-colors hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
-				>
-					{save.isPending ? <Loader className="text-white" /> : <Save size={10} />}
-					Save
-				</button>
+				{workspace.ready && (
+					<button
+						type="button"
+						disabled={save.isPending}
+						onClick={() => save.mutate()}
+						className="flex items-center gap-1.5 justify-center px-3 py-0.5 rounded text-[11px] font-medium bg-green-600 text-white transition-colors hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
+					>
+						{save.isPending ? <Loader className="text-white" /> : <Save size={10} />}
+						Save
+					</button>
+				)}
 			</div>
 		</header>
 	);

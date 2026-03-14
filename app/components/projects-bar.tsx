@@ -4,6 +4,7 @@ import {
 	ChevronDown,
 	Cpu,
 	EllipsisVertical,
+	FolderOpen,
 	Play,
 	Plus,
 	Save,
@@ -23,6 +24,8 @@ import {
 	type Workspace,
 	workspaceLabel,
 } from "../../lib/workspaces";
+import { useNewWorkspace } from "./new-workspace";
+import { useOpenProject } from "./open-project";
 import { Popover, PopoverContent, PopoverTrigger } from "./popover";
 import { Loader } from "./loader";
 import { toast } from "./toaster";
@@ -189,7 +192,7 @@ function ProjectRow({
 							</button>
 						</TooltipTrigger>
 						<TooltipContent side="right">
-							{templateWorkspace ? "Edit Template" : "New Template"}
+							{templateWorkspace ? "Edit Template" : hasTemplate ? "Edit Template" : "New Template"}
 						</TooltipContent>
 					</Tooltip>
 				)}
@@ -392,18 +395,20 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 				<PopoverContent side="right" align="start" className="w-36 p-1">
 					{isTemplate ? (
 						<>
-							<button
-								type="button"
-								onClick={(e) => {
-									e.stopPropagation();
-									setMenuOpen(false);
-									saveTemplateMut.mutate();
-								}}
-								className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
-							>
-								{saveTemplateMut.isPending ? <Loader className="text-text-bright" /> : <Save size={12} />}
-								Save
-							</button>
+							{workspace.ready && (
+								<button
+									type="button"
+									onClick={(e) => {
+										e.stopPropagation();
+										setMenuOpen(false);
+										saveTemplateMut.mutate();
+									}}
+									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+								>
+									{saveTemplateMut.isPending ? <Loader className="text-text-bright" /> : <Save size={12} />}
+									Save
+								</button>
+							)}
 							<button
 								type="button"
 								onClick={(e) => {
@@ -471,6 +476,8 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 }
 
 function BarFooter() {
+	const openProject = useOpenProject();
+
 	const memory = useQuery({
 		queryKey: ["system_memory_usage"],
 		queryFn: () =>
@@ -484,13 +491,28 @@ function BarFooter() {
 	});
 
 	return (
-		<div className="shrink-0 px-3 py-2 text-[11px] text-text-muted">
-			{memory.data !== undefined && (
-				<span className="flex items-center gap-1">
-					<Cpu size={10} />
-					{memory.data.toFixed(1)} MB
-				</span>
-			)}
+		<div className="shrink-0">
+			<button
+				type="button"
+				onClick={() => openProject.open()}
+				disabled={openProject.isPending}
+				className="flex items-center gap-2 w-full px-3 py-2.5 text-xs text-text-muted hover:bg-btn-hover hover:text-text-bright transition-colors disabled:opacity-50"
+			>
+				{openProject.isPending ? (
+					<Loader className="text-text-muted" />
+				) : (
+					<FolderOpen size={12} />
+				)}
+				Open Project
+			</button>
+			<div className="px-3 py-2 text-[11px] text-text-muted">
+				{memory.data !== undefined && (
+					<span className="flex items-center gap-1">
+						<Cpu size={10} />
+						{memory.data.toFixed(1)} MB
+					</span>
+				)}
+			</div>
 		</div>
 	);
 }
@@ -499,6 +521,7 @@ export function ProjectsBar() {
 	const router = useRouter();
 	const pathname = usePathname();
 	const isHome = pathname === "/";
+	const newWorkspace = useNewWorkspace();
 	const projects = useQuery({
 		queryKey: ["projects_list_projects"],
 		queryFn: () => invoke<ListedProject[]>("projects_list_projects"),
@@ -534,14 +557,41 @@ export function ProjectsBar() {
 	return (
 		<aside className="w-48 shrink-0 border-r border-border-light bg-bg flex flex-col">
 			<div data-tauri-drag-region className="h-9 shrink-0" />
-			<button
-				type="button"
+			{/* biome-ignore lint/a11y/useSemanticElements: can't use <button> because it contains interactive children */}
+			<div
+				role="button"
+				tabIndex={0}
 				onClick={() => router.push("/")}
-				className={`flex items-center gap-2 px-3 py-2 text-xs transition-colors ${isHome ? "bg-btn-hover text-text-bright" : "text-text hover:bg-btn-hover hover:text-text-bright"}`}
+				onKeyDown={(e) => {
+					if (e.key === "Enter" || e.key === " ") {
+						e.preventDefault();
+						router.push("/");
+					}
+				}}
+				className={`group flex items-center w-full px-3 py-2.5 text-xs transition-colors cursor-pointer ${isHome ? "bg-btn-hover text-text-bright" : "text-text hover:bg-btn-hover hover:text-text-bright"}`}
 			>
-				<LogoIcon height={12} />
-				Dashboard
-			</button>
+				<span className="flex items-center gap-2 min-w-0 flex-1">
+					<LogoIcon height={12} />
+					Dashboard
+				</span>
+				<span className="shrink-0 ml-auto flex items-center -mr-1">
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<button
+								type="button"
+								onClick={(e) => {
+									e.stopPropagation();
+									newWorkspace.open();
+								}}
+								className="p-1 text-text-placeholder hover:text-text-bright opacity-0 group-hover:opacity-100 transition-opacity"
+							>
+								<Plus size={12} />
+							</button>
+						</TooltipTrigger>
+						<TooltipContent side="right">New Workspace</TooltipContent>
+					</Tooltip>
+				</span>
+			</div>
 			<div className="flex-1 overflow-y-auto pb-1 mt-0.5 flex flex-col gap-0.5">
 				{projects.data.map((project) => {
 					const projectWorkspaces = (workspaces.data ?? []).filter(
