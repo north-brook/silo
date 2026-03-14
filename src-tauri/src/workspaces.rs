@@ -3,7 +3,7 @@ use crate::river_names::DEFAULT_RIVER_NAMES;
 use crate::terminal;
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
@@ -330,7 +330,7 @@ pub async fn workspaces_update_workspace_branch(
     workspace: String,
     branch: String,
 ) -> Result<(), String> {
-    log::info!("updating branch label for workspace {workspace}");
+    log::info!("updating branch metadata for workspace {workspace}");
     let lookup = find_workspace(&workspace).await?;
     if lookup.workspace.is_template() {
         return Err(format!(
@@ -339,7 +339,7 @@ pub async fn workspaces_update_workspace_branch(
         ));
     }
 
-    update_workspace_label_in_lookup(lookup, "branch", &branch).await
+    update_workspace_metadata_in_lookup(lookup, "branch", &branch).await
 }
 
 #[tauri::command]
@@ -347,7 +347,7 @@ pub async fn workspaces_update_workspace_target_branch(
     workspace: String,
     target_branch: String,
 ) -> Result<(), String> {
-    log::info!("updating target branch label for workspace {workspace}");
+    log::info!("updating target branch metadata for workspace {workspace}");
     let lookup = find_workspace(&workspace).await?;
     if lookup.workspace.is_template() {
         return Err(format!(
@@ -356,7 +356,7 @@ pub async fn workspaces_update_workspace_target_branch(
         ));
     }
 
-    update_workspace_label_in_lookup(lookup, "target_branch", &target_branch).await
+    update_workspace_metadata_in_lookup(lookup, "target_branch", &target_branch).await
 }
 
 pub(crate) async fn set_workspace_label(
@@ -366,6 +366,16 @@ pub(crate) async fn set_workspace_label(
 ) -> Result<(), String> {
     let lookup = find_workspace(workspace).await?;
     update_workspace_label_in_lookup(lookup, label, value).await
+}
+
+#[allow(dead_code)]
+pub(crate) async fn set_workspace_metadata(
+    workspace: &str,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let lookup = find_workspace(workspace).await?;
+    update_workspace_metadata_in_lookup(lookup, key, value).await
 }
 
 pub(crate) async fn find_workspace(name: &str) -> Result<WorkspaceLookup, String> {
@@ -431,6 +441,37 @@ async fn update_workspace_label_in_lookup(
     Ok(())
 }
 
+async fn update_workspace_metadata_in_lookup(
+    lookup: WorkspaceLookup,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let result = run_gcloud(
+        &lookup.account,
+        &lookup.gcloud_project,
+        update_workspace_metadata_args(&lookup.workspace, key, value)?,
+    )
+    .await?;
+
+    if !result.success {
+        return Err(gcloud_error(
+            &format!(
+                "failed to update {} metadata for workspace {}",
+                key,
+                lookup.workspace.name()
+            ),
+            &result.stderr,
+        ));
+    }
+
+    log::info!(
+        "updated {} metadata for workspace {}",
+        key,
+        lookup.workspace.name()
+    );
+    Ok(())
+}
+
 pub(crate) async fn find_workspace_in_project(
     name: &str,
     account: &str,
@@ -461,7 +502,7 @@ async fn list_workspaces_in_project(
             "compute".to_string(),
             "instances".to_string(),
             "list".to_string(),
-            "--format=json(name,zone,status,labels,creationTimestamp)".to_string(),
+            "--format=json(name,zone,status,labels,metadata,creationTimestamp)".to_string(),
         ],
     )
     .await?;
@@ -715,16 +756,16 @@ fn create_workspace_args(
     boot_source: &WorkspaceBootSource,
     gcloud: &ResolvedGcloudConfig,
 ) -> Vec<String> {
-    let mut labels = vec![
+    let labels = vec![
         format!("project={}", sanitize_label_value(project_label)),
-        format!("branch={}", sanitize_label_value(branch_label)),
-        "unread=false".to_string(),
         "ready=false".to_string(),
     ];
-    let sanitized_target_branch = sanitize_label_value(target_branch);
-    if !sanitized_target_branch.is_empty() {
-        labels.push(format!("target_branch={sanitized_target_branch}"));
-    }
+    let metadata = workspace_metadata_arg(&[
+        ("branch", branch_label),
+        ("target_branch", target_branch),
+        ("unread", "false"),
+    ])
+    .expect("workspace metadata values must fit supported gcloud metadata delimiters");
 
     let mut args = vec![
         "compute".to_string(),
@@ -736,6 +777,7 @@ fn create_workspace_args(
         format!("--boot-disk-size={}GB", gcloud.disk_size_gb),
         format!("--boot-disk-type={}", gcloud.disk_type),
         format!("--labels={}", labels.join(",")),
+        metadata,
         "--async".to_string(),
     ];
 
@@ -841,6 +883,32 @@ fn update_workspace_label_args(workspace: &Workspace, label: &str, value: &str) 
             format!("--zone={}", workspace.zone()),
             format!("--labels={label}={sanitized_value}"),
         ]
+    }
+}
+
+fn update_workspace_metadata_args(
+    workspace: &Workspace,
+    key: &str,
+    value: &str,
+) -> Result<Vec<String>, String> {
+    if value.trim().is_empty() {
+        Ok(vec![
+            "compute".to_string(),
+            "instances".to_string(),
+            "remove-metadata".to_string(),
+            workspace.name().to_string(),
+            format!("--zone={}", workspace.zone()),
+            format!("--keys={key}"),
+        ])
+    } else {
+        Ok(vec![
+            "compute".to_string(),
+            "instances".to_string(),
+            "add-metadata".to_string(),
+            workspace.name().to_string(),
+            format!("--zone={}", workspace.zone()),
+            workspace_metadata_arg(&[(key, value)])?,
+        ])
     }
 }
 
@@ -1291,10 +1359,11 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    let metadata = parse_instance_metadata(value.get("metadata"));
     let template = labels
         .get("template")
         .and_then(Value::as_str)
-        .map(|value| parse_bool_label("template", value))
+        .map(|value| parse_bool_value("template", value))
         .transpose()?
         .unwrap_or(false);
 
@@ -1302,14 +1371,16 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         .get("project")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let last_active = labels
-        .get("last_active")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
+    let last_active = metadata.get("last_active").cloned().or_else(|| {
+        labels
+            .get("last_active")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
     let ready = labels
         .get("ready")
         .and_then(Value::as_str)
-        .map(|value| parse_bool_label("ready", value))
+        .map(|value| parse_bool_value("ready", value))
         .transpose()?
         .unwrap_or(status == "RUNNING");
 
@@ -1329,26 +1400,46 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
             template: true,
         }))
     } else {
-        let branch = labels
+        let branch = metadata
             .get("branch")
-            .and_then(Value::as_str)
-            .map(parse_branch_label)
+            .cloned()
+            .or_else(|| {
+                labels
+                    .get("branch")
+                    .and_then(Value::as_str)
+                    .map(parse_branch_label)
+            })
             .unwrap_or_default();
-        let target_branch = labels
+        let target_branch = metadata
             .get("target_branch")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
+            .cloned()
+            .or_else(|| {
+                labels
+                    .get("target_branch")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
             .unwrap_or_default();
-        let unread = labels
+        let unread = metadata
             .get("unread")
-            .and_then(Value::as_str)
-            .map(|value| parse_bool_label("unread", value))
+            .map(|value| parse_bool_value("unread", value))
+            .or_else(|| {
+                labels
+                    .get("unread")
+                    .and_then(Value::as_str)
+                    .map(|value| parse_bool_value("unread", value))
+            })
             .transpose()?
             .unwrap_or(false);
-        let working = labels
+        let working = metadata
             .get("working")
-            .and_then(Value::as_str)
-            .map(|value| parse_bool_label("working", value))
+            .map(|value| parse_bool_value("working", value))
+            .or_else(|| {
+                labels
+                    .get("working")
+                    .and_then(Value::as_str)
+                    .map(|value| parse_bool_value("working", value))
+            })
             .transpose()?;
 
         Ok(Workspace::branch(
@@ -1370,7 +1461,7 @@ fn parse_snapshot(value: &Value) -> Result<Snapshot, String> {
     let template = labels
         .get("template")
         .and_then(Value::as_str)
-        .map(|value| parse_bool_label("template", value))
+        .map(|value| parse_bool_value("template", value))
         .transpose()?
         .unwrap_or(false);
 
@@ -1451,12 +1542,75 @@ fn zone_name(value: Option<&Value>) -> Option<String> {
     zone.rsplit('/').next().map(str::to_owned)
 }
 
-fn parse_bool_label(label: &str, value: &str) -> Result<bool, String> {
+fn parse_instance_metadata(metadata: Option<&Value>) -> HashMap<String, String> {
+    let mut entries = HashMap::new();
+    let Some(items) = metadata
+        .and_then(|value| value.get("items"))
+        .and_then(Value::as_array)
+    else {
+        return entries;
+    };
+
+    for item in items {
+        let Some(key) = item.get("key").and_then(Value::as_str).map(str::trim) else {
+            continue;
+        };
+        let Some(value) = item.get("value").and_then(Value::as_str) else {
+            continue;
+        };
+        if key.is_empty() {
+            continue;
+        }
+        entries.insert(key.to_string(), value.to_string());
+    }
+
+    entries
+}
+
+fn parse_bool_value(label: &str, value: &str) -> Result<bool, String> {
     match value.trim() {
         "true" => Ok(true),
         "false" => Ok(false),
         other => Err(format!("invalid {label} label value: {other}")),
     }
+}
+
+fn workspace_metadata_arg(entries: &[(&str, &str)]) -> Result<String, String> {
+    const DELIMITER_CANDIDATES: &[&str] = &["|", ";", "#", "@@", "SILO_METADATA_DELIM"];
+
+    let populated = entries
+        .iter()
+        .copied()
+        .filter(|(_, value)| !value.trim().is_empty())
+        .collect::<Vec<_>>();
+    if populated.is_empty() {
+        return Err("workspace metadata update did not include any values".to_string());
+    }
+
+    let delimiter = DELIMITER_CANDIDATES
+        .iter()
+        .copied()
+        .find(|delimiter| {
+            populated.iter().all(|(key, value)| {
+                !key.contains(delimiter)
+                    && !value.contains(delimiter)
+                    && !key.contains('\n')
+                    && !value.contains('\n')
+            })
+        })
+        .ok_or_else(|| "workspace metadata values contain unsupported delimiter content".to_string())?;
+
+    let mut serialized = String::new();
+    for (index, (key, value)) in populated.iter().enumerate() {
+        if index > 0 {
+            serialized.push_str(delimiter);
+        }
+        serialized.push_str(key);
+        serialized.push('=');
+        serialized.push_str(value);
+    }
+
+    Ok(format!("--metadata=^{delimiter}^{serialized}"))
 }
 
 fn compare_workspaces_by_last_active_desc(
@@ -1863,18 +2017,14 @@ mod tests {
         assert!(args.contains(&"--image-family=ubuntu-2404-lts-amd64".to_string()));
         assert!(args.contains(&"--image-project=ubuntu-os-cloud".to_string()));
         assert!(args.contains(&"--async".to_string()));
+        assert!(args.contains(&"--labels=project=demo-project,ready=false".to_string()));
         assert!(args.contains(
-            &"--labels=project=demo-project,branch=aare,unread=false,ready=false,target_branch=feature-inbox"
-                .to_string()
+            &"--metadata=^|^branch=Aare|target_branch=Feature/Inbox|unread=false".to_string()
         ));
         assert!(args.contains(
             &"--service-account=silo-workspaces@proj.iam.gserviceaccount.com".to_string()
         ));
         assert!(args.contains(&"--scopes=https://www.googleapis.com/auth/compute".to_string()));
-        assert!(args.contains(
-            &"--labels=project=demo-project,branch=aare,unread=false,ready=false,target_branch=feature-inbox"
-                .to_string()
-        ));
     }
 
     #[test]
@@ -1904,6 +2054,8 @@ mod tests {
         assert!(args.contains(&"--source-snapshot=demo-silo-template-1710000000-123".to_string()));
         assert!(!args.iter().any(|arg| arg.starts_with("--image-family=")));
         assert!(!args.iter().any(|arg| arg.starts_with("--image-project=")));
+        assert!(args.contains(&"--labels=project=demo-project,ready=false".to_string()));
+        assert!(args.contains(&"--metadata=^|^branch=Aare|unread=false".to_string()));
     }
 
     #[test]
@@ -1933,9 +2085,8 @@ mod tests {
         assert!(args.contains(&"--async".to_string()));
         assert!(args.contains(&"--no-service-account".to_string()));
         assert!(args.contains(&"--no-scopes".to_string()));
-        assert!(args.contains(
-            &"--labels=project=demo-project,branch=aare,unread=false,ready=false".to_string()
-        ));
+        assert!(args.contains(&"--labels=project=demo-project,ready=false".to_string()));
+        assert!(args.contains(&"--metadata=^|^branch=Aare|unread=false".to_string()));
     }
 
     #[test]
@@ -2021,40 +2172,45 @@ mod tests {
     }
 
     #[test]
-    fn update_workspace_label_args_adds_label_when_value_present() {
-        let args = update_workspace_label_args(
+    fn update_workspace_metadata_args_adds_metadata_when_value_present() {
+        let args = update_workspace_metadata_args(
             &test_branch_workspace("ws-demo-123", None),
             "target_branch",
             "Feature/Inbox",
-        );
+        )
+        .expect("metadata args should build");
 
         assert_eq!(
             args,
             vec![
                 "compute".to_string(),
                 "instances".to_string(),
-                "add-labels".to_string(),
+                "add-metadata".to_string(),
                 "ws-demo-123".to_string(),
                 "--zone=us-east1-b".to_string(),
-                "--labels=target_branch=feature-inbox".to_string(),
+                "--metadata=^|^target_branch=Feature/Inbox".to_string(),
             ]
         );
     }
 
     #[test]
-    fn update_workspace_label_args_removes_label_when_value_empty() {
-        let args =
-            update_workspace_label_args(&test_branch_workspace("ws-demo-123", None), "branch", "");
+    fn update_workspace_metadata_args_removes_metadata_when_value_empty() {
+        let args = update_workspace_metadata_args(
+            &test_branch_workspace("ws-demo-123", None),
+            "branch",
+            "",
+        )
+        .expect("metadata args should build");
 
         assert_eq!(
             args,
             vec![
                 "compute".to_string(),
                 "instances".to_string(),
-                "remove-labels".to_string(),
+                "remove-metadata".to_string(),
                 "ws-demo-123".to_string(),
                 "--zone=us-east1-b".to_string(),
-                "--labels=branch".to_string(),
+                "--keys=branch".to_string(),
             ]
         );
     }
@@ -2138,11 +2294,15 @@ mod tests {
             "creationTimestamp": "2026-03-11T13:00:00.000-04:00",
             "labels": {
                 "project": "demo",
-                "branch": "silo-aare",
-                "target_branch": "main",
-                "unread": "true",
-                "working": "true",
-                "last_active": "2026-03-11T13:05:00Z"
+            },
+            "metadata": {
+                "items": [
+                    { "key": "branch", "value": "silo/aare" },
+                    { "key": "target_branch", "value": "main" },
+                    { "key": "unread", "value": "true" },
+                    { "key": "working", "value": "true" },
+                    { "key": "last_active", "value": "2026-03-11T13:05:00Z" }
+                ]
             }
         }))
         .expect("workspace should parse");
@@ -2185,6 +2345,38 @@ mod tests {
         assert!(!workspace.unread);
         assert_eq!(workspace.working, None);
         assert_eq!(workspace.base.last_active, None);
+    }
+
+    #[test]
+    fn parse_workspace_falls_back_to_legacy_labels_for_branch_state() {
+        let workspace = parse_workspace(&json!({
+            "name": "ws-demo-123",
+            "zone": "us-east1-b",
+            "status": "RUNNING",
+            "creationTimestamp": "2026-03-11T13:00:00.000-04:00",
+            "labels": {
+                "project": "demo",
+                "branch": "silo-aare",
+                "target_branch": "main",
+                "unread": "true",
+                "working": "false",
+                "last_active": "2026-03-11T13:05:00Z"
+            }
+        }))
+        .expect("workspace should parse");
+
+        let Workspace::Branch(workspace) = workspace else {
+            panic!("workspace should parse as a branch workspace");
+        };
+
+        assert_eq!(workspace.branch, "silo/aare");
+        assert_eq!(workspace.target_branch, "main");
+        assert!(workspace.unread);
+        assert_eq!(workspace.working, Some(false));
+        assert_eq!(
+            workspace.base.last_active.as_deref(),
+            Some("2026-03-11T13:05:00Z")
+        );
     }
 
     #[test]

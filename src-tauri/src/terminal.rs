@@ -27,7 +27,7 @@ const ATTACH_COMMAND_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const ATTACH_RESERVATION_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const ATTACH_RESERVATION_WAIT_INTERVAL: Duration = Duration::from_millis(50);
 const TERMINAL_USER: &str = "silo";
-const TERMINAL_WORKSPACE_DIR: &str = "/home/silo/workspace";
+pub(crate) const TERMINAL_WORKSPACE_DIR: &str = "/home/silo/workspace";
 const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
 const REMOTE_BOOTSTRAP_STATE_FILE: &str = "/home/silo/.silo/workspace-bootstrap-state";
 const REMOTE_BOOTSTRAP_LOCK_DIR: &str = "/home/silo/.silo/workspace-bootstrap.lock";
@@ -197,10 +197,10 @@ impl TerminalManager {
 }
 
 #[derive(Debug)]
-struct CommandResult {
-    success: bool,
-    stdout: String,
-    stderr: String,
+pub(crate) struct CommandResult {
+    pub(crate) success: bool,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 #[derive(Debug, Clone)]
@@ -330,6 +330,17 @@ pub async fn terminal_run_terminal(
         .ok_or_else(|| format!("terminal session not found after run: {name}"))?;
 
     Ok(TerminalRunResult { session, created })
+}
+
+pub(crate) async fn start_terminal_command(
+    workspace: &str,
+    command: &str,
+) -> Result<String, String> {
+    let terminal = terminal_create_terminal(workspace.to_string())
+        .await?
+        .terminal;
+    terminal_run_terminal(workspace.to_string(), terminal.clone(), command.to_string()).await?;
+    Ok(terminal)
 }
 
 #[tauri::command]
@@ -1065,7 +1076,7 @@ fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, S
             .to_string();
         if branch.is_empty() {
             return Err(format!(
-                "workspace {} is missing a branch label",
+                "workspace {} is missing branch metadata",
                 lookup.workspace.name()
             ));
         }
@@ -1669,7 +1680,7 @@ fn chrome_profile_remote_sync_command() -> String {
     ))
 }
 
-async fn run_remote_command(
+pub(crate) async fn run_remote_command(
     lookup: &WorkspaceLookup,
     remote_command: &str,
 ) -> Result<CommandResult, String> {
@@ -1835,21 +1846,31 @@ fn build_gcloud_ssh_command(
     command.arg(format!("--zone={zone}"));
 
     if let Some(remote_command) = remote_command {
-        command.arg(format!(
-            "--command={}",
-            wrap_remote_shell_command(&remote_command)
-        ));
+        command.arg(format!("--command={}", wrap_remote_shell_command(&remote_command)));
     }
 
     command
 }
 
 fn wrap_remote_shell_command(command: &str) -> String {
-    format!("bash -lc {}", shell_quote(command))
+    command.to_string()
 }
 
 fn run_terminal_user_command(command: &str) -> String {
     format!("sudo -iu {TERMINAL_USER} bash -lc {}", shell_quote(command))
+}
+
+pub(crate) fn workspace_shell_command(command: &str) -> String {
+    let script = format!(
+        "set -euo pipefail\nexport LC_ALL=C\nexport LANG=C\ncd {}\n{}",
+        shell_quote(TERMINAL_WORKSPACE_DIR),
+        command
+    );
+    let encoded = BASE64_STANDARD.encode(script);
+    run_terminal_user_command(&format!(
+        "printf %s {} | base64 --decode | bash",
+        shell_quote(&encoded)
+    ))
 }
 
 fn shell_quote(value: &str) -> String {
@@ -2013,8 +2034,8 @@ mod tests {
     }
 
     #[test]
-    fn wrap_remote_shell_command_quotes_inner_command() {
-        assert_eq!(wrap_remote_shell_command("zmx list"), "bash -lc 'zmx list'");
+    fn wrap_remote_shell_command_passes_through_command() {
+        assert_eq!(wrap_remote_shell_command("zmx list"), "zmx list");
     }
 
     #[test]
@@ -2031,6 +2052,13 @@ mod tests {
             run_terminal_user_command("zmx history 'terminal-1' --vt"),
             "sudo -iu silo bash -lc 'zmx history '\"'\"'terminal-1'\"'\"' --vt'"
         );
+    }
+
+    #[test]
+    fn workspace_shell_command_wraps_script_via_base64() {
+        let command = workspace_shell_command("printf \"hi\\n\"");
+        assert!(command.starts_with("sudo -iu silo bash -lc 'printf %s "));
+        assert!(command.contains("| base64 --decode | bash"));
     }
 
     #[test]
