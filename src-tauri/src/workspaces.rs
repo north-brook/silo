@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
@@ -205,8 +206,10 @@ pub async fn workspaces_create_workspace(project: String) -> Result<Workspace, S
         .get(&project)
         .ok_or_else(|| format!("project not found: {project}"))?;
     let gcloud = resolve_project_gcloud_config(&config, &project)?;
+    let candidates = candidate_gcloud_configs(&config);
     let (workspace_name, branch_name) =
-        reserve_branch_workspace_identity(&project, &gcloud.account, &gcloud.project).await?;
+        reserve_branch_workspace_identity(&project, &gcloud.account, &gcloud.project, &candidates)
+            .await?;
     let boot_source = latest_template_snapshot_name(&gcloud.account, &gcloud.project, &project)
         .await?
         .map(WorkspaceBootSource::Snapshot)
@@ -1488,25 +1491,63 @@ async fn reserve_branch_workspace_identity(
     project: &str,
     account: &str,
     gcloud_project: &str,
+    candidates: &[ResolvedGcloudConfig],
 ) -> Result<(String, String), String> {
-    let existing = list_workspaces_in_project(account, gcloud_project).await?;
-    let used_names = existing
-        .iter()
-        .map(|workspace| workspace.name().to_string())
-        .collect::<HashSet<_>>();
+    let mut used_names = HashSet::new();
+    let mut used_branch_names = HashSet::new();
 
-    for river in DEFAULT_RIVER_NAMES {
-        let branch = format!("silo/{river}");
-        let workspace_name = generate_branch_workspace_name(project, &branch);
-        if !used_names.contains(&workspace_name) {
-            return Ok((workspace_name, branch));
+    for candidate in candidates {
+        let existing = list_workspaces_in_project(&candidate.account, &candidate.project).await?;
+        let is_target_project = candidate.account == account && candidate.project == gcloud_project;
+
+        for workspace in existing {
+            if is_target_project {
+                used_names.insert(workspace.name().to_string());
+            }
+            if let Some(branch) = workspace.branch_name() {
+                used_branch_names.insert(branch.to_string());
+            }
         }
     }
 
-    Err(format!(
-        "no available river names remain for project {}",
-        project
-    ))
+    select_branch_workspace_identity(project, &used_names, &used_branch_names, random_index())
+}
+
+fn select_branch_workspace_identity(
+    project: &str,
+    used_workspace_names: &HashSet<String>,
+    used_branch_names: &HashSet<String>,
+    random_index: usize,
+) -> Result<(String, String), String> {
+    let available = DEFAULT_RIVER_NAMES
+        .iter()
+        .filter_map(|river| {
+            let branch = format!("silo/{river}");
+            if used_branch_names.contains(&branch) {
+                return None;
+            }
+
+            let workspace_name = generate_branch_workspace_name(project, &branch);
+            if used_workspace_names.contains(&workspace_name) {
+                return None;
+            }
+
+            Some((workspace_name, branch))
+        })
+        .collect::<Vec<_>>();
+
+    if available.is_empty() {
+        return Err(format!(
+            "no available river names remain for project {}",
+            project
+        ));
+    }
+
+    Ok(available[random_index % available.len()].clone())
+}
+
+fn random_index() -> usize {
+    (Uuid::new_v4().as_u128() % (usize::MAX as u128 + 1)) as usize
 }
 
 fn generate_branch_workspace_name(project: &str, branch: &str) -> String {
@@ -1925,6 +1966,51 @@ mod tests {
         let name = generate_branch_workspace_name("Lenny", "silo/nile");
 
         assert_eq!(name, "lenny-silo-nile");
+    }
+
+    #[test]
+    fn select_branch_workspace_identity_skips_globally_used_rivers() {
+        let used_workspace_names = HashSet::new();
+        let used_branch_names = ["silo/aabach", "silo/aach"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
+
+        let (workspace_name, branch_name) =
+            select_branch_workspace_identity("Lenny", &used_workspace_names, &used_branch_names, 0)
+                .expect("expected an available river");
+
+        assert_eq!(branch_name, "silo/aalbach");
+        assert_eq!(workspace_name, "lenny-silo-aalbach");
+    }
+
+    #[test]
+    fn select_branch_workspace_identity_skips_target_name_collisions() {
+        let used_workspace_names = ["lenny-silo-aabach"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
+        let used_branch_names = HashSet::new();
+
+        let (workspace_name, branch_name) =
+            select_branch_workspace_identity("Lenny", &used_workspace_names, &used_branch_names, 0)
+                .expect("expected an available river");
+
+        assert_eq!(branch_name, "silo/aach");
+        assert_eq!(workspace_name, "lenny-silo-aach");
+    }
+
+    #[test]
+    fn select_branch_workspace_identity_uses_random_index_with_available_rivers() {
+        let used_workspace_names = HashSet::new();
+        let used_branch_names = HashSet::new();
+
+        let (workspace_name, branch_name) =
+            select_branch_workspace_identity("Lenny", &used_workspace_names, &used_branch_names, 1)
+                .expect("expected an available river");
+
+        assert_eq!(branch_name, "silo/aach");
+        assert_eq!(workspace_name, "lenny-silo-aach");
     }
 
     #[test]

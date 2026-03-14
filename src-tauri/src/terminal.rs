@@ -24,6 +24,8 @@ const DEFAULT_TERMINAL_COLS: u16 = 80;
 const DEFAULT_TERMINAL_ROWS: u16 = 24;
 const MAX_SCROLLBACK_BYTES: usize = 512 * 1024;
 const ATTACH_COMMAND_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+const ATTACH_RESERVATION_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+const ATTACH_RESERVATION_WAIT_INTERVAL: Duration = Duration::from_millis(50);
 const TERMINAL_USER: &str = "silo";
 const TERMINAL_WORKSPACE_DIR: &str = "/home/silo/workspace";
 const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
@@ -115,11 +117,28 @@ struct Attachment {
 struct AttachmentRegistry {
     by_id: HashMap<String, Arc<Attachment>>,
     by_key: HashMap<AttachmentKey, String>,
+    reserved_keys: HashSet<AttachmentKey>,
 }
 
 #[derive(Clone, Default)]
 pub struct TerminalManager {
     inner: Arc<Mutex<AttachmentRegistry>>,
+}
+
+struct AttachmentReservation {
+    manager: TerminalManager,
+    key: AttachmentKey,
+}
+
+enum AttachmentSlot {
+    Existing(Arc<Attachment>),
+    Reserved(AttachmentReservation),
+}
+
+impl Drop for AttachmentReservation {
+    fn drop(&mut self) {
+        self.manager.release_reservation(&self.key);
+    }
 }
 
 impl TerminalManager {
@@ -135,6 +154,7 @@ impl TerminalManager {
 
     fn insert(&self, attachment: Arc<Attachment>) {
         if let Ok(mut registry) = self.inner.lock() {
+            registry.reserved_keys.remove(&attachment.key);
             registry
                 .by_key
                 .insert(attachment.key.clone(), attachment.id.clone());
@@ -154,6 +174,25 @@ impl TerminalManager {
     fn remove_by_key(&self, key: &AttachmentKey) -> Option<Arc<Attachment>> {
         let id = self.inner.lock().ok()?.by_key.get(key)?.clone();
         self.remove_by_id(&id)
+    }
+
+    fn try_reserve(&self, key: &AttachmentKey) -> Option<AttachmentReservation> {
+        let mut registry = self.inner.lock().ok()?;
+        if registry.by_key.contains_key(key) || registry.reserved_keys.contains(key) {
+            return None;
+        }
+
+        registry.reserved_keys.insert(key.clone());
+        Some(AttachmentReservation {
+            manager: self.clone(),
+            key: key.clone(),
+        })
+    }
+
+    fn release_reservation(&self, key: &AttachmentKey) {
+        if let Ok(mut registry) = self.inner.lock() {
+            registry.reserved_keys.remove(key);
+        }
     }
 }
 
@@ -227,25 +266,13 @@ pub async fn terminal_attach_terminal(
         name: name.clone(),
     };
 
-    if let Some(existing) = state.get_by_key(&key) {
-        let (scrollback_vt, scrollback_truncated) = load_scrollback(&lookup, &name).await?;
-        if let Ok(mut current_output) = existing.output.lock() {
-            *current_output = output;
+    let _reservation = match wait_for_attachment_slot(state.inner(), &key, &name).await? {
+        AttachmentSlot::Existing(existing) => {
+            return attach_existing_terminal(existing, &lookup, &name, &window, output, command)
+                .await;
         }
-        if let Ok(mut current_window) = existing.window_label.lock() {
-            *current_window = window.label().to_string();
-        }
-        if let Some(command) = command {
-            queue_attach_command(existing.clone(), command);
-        }
-
-        return Ok(TerminalAttachResult {
-            terminal: existing.id.clone(),
-            session: resolve_attached_session(&lookup, &name).await?,
-            scrollback_vt,
-            scrollback_truncated,
-        });
-    }
+        AttachmentSlot::Reserved(reservation) => reservation,
+    };
 
     if find_terminal_session(&lookup, &name).await?.is_none() && !lookup.workspace.is_template() {
         bootstrap_workspace(&lookup).await?;
@@ -610,6 +637,53 @@ fn queue_attach_command(attachment: Arc<Attachment>, command: String) {
             );
         }
     });
+}
+
+async fn attach_existing_terminal(
+    existing: Arc<Attachment>,
+    lookup: &WorkspaceLookup,
+    name: &str,
+    window: &WebviewWindow,
+    output: Channel<Vec<u8>>,
+    command: Option<String>,
+) -> Result<TerminalAttachResult, String> {
+    let (scrollback_vt, scrollback_truncated) = load_scrollback(lookup, name).await?;
+    if let Ok(mut current_output) = existing.output.lock() {
+        *current_output = output;
+    }
+    if let Ok(mut current_window) = existing.window_label.lock() {
+        *current_window = window.label().to_string();
+    }
+    if let Some(command) = command {
+        queue_attach_command(existing.clone(), command);
+    }
+
+    Ok(TerminalAttachResult {
+        terminal: existing.id.clone(),
+        session: resolve_attached_session(lookup, name).await?,
+        scrollback_vt,
+        scrollback_truncated,
+    })
+}
+
+async fn wait_for_attachment_slot(
+    manager: &TerminalManager,
+    key: &AttachmentKey,
+    name: &str,
+) -> Result<AttachmentSlot, String> {
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(existing) = manager.get_by_key(key) {
+            return Ok(AttachmentSlot::Existing(existing));
+        }
+        if let Some(reservation) = manager.try_reserve(key) {
+            return Ok(AttachmentSlot::Reserved(reservation));
+        }
+        if started.elapsed() >= ATTACH_RESERVATION_WAIT_TIMEOUT {
+            return Err(format!("terminal attachment already in progress: {name}"));
+        }
+        std::thread::sleep(ATTACH_RESERVATION_WAIT_INTERVAL);
+    }
 }
 
 fn write_attachment_input(attachment: &Attachment, data: &[u8]) -> Result<(), String> {
@@ -2226,6 +2300,66 @@ mod tests {
         assert!(manager.get_by_id("att-1").is_some());
         assert!(manager.remove_by_id("att-1").is_some());
         assert!(manager.get_by_key(&key).is_none());
+    }
+
+    #[test]
+    fn terminal_manager_reservation_blocks_duplicate_claims() {
+        let manager = TerminalManager::default();
+        let key = AttachmentKey {
+            workspace: "ws".to_string(),
+            name: "dev".to_string(),
+        };
+
+        let reservation = manager
+            .try_reserve(&key)
+            .expect("first reservation should succeed");
+        assert!(manager.try_reserve(&key).is_none());
+
+        drop(reservation);
+
+        assert!(manager.try_reserve(&key).is_some());
+    }
+
+    #[test]
+    fn terminal_manager_insert_clears_matching_reservation() {
+        let manager = TerminalManager::default();
+        let key = AttachmentKey {
+            workspace: "ws".to_string(),
+            name: "dev".to_string(),
+        };
+
+        let reservation = manager
+            .try_reserve(&key)
+            .expect("reservation should succeed");
+        let attachment = Arc::new(Attachment {
+            app: None,
+            id: "att-1".to_string(),
+            key: key.clone(),
+            master: Mutex::new(
+                native_pty_system()
+                    .openpty(PtySize::default())
+                    .expect("pty")
+                    .master,
+            ),
+            writer: Mutex::new(Box::new(Vec::<u8>::new())),
+            killer: Mutex::new(Box::new(NoopKiller)),
+            output: Mutex::new(Channel::new(|_| Ok(()))),
+            window_label: Mutex::new("main".to_string()),
+            connected: Mutex::new(false),
+            connected_cv: Condvar::new(),
+        });
+
+        manager.insert(attachment.clone());
+        drop(reservation);
+
+        assert_eq!(
+            manager
+                .get_by_key(&key)
+                .expect("attachment should be present")
+                .id,
+            "att-1"
+        );
+        assert!(manager.try_reserve(&key).is_none());
     }
 
     #[derive(Debug)]
