@@ -32,9 +32,18 @@ const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
 const REMOTE_BOOTSTRAP_STATE_FILE: &str = "/home/silo/.silo/workspace-bootstrap-state";
 const REMOTE_BOOTSTRAP_LOCK_DIR: &str = "/home/silo/.silo/workspace-bootstrap.lock";
 const REMOTE_CHROME_USER_DATA_DIR: &str = "/home/silo/.config/google-chrome";
-const WORKSPACE_BOOTSTRAP_VERSION: &str = "7";
+const REMOTE_WORKSPACE_OBSERVER_BIN: &str = "/home/silo/.silo/bin/workspace-observer";
+const REMOTE_WORKSPACE_OBSERVER_PIDFILE: &str = "/home/silo/.silo/workspace-observer/daemon.pid";
+const REMOTE_WORKSPACE_OBSERVER_SHELL_FILE: &str = "/home/silo/.silo/workspace-observer-shell.sh";
+const REMOTE_WORKSPACE_OBSERVER_SOURCE_DIR: &str = "/home/silo/.silo/workspace-observer-src";
+const WORKSPACE_BOOTSTRAP_VERSION: &str = "8";
 const TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS: usize = 60;
 const TEMPLATE_BOOTSTRAP_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const WORKSPACE_OBSERVER_CARGO_TOML: &str =
+    include_str!("../../tools/workspace-observer/Cargo.toml");
+const WORKSPACE_OBSERVER_CARGO_LOCK: &str =
+    include_str!("../../tools/workspace-observer/Cargo.lock");
+const WORKSPACE_OBSERVER_MAIN_RS: &str = include_str!("../../tools/workspace-observer/src/main.rs");
 const CHROME_PROFILE_SYNC_PATHS: &[&str] = &[
     "Local State",
     "First Run",
@@ -108,6 +117,11 @@ pub struct TerminalDetachResult {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TerminalKillResult {
     killed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TerminalReadResult {
+    updated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -290,6 +304,9 @@ pub async fn terminal_attach_terminal(
     output: Channel<Vec<u8>>,
 ) -> Result<TerminalAttachResult, String> {
     let lookup = workspaces::find_workspace(&workspace).await?;
+    if !lookup.workspace.ready() {
+        return Err(format!("workspace {workspace} is not ready"));
+    }
     let key = AttachmentKey {
         workspace: workspace.clone(),
         name: name.clone(),
@@ -303,9 +320,6 @@ pub async fn terminal_attach_terminal(
         AttachmentSlot::Reserved(reservation) => reservation,
     };
 
-    if find_terminal_session(&lookup, &name).await?.is_none() && !lookup.workspace.is_template() {
-        bootstrap_workspace(&lookup).await?;
-    }
     let (scrollback_vt, scrollback_truncated) = load_scrollback(&lookup, &name).await?;
 
     let attachment = spawn_terminal_attachment(
@@ -335,10 +349,10 @@ pub async fn terminal_run_terminal(
     command: String,
 ) -> Result<TerminalRunResult, String> {
     let lookup = workspaces::find_workspace(&workspace).await?;
-    let created = find_terminal_session(&lookup, &name).await?.is_none();
-    if created && !lookup.workspace.is_template() {
-        bootstrap_workspace(&lookup).await?;
+    if !lookup.workspace.ready() {
+        return Err(format!("workspace {workspace} is not ready"));
     }
+    let created = find_terminal_session(&lookup, &name).await?.is_none();
     let mut payload = command.into_bytes();
     if !payload.ends_with(b"\n") {
         payload.push(b'\n');
@@ -412,6 +426,28 @@ pub async fn terminal_kill_terminal(
     }
 
     Ok(TerminalKillResult { killed: true })
+}
+
+#[tauri::command]
+pub async fn terminal_read_terminal(
+    workspace: String,
+    name: String,
+) -> Result<TerminalReadResult, String> {
+    let lookup = workspaces::find_workspace(&workspace).await?;
+    let command = run_terminal_user_command(&format!(
+        "if [ -x {observer_bin} ]; then {observer_bin} mark-read --session {session}; fi",
+        observer_bin = shell_quote(REMOTE_WORKSPACE_OBSERVER_BIN),
+        session = shell_quote(&name),
+    ));
+    let result = run_remote_command(&lookup, &command).await?;
+    if !result.success {
+        return Err(remote_command_error(
+            "failed to mark terminal session as read",
+            &result.stderr,
+        ));
+    }
+
+    Ok(TerminalReadResult { updated: true })
 }
 
 #[tauri::command]
@@ -1026,6 +1062,21 @@ async fn wait_until_workspace_ssh_ready(workspace: &str) -> Result<(), String> {
         let result = run_remote_command(&lookup, &run_terminal_user_command("true")).await;
         match result {
             Ok(result) if result.success => {
+                if !lookup.workspace.is_template() {
+                    match bootstrap_workspace(&lookup).await {
+                        Ok(()) => {}
+                        Err(error) => {
+                            if attempt + 1 == TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS {
+                                return Err(error);
+                            }
+                            if should_retry_template_bootstrap(&error) {
+                                std::thread::sleep(TEMPLATE_BOOTSTRAP_POLL_INTERVAL);
+                                continue;
+                            }
+                            return Err(error);
+                        }
+                    }
+                }
                 workspaces::set_workspace_label(workspace, "ready", "true").await?;
                 return Ok(());
             }
@@ -1141,6 +1192,11 @@ fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBoo
     let claude_state_json = claude_state_json();
     let gh_hosts_yml = gh_hosts_yml(&bootstrap.gh_username, &bootstrap.gh_token);
     let bootstrap_signature = workspace_bootstrap_signature(lookup.workspace.name(), bootstrap);
+    let observer_install = if lookup.workspace.is_template() {
+        String::new()
+    } else {
+        workspace_observer_install_script(lookup)
+    };
     let env_file_sync = if lookup.workspace.is_template() {
         workspace_env_file_sync_script(&bootstrap.env_files)
     } else {
@@ -1163,8 +1219,19 @@ fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBoo
         "unset CLAUDE_CODE_USE_VERTEX".to_string(),
         "unset AWS_BEARER_TOKEN_BEDROCK".to_string(),
         "unset VERTEX_REGION_CLAUDE_CODE".to_string(),
-        "alias cc='IS_SANDBOX=1 claude --dangerously-skip-permissions'".to_string(),
+        if lookup.workspace.is_template() {
+            String::new()
+        } else {
+            format!(
+                "[[ -f {} ]] && source {}",
+                shell_quote(REMOTE_WORKSPACE_OBSERVER_SHELL_FILE),
+                shell_quote(REMOTE_WORKSPACE_OBSERVER_SHELL_FILE)
+            )
+        },
     ]
+    .into_iter()
+    .filter(|line| !line.is_empty())
+    .collect::<Vec<_>>()
     .join("\n");
     let branch_setup = if lookup.workspace.is_template() {
         format!(
@@ -1259,7 +1326,8 @@ if ! git config --global --get-all safe.directory 2>/dev/null | grep -Fxq \"$WOR
   git config --global --add safe.directory \"$WORKSPACE_DIR\"\n\
 fi\n\
 {branch_setup}\n\
-{env_file_sync}",
+{env_file_sync}\n\
+{observer_install}",
         workspace_dir = shell_quote(TERMINAL_WORKSPACE_DIR),
         remote_url = shell_quote(&bootstrap.remote_url),
         target_branch = shell_quote(&bootstrap.target_branch),
@@ -1278,12 +1346,13 @@ fi\n\
         claude_state_json = shell_quote(&claude_state_json),
         branch_setup = branch_setup,
         env_file_sync = env_file_sync,
+        observer_install = observer_install,
     )
 }
 
 fn workspace_bootstrap_signature(workspace_name: &str, bootstrap: &WorkspaceBootstrap) -> String {
     format!(
-        "version={}\nworkspace={}\nremote_url={}\ntarget_branch={}\nworkspace_branch={}\ngh_username={}\ngh_token={}\nchrome_user_data_dir={}\nchrome_user_data_hash={}\ncodex_token={}\nclaude_token={}\ngit_user_name={}\ngit_user_email={}\nenv_files={}",
+        "version={}\nworkspace={}\nremote_url={}\ntarget_branch={}\nworkspace_branch={}\ngh_username={}\ngh_token={}\nchrome_user_data_dir={}\nchrome_user_data_hash={}\ncodex_token={}\nclaude_token={}\ngit_user_name={}\ngit_user_email={}\nenv_files={}\nobserver_sources={}",
         WORKSPACE_BOOTSTRAP_VERSION,
         workspace_name,
         bootstrap.remote_url,
@@ -1298,6 +1367,7 @@ fn workspace_bootstrap_signature(workspace_name: &str, bootstrap: &WorkspaceBoot
         bootstrap.git_user_name,
         bootstrap.git_user_email,
         bootstrap_env_files_signature(&bootstrap.env_files),
+        workspace_observer_source_signature(),
     )
 }
 
@@ -1534,6 +1604,145 @@ fn workspace_env_file_sync_script(env_files: &[BootstrapEnvFile]) -> String {
     }
 
     script
+}
+
+fn workspace_observer_install_script(lookup: &WorkspaceLookup) -> String {
+    let source_root = shell_quote(REMOTE_WORKSPACE_OBSERVER_SOURCE_DIR);
+    let source_src = shell_quote(&format!("{REMOTE_WORKSPACE_OBSERVER_SOURCE_DIR}/src"));
+    let bin_path = shell_quote(REMOTE_WORKSPACE_OBSERVER_BIN);
+    let pidfile = shell_quote(REMOTE_WORKSPACE_OBSERVER_PIDFILE);
+    let shell_path = shell_quote(REMOTE_WORKSPACE_OBSERVER_SHELL_FILE);
+    let manifest_path = shell_quote(&format!(
+        "{REMOTE_WORKSPACE_OBSERVER_SOURCE_DIR}/Cargo.toml"
+    ));
+    let target_binary = shell_quote(&format!(
+        "{REMOTE_WORKSPACE_OBSERVER_SOURCE_DIR}/target/release/workspace-observer"
+    ));
+    let shell_script = workspace_observer_shell_script();
+
+    let source_files = [
+        (
+            format!("{REMOTE_WORKSPACE_OBSERVER_SOURCE_DIR}/Cargo.toml"),
+            WORKSPACE_OBSERVER_CARGO_TOML,
+        ),
+        (
+            format!("{REMOTE_WORKSPACE_OBSERVER_SOURCE_DIR}/Cargo.lock"),
+            WORKSPACE_OBSERVER_CARGO_LOCK,
+        ),
+        (
+            format!("{REMOTE_WORKSPACE_OBSERVER_SOURCE_DIR}/src/main.rs"),
+            WORKSPACE_OBSERVER_MAIN_RS,
+        ),
+        (
+            REMOTE_WORKSPACE_OBSERVER_SHELL_FILE.to_string(),
+            shell_script.as_str(),
+        ),
+    ];
+
+    let mut script = format!(
+        "install -d -m 0700 \"$HOME/.silo\" {source_root} {source_src} \"$HOME/.silo/bin\"\n",
+    );
+    for (index, (path, contents)) in source_files.iter().enumerate() {
+        let encoded = BASE64_STANDARD.encode(contents.as_bytes());
+        if let Some((parent_dir, _)) = path.rsplit_once('/') {
+            script.push_str(&format!(
+                "install -d -m 0700 {parent}\n",
+                parent = shell_quote(parent_dir),
+            ));
+        }
+        script.push_str(&format!(
+            "cat <<'EOF_OBSERVER_{index}' | base64 --decode > {target}\n{contents}\nEOF_OBSERVER_{index}\n",
+            target = shell_quote(path),
+            contents = encoded,
+        ));
+        script.push_str(&format!("chmod 600 {}\n", shell_quote(path)));
+    }
+    script.push_str(&format!(
+        "cargo build --manifest-path {manifest_path} --locked --release\n",
+    ));
+    script.push_str(&format!("install -m 0755 {target_binary} {bin_path}\n"));
+    script.push_str(&format!("chmod 0755 {shell_path}\n"));
+    script.push_str(&format!(
+        "if [ -f {pidfile} ]; then kill \"$(cat {pidfile})\" 2>/dev/null || true; rm -f {pidfile}; fi\n",
+    ));
+    script.push_str(&format!(
+        "nohup {bin_path} daemon --instance {instance} --project {project} --zone {zone} >/dev/null 2>&1 < /dev/null &\n",
+        instance = shell_quote(lookup.workspace.name()),
+        project = shell_quote(&lookup.gcloud_project),
+        zone = shell_quote(lookup.workspace.zone()),
+    ));
+    script
+}
+
+fn workspace_observer_source_signature() -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(WORKSPACE_OBSERVER_CARGO_TOML.as_bytes());
+    hasher.update(WORKSPACE_OBSERVER_CARGO_LOCK.as_bytes());
+    hasher.update(WORKSPACE_OBSERVER_MAIN_RS.as_bytes());
+    hasher.update(workspace_observer_shell_script().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn workspace_observer_shell_script() -> String {
+    format!(
+        "export SILO_WORKSPACE_OBSERVER_BIN={observer_bin}\n\
+_silo_observer_emit() {{\n\
+  [ -n \"${{ZMX_SESSION:-}}\" ] || return 0\n\
+  [ -x \"${{SILO_WORKSPACE_OBSERVER_BIN:-}}\" ] || return 0\n\
+  SILO_OBSERVER_HOOK=1 \"$SILO_WORKSPACE_OBSERVER_BIN\" emit \"$@\" >/dev/null 2>&1 || true\n\
+}}\n\
+_silo_observer_wrap_assistant() {{\n\
+  local provider=\"$1\"\n\
+  shift\n\
+  if [ -z \"${{ZMX_SESSION:-}}\" ] || [ ! -x \"${{SILO_WORKSPACE_OBSERVER_BIN:-}}\" ]; then\n\
+    command \"$@\"\n\
+    return\n\
+  fi\n\
+  command \"$SILO_WORKSPACE_OBSERVER_BIN\" assistant-proxy --provider \"$provider\" -- \"$@\"\n\
+}}\n\
+codex() {{\n\
+  _silo_observer_wrap_assistant codex codex \"$@\"\n\
+}}\n\
+claude() {{\n\
+  _silo_observer_wrap_assistant claude claude --dangerously-skip-permissions \"$@\"\n\
+}}\n\
+cc() {{\n\
+  claude \"$@\"\n\
+}}\n\
+case $- in\n\
+  *i*) ;;\n\
+  *) return 0 2>/dev/null || exit 0 ;;\n\
+esac\n\
+if [ -n \"${{ZSH_VERSION:-}}\" ]; then\n\
+  autoload -Uz add-zsh-hook\n\
+  typeset -g SILO_OBSERVER_LAST_COMMAND=\"${{SILO_OBSERVER_LAST_COMMAND:-}}\"\n\
+  _silo_observer_preexec() {{\n\
+    [ -n \"${{SILO_OBSERVER_HOOK:-}}\" ] && return 0\n\
+    [ -n \"${{ZMX_SESSION:-}}\" ] || return 0\n\
+    SILO_OBSERVER_LAST_COMMAND=\"$1\"\n\
+    _silo_observer_emit --kind shell_command_started --session \"$ZMX_SESSION\" --command \"$1\"\n\
+  }}\n\
+  _silo_observer_precmd() {{\n\
+    local exit_code=$?\n\
+    [ -n \"${{SILO_OBSERVER_HOOK:-}}\" ] && return $exit_code\n\
+    [ -n \"${{ZMX_SESSION:-}}\" ] || return $exit_code\n\
+    if [ -n \"${{SILO_OBSERVER_LAST_COMMAND:-}}\" ]; then\n\
+      _silo_observer_emit --kind shell_command_finished --session \"$ZMX_SESSION\"\n\
+      SILO_OBSERVER_LAST_COMMAND=\"\"\n\
+    fi\n\
+    return $exit_code\n\
+  }}\n\
+  case \" ${{preexec_functions[*]:-}} \" in\n\
+    *\" _silo_observer_preexec \"*) ;;\n\
+    *) add-zsh-hook preexec _silo_observer_preexec ;;\n\
+  esac\n\
+  case \" ${{precmd_functions[*]:-}} \" in\n\
+    *\" _silo_observer_precmd \"*) ;;\n\
+    *) add-zsh-hook precmd _silo_observer_precmd ;;\n\
+  esac\n\
+fi\n",
+        observer_bin = shell_quote(REMOTE_WORKSPACE_OBSERVER_BIN),
+    )
 }
 
 fn codex_auth_json(token: &str) -> String {
@@ -1904,7 +2113,10 @@ fn build_gcloud_ssh_command(
     command.arg(format!("--zone={zone}"));
 
     if let Some(remote_command) = remote_command {
-        command.arg(format!("--command={}", wrap_remote_shell_command(&remote_command)));
+        command.arg(format!(
+            "--command={}",
+            wrap_remote_shell_command(&remote_command)
+        ));
     }
 
     command
@@ -2234,7 +2446,10 @@ mod tests {
 
     #[test]
     fn chrome_profile_sync_paths_include_profile_state_but_not_extensions_or_caches() {
-        let sync_paths = CHROME_PROFILE_SYNC_PATHS.iter().copied().collect::<HashSet<_>>();
+        let sync_paths = CHROME_PROFILE_SYNC_PATHS
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
 
         assert!(sync_paths.contains("Local State"));
         assert!(sync_paths.contains("Default/Preferences"));

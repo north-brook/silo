@@ -3,7 +3,7 @@
 import * as ToastPrimitive from "@radix-ui/react-toast";
 import { X } from "lucide-react";
 import * as React from "react";
-import { cn } from "../../lib/utils";
+import { cn } from "../lib/utils";
 
 const TOAST_LIMIT = 3;
 const TOAST_REMOVE_DELAY = 350;

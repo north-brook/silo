@@ -4,8 +4,8 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useRouter } from "next/navigation";
 import { createContext, useContext, useEffect } from "react";
-import { invoke } from "../../lib/invoke";
-import type { Workspace } from "../../lib/workspaces";
+import { invoke } from "../lib/invoke";
+import type { Workspace } from "../lib/workspaces";
 import { toast } from "./toaster";
 
 const OpenProjectContext = createContext<{
@@ -20,7 +20,9 @@ export const useOpenProject = () => useContext(OpenProjectContext);
 
 export function OpenProjectProvider({
 	children,
-}: { children: React.ReactNode }) {
+}: {
+	children: React.ReactNode;
+}) {
 	const router = useRouter();
 	const queryClient = useQueryClient();
 
@@ -33,10 +35,9 @@ export function OpenProjectProvider({
 			const name = path.split("/").pop() || path;
 
 			await invoke("projects_add_project", { name, path });
-			const workspace = await invoke<Workspace>(
-				"templates_create_template",
-				{ project: name },
-			);
+			const workspace = await invoke<Workspace>("templates_create_template", {
+				project: name,
+			});
 			return { name, workspace };
 		},
 		onSuccess: ({ name, workspace }) => {

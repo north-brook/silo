@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { invoke } from "../../lib/invoke";
-import { ChromeIcon } from "../icons/chrome";
-import { ClaudeIcon } from "../icons/claude";
-import { CodexIcon } from "../icons/codex";
-import { GCloudIcon } from "../icons/gcloud";
-import { GHIcon } from "../icons/gh";
+import { invoke } from "../lib/invoke";
+import { ChromeIcon } from "./icons/chrome";
+import { ClaudeIcon } from "./icons/claude";
+import { CodexIcon } from "./icons/codex";
+import { GCloudIcon } from "./icons/gcloud";
+import { GHIcon } from "./icons/gh";
 import { toast } from "./toaster";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
 

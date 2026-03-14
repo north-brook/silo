@@ -459,7 +459,10 @@ async fn branch_workspace_context(workspace: &str) -> Result<BranchWorkspaceCont
         .ok_or_else(|| format!("workspace {} is missing target branch metadata", workspace))?
         .to_string();
 
-    Ok(BranchWorkspaceContext { lookup, target_branch })
+    Ok(BranchWorkspaceContext {
+        lookup,
+        target_branch,
+    })
 }
 
 async fn run_workspace_command(
@@ -1500,10 +1503,19 @@ index 1111111..2222222 100644\n\
     #[test]
     fn parse_check_state_normalizes_known_values() {
         assert_eq!(parse_check_state(Some("SUCCESS")), CheckState::Success);
-        assert_eq!(parse_check_state(Some("in_progress")), CheckState::InProgress);
-        assert_eq!(parse_check_state(Some("action required")), CheckState::ActionRequired);
+        assert_eq!(
+            parse_check_state(Some("in_progress")),
+            CheckState::InProgress
+        );
+        assert_eq!(
+            parse_check_state(Some("action required")),
+            CheckState::ActionRequired
+        );
         assert_eq!(parse_check_state(Some("skipping")), CheckState::Skipped);
-        assert_eq!(parse_check_state(Some("weird-new-state")), CheckState::Unknown);
+        assert_eq!(
+            parse_check_state(Some("weird-new-state")),
+            CheckState::Unknown
+        );
         assert_eq!(parse_check_state(None), CheckState::Unknown);
     }
 }

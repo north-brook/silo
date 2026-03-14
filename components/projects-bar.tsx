@@ -15,22 +15,22 @@ import {
 import Image from "next/image";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
-import { invoke } from "../../lib/invoke";
-import type { ListedProject } from "../../lib/projects";
-import type { SnapshotTemplate } from "../../lib/templates";
+import { invoke } from "../lib/invoke";
+import type { ListedProject } from "../lib/projects";
+import type { SnapshotTemplate } from "../lib/templates";
 import {
 	createWorkspace as createWorkspaceCommand,
 	isTemplateWorkspace,
 	type Workspace,
 	workspaceLabel,
-} from "../../lib/workspaces";
+} from "../lib/workspaces";
 import { useNewWorkspace } from "./new-workspace";
 import { useOpenProject } from "./open-project";
 import { Popover, PopoverContent, PopoverTrigger } from "./popover";
 import { Loader } from "./loader";
 import { toast } from "./toaster";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
-import { LogoIcon } from "../icons/logo";
+import { LogoIcon } from "./icons/logo";
 import { WorkspaceIndicator } from "./workspace-status";
 
 function ProjectRow({
@@ -192,7 +192,11 @@ function ProjectRow({
 							</button>
 						</TooltipTrigger>
 						<TooltipContent side="right">
-							{templateWorkspace ? "Edit Template" : hasTemplate ? "Edit Template" : "New Template"}
+							{templateWorkspace
+								? "Edit Template"
+								: hasTemplate
+									? "Edit Template"
+									: "New Template"}
 						</TooltipContent>
 					</Tooltip>
 				)}
@@ -403,7 +407,11 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 									}}
 									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
 								>
-									{saveTemplateMut.isPending ? <Loader className="text-text-bright" /> : <Save size={12} />}
+									{saveTemplateMut.isPending ? (
+										<Loader className="text-text-bright" />
+									) : (
+										<Save size={12} />
+									)}
 									Save
 								</button>
 							)}

@@ -4,8 +4,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, ChevronsUpDown, GitBranch, Save } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "../../lib/invoke";
-import { isTemplateWorkspace, type Workspace } from "../../lib/workspaces";
+import { invoke } from "../lib/invoke";
+import { isTemplateWorkspace, type Workspace } from "../lib/workspaces";
 import { GitToggle } from "./git-bar";
 import { Loader } from "./loader";
 import { Popover, PopoverContent, PopoverTrigger } from "./popover";
@@ -62,7 +62,11 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 						onClick={() => save.mutate()}
 						className="flex items-center gap-1.5 justify-center px-3 py-0.5 rounded text-[11px] font-medium bg-green-600 text-white transition-colors hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
 					>
-						{save.isPending ? <Loader className="text-white" /> : <Save size={10} />}
+						{save.isPending ? (
+							<Loader className="text-white" />
+						) : (
+							<Save size={10} />
+						)}
 						Save
 					</button>
 				)}

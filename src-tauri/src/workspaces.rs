@@ -1,6 +1,7 @@
 use crate::config::{ConfigStore, ProjectConfig, SiloConfig};
 use crate::river_names::DEFAULT_RIVER_NAMES;
 use crate::terminal;
+use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -24,6 +25,7 @@ pub struct BranchWorkspace {
     target_branch: String,
     unread: bool,
     working: Option<bool>,
+    processes: Vec<WorkspaceProcess>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -52,6 +54,35 @@ struct WorkspaceBase {
     ready: bool,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorkspaceProcess {
+    #[serde(rename = "type")]
+    kind: String,
+    name: String,
+    attachment_id: String,
+    working: Option<bool>,
+    unread: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct WorkspaceObserverState {
+    branch: Option<String>,
+    working: Option<bool>,
+    unread: Option<bool>,
+    #[serde(default)]
+    processes: Vec<WorkspaceObserverProcess>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct WorkspaceObserverProcess {
+    #[serde(rename = "type")]
+    kind: String,
+    name: String,
+    attachment_id: String,
+    working: Option<bool>,
+    unread: Option<bool>,
+}
+
 impl Workspace {
     fn branch(
         base: WorkspaceBase,
@@ -59,6 +90,7 @@ impl Workspace {
         target_branch: String,
         unread: bool,
         working: Option<bool>,
+        processes: Vec<WorkspaceProcess>,
     ) -> Self {
         Self::Branch(BranchWorkspace {
             base,
@@ -66,6 +98,7 @@ impl Workspace {
             target_branch,
             unread,
             working,
+            processes,
         })
     }
 
@@ -539,6 +572,7 @@ fn pending_workspace(
         target_branch.to_string(),
         false,
         None,
+        Vec::new(),
     )
 }
 
@@ -1360,6 +1394,7 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         .cloned()
         .unwrap_or_default();
     let metadata = parse_instance_metadata(value.get("metadata"));
+    let observer_state = parse_workspace_observer_state(metadata.get("silo_state"));
     let template = labels
         .get("template")
         .and_then(Value::as_str)
@@ -1400,9 +1435,10 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
             template: true,
         }))
     } else {
-        let branch = metadata
-            .get("branch")
-            .cloned()
+        let branch = observer_state
+            .as_ref()
+            .and_then(|state| state.branch.clone())
+            .or_else(|| metadata.get("branch").cloned())
             .or_else(|| {
                 labels
                     .get("branch")
@@ -1424,6 +1460,11 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
             .get("unread")
             .map(|value| parse_bool_value("unread", value))
             .or_else(|| {
+                observer_state
+                    .as_ref()
+                    .and_then(|state| state.unread.map(Ok))
+            })
+            .or_else(|| {
                 labels
                     .get("unread")
                     .and_then(Value::as_str)
@@ -1434,6 +1475,11 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         let working = metadata
             .get("working")
             .map(|value| parse_bool_value("working", value))
+            .or_else(|| {
+                observer_state
+                    .as_ref()
+                    .and_then(|state| state.working.map(Ok))
+            })
             .or_else(|| {
                 labels
                     .get("working")
@@ -1448,6 +1494,26 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
             target_branch,
             unread,
             working,
+            observer_state
+                .map(|state| {
+                    state
+                        .processes
+                        .into_iter()
+                        .filter(|process| {
+                            !process.kind.trim().is_empty()
+                                && !process.name.trim().is_empty()
+                                && !process.attachment_id.trim().is_empty()
+                        })
+                        .map(|process| WorkspaceProcess {
+                            kind: process.kind,
+                            name: process.name,
+                            attachment_id: process.attachment_id,
+                            working: process.working,
+                            unread: process.unread,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
         ))
     }
 }
@@ -1567,6 +1633,15 @@ fn parse_instance_metadata(metadata: Option<&Value>) -> HashMap<String, String> 
     entries
 }
 
+fn parse_workspace_observer_state(value: Option<&String>) -> Option<WorkspaceObserverState> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    serde_json::from_str(value).ok()
+}
+
 fn parse_bool_value(label: &str, value: &str) -> Result<bool, String> {
     match value.trim() {
         "true" => Ok(true),
@@ -1598,7 +1673,9 @@ fn workspace_metadata_arg(entries: &[(&str, &str)]) -> Result<String, String> {
                     && !value.contains('\n')
             })
         })
-        .ok_or_else(|| "workspace metadata values contain unsupported delimiter content".to_string())?;
+        .ok_or_else(|| {
+            "workspace metadata values contain unsupported delimiter content".to_string()
+        })?;
 
     let mut serialized = String::new();
     for (index, (key, value)) in populated.iter().enumerate() {
@@ -1875,6 +1952,7 @@ mod tests {
             String::new(),
             false,
             None,
+            Vec::new(),
         )
     }
 
@@ -2323,6 +2401,41 @@ mod tests {
         );
         assert_eq!(workspace.base.created_at, "2026-03-11T13:00:00.000-04:00");
         assert_eq!(workspace.base.zone, "us-east1-b");
+    }
+
+    #[test]
+    fn parse_workspace_reads_observer_state_metadata() {
+        let workspace = parse_workspace(&json!({
+            "name": "ws-demo-123",
+            "zone": "us-east1-b",
+            "status": "RUNNING",
+            "creationTimestamp": "2026-03-11T13:00:00.000-04:00",
+            "labels": {
+                "project": "demo",
+            },
+            "metadata": {
+                "items": [
+                    { "key": "target_branch", "value": "main" },
+                    { "key": "silo_state", "value": "{\"branch\":\"feature/inbox\",\"working\":true,\"unread\":true,\"processes\":[{\"type\":\"terminal\",\"name\":\"codex\",\"attachment_id\":\"terminal-1\",\"working\":true,\"unread\":false}]}" }
+                ]
+            }
+        }))
+        .expect("workspace should parse");
+
+        let Workspace::Branch(workspace) = workspace else {
+            panic!("workspace should parse as a branch workspace");
+        };
+
+        assert_eq!(workspace.branch, "feature/inbox");
+        assert_eq!(workspace.target_branch, "main");
+        assert!(workspace.unread);
+        assert_eq!(workspace.working, Some(true));
+        assert_eq!(workspace.processes.len(), 1);
+        assert_eq!(workspace.processes[0].kind, "terminal");
+        assert_eq!(workspace.processes[0].name, "codex");
+        assert_eq!(workspace.processes[0].attachment_id, "terminal-1");
+        assert_eq!(workspace.processes[0].working, Some(true));
+        assert_eq!(workspace.processes[0].unread, Some(false));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Terminal, X } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { invoke } from "../../lib/invoke";
 import type { Workspace } from "../../lib/workspaces";
 import { Loader } from "../../components/loader";
@@ -135,6 +135,23 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 			}
 		},
 	});
+
+	useEffect(() => {
+		if (!workspaceName || !activeTerminal) {
+			return;
+		}
+
+		void invoke("terminal_read_terminal", {
+			workspace: workspaceName,
+			name: activeTerminal,
+		})
+			.then(() =>
+				queryClient.invalidateQueries({
+					queryKey: ["workspaces_get_workspace", workspaceName],
+				}),
+			)
+			.catch(() => {});
+	}, [activeTerminal, queryClient, workspaceName]);
 
 	return (
 		<>

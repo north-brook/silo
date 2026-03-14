@@ -5,16 +5,11 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { createContext, useContext, useEffect, useState } from "react";
-import { invoke } from "../../lib/invoke";
-import type { ListedProject } from "../../lib/projects";
-import type { SnapshotTemplate } from "../../lib/templates";
-import { createWorkspace as createWorkspaceCommand } from "../../lib/workspaces";
-import {
-	Dialog,
-	DialogContent,
-	DialogHeader,
-	DialogTitle,
-} from "./dialog";
+import { invoke } from "../lib/invoke";
+import type { ListedProject } from "../lib/projects";
+import type { SnapshotTemplate } from "../lib/templates";
+import { createWorkspace as createWorkspaceCommand } from "../lib/workspaces";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./dialog";
 import { toast } from "./toaster";
 
 const NewWorkspaceContext = createContext<{ open: () => void }>({
@@ -25,7 +20,9 @@ export const useNewWorkspace = () => useContext(NewWorkspaceContext);
 
 export function NewWorkspaceProvider({
 	children,
-}: { children: React.ReactNode }) {
+}: {
+	children: React.ReactNode;
+}) {
 	const [isOpen, setIsOpen] = useState(false);
 
 	const projects = useQuery({
@@ -123,7 +120,10 @@ function NewWorkspaceDialog({
 
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
-			<DialogContent onOpenAutoFocus={(e) => e.preventDefault()} className="max-w-xs p-0 gap-0">
+			<DialogContent
+				onOpenAutoFocus={(e) => e.preventDefault()}
+				className="max-w-xs p-0 gap-0"
+			>
 				<DialogHeader className="p-4 pb-2">
 					<DialogTitle>New Workspace</DialogTitle>
 				</DialogHeader>

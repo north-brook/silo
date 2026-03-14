@@ -88,6 +88,7 @@ pub fn run() {
             terminal::terminal_run_terminal,
             terminal::terminal_detach_terminal,
             terminal::terminal_kill_terminal,
+            terminal::terminal_read_terminal,
             terminal::terminal_write_terminal,
             terminal::terminal_resize_terminal,
             system::system_memory_usage

@@ -1,10 +1,6 @@
 "use client";
 
-import {
-	useMutation,
-	useQuery,
-	useQueryClient,
-} from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	ArrowUpFromLine,
 	Ban,
@@ -41,9 +37,9 @@ import {
 	type Diff,
 	type DiffFile,
 	type DiffSection,
-} from "../../lib/git";
-import { invoke } from "../../lib/invoke";
-import { isTemplateWorkspace, type Workspace } from "../../lib/workspaces";
+} from "../lib/git";
+import { invoke } from "../lib/invoke";
+import { isTemplateWorkspace, type Workspace } from "../lib/workspaces";
 import { Loader } from "./loader";
 import { toast } from "./toaster";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
@@ -60,9 +56,9 @@ interface GitBarContextValue {
 	workspace: string;
 	project: string;
 	isInBranchWorkspace: boolean;
-	prStatus: import("../../lib/git").PullRequestStatus | null;
+	prStatus: import("../lib/git").PullRequestStatus | null;
 	prStatusLoading: boolean;
-	observation: import("../../lib/git").PullRequestObservation | null;
+	observation: import("../lib/git").PullRequestObservation | null;
 	observationLoading: boolean;
 }
 
@@ -181,8 +177,7 @@ export function GitBarProvider({ children }: { children: ReactNode }) {
 // ---------------------------------------------------------------------------
 
 export function GitToggle() {
-	const { isOpen, toggle, diff, hasChanges, isInBranchWorkspace } =
-		useGitBar();
+	const { isOpen, toggle, diff, hasChanges, isInBranchWorkspace } = useGitBar();
 
 	if (!isInBranchWorkspace || !hasChanges) return null;
 
@@ -197,7 +192,9 @@ export function GitToggle() {
 					onClick={toggle}
 					className={`flex items-center px-1.5 py-0.5 rounded text-text-muted hover:bg-btn-hover hover:text-text-bright transition-colors ${isOpen ? "" : "gap-1.5"}`}
 				>
-					<span className={`flex items-center gap-1.5 text-[11px] font-medium transition-opacity overflow-hidden ${isOpen ? "opacity-0 w-0" : "opacity-100"}`}>
+					<span
+						className={`flex items-center gap-1.5 text-[11px] font-medium transition-opacity overflow-hidden ${isOpen ? "opacity-0 w-0" : "opacity-100"}`}
+					>
 						<span className="text-emerald-400">+{additions}</span>
 						<span className="text-red-400">-{deletions}</span>
 					</span>
@@ -208,9 +205,15 @@ export function GitToggle() {
 				<span className="flex items-center gap-1.5">
 					Toggle Git Bar
 					<span className="flex items-center gap-0.5">
-						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">⌘</kbd>
-						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">⇧</kbd>
-						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">B</kbd>
+						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+							⌘
+						</kbd>
+						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+							⇧
+						</kbd>
+						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+							B
+						</kbd>
 					</span>
 				</span>
 			</TooltipContent>
@@ -325,8 +328,7 @@ function GitBarHeader() {
 
 	const dirty = treeDirty.data ?? true;
 	const isLoading =
-		prStatusLoading ||
-		(pr?.status === "open" && treeDirty.isLoading);
+		prStatusLoading || (pr?.status === "open" && treeDirty.isLoading);
 
 	const showCreatePr = !isLoading && !pr;
 	const showMerge = !isLoading && pr?.status === "open" && !dirty;
@@ -352,7 +354,12 @@ function GitBarHeader() {
 	const hotkeyKbd = (keys: string[]) => (
 		<span className="flex items-center gap-0.5">
 			{keys.map((k) => (
-				<kbd key={k} className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">{k}</kbd>
+				<kbd
+					key={k}
+					className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text"
+				>
+					{k}
+				</kbd>
 			))}
 		</span>
 	);
@@ -364,9 +371,7 @@ function GitBarHeader() {
 					<button
 						type="button"
 						onClick={async () => {
-							const { openUrl } = await import(
-								"@tauri-apps/plugin-opener"
-							);
+							const { openUrl } = await import("@tauri-apps/plugin-opener");
 							openUrl(pr.url);
 						}}
 						className="flex items-center gap-1 text-[11px] text-text hover:text-text-bright transition-colors"
@@ -395,7 +400,9 @@ function GitBarHeader() {
 								Open PR
 							</button>
 						</TooltipTrigger>
-						<TooltipContent side="left">{hotkeyKbd(["⌘", "⇧", "P"])}</TooltipContent>
+						<TooltipContent side="left">
+							{hotkeyKbd(["⌘", "⇧", "P"])}
+						</TooltipContent>
 					</Tooltip>
 				)}
 				{showMerge && (
@@ -415,7 +422,9 @@ function GitBarHeader() {
 								Merge
 							</button>
 						</TooltipTrigger>
-						<TooltipContent side="left">{hotkeyKbd(["⌘", "⇧", "M"])}</TooltipContent>
+						<TooltipContent side="left">
+							{hotkeyKbd(["⌘", "⇧", "M"])}
+						</TooltipContent>
 					</Tooltip>
 				)}
 				{showPush && (
@@ -427,15 +436,13 @@ function GitBarHeader() {
 								onClick={() => push.mutate()}
 								className="flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium bg-btn text-text hover:bg-btn-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
 							>
-								{push.isPending ? (
-									<Loader />
-								) : (
-									<ArrowUpFromLine size={10} />
-								)}
+								{push.isPending ? <Loader /> : <ArrowUpFromLine size={10} />}
 								Push
 							</button>
 						</TooltipTrigger>
-						<TooltipContent side="left">{hotkeyKbd(["⌘", "⇧", "P"])}</TooltipContent>
+						<TooltipContent side="left">
+							{hotkeyKbd(["⌘", "⇧", "P"])}
+						</TooltipContent>
 					</Tooltip>
 				)}
 			</div>
@@ -461,12 +468,22 @@ function GitBarTabs() {
 		if (observationLoading) return <Loader />;
 		const checks = observation?.checks ?? [];
 		if (checks.length === 0) return null;
-		const failStates: CheckState[] = ["failure", "startup_failure", "timed_out", "cancelled"];
-		const pendingStates: CheckState[] = ["in_progress", "pending", "queued", "waiting", "requested"];
+		const failStates: CheckState[] = [
+			"failure",
+			"startup_failure",
+			"timed_out",
+			"cancelled",
+		];
+		const pendingStates: CheckState[] = [
+			"in_progress",
+			"pending",
+			"queued",
+			"waiting",
+			"requested",
+		];
 		if (checks.some((c) => failStates.includes(c.state)))
 			return <X size={10} className="text-red-400" />;
-		if (checks.some((c) => pendingStates.includes(c.state)))
-			return <Loader />;
+		if (checks.some((c) => pendingStates.includes(c.state))) return <Loader />;
 		return <Check size={10} className="text-emerald-400" />;
 	})();
 
@@ -504,7 +521,9 @@ function GitBarTabs() {
 			</div>
 			<div className="flex-1 overflow-y-auto bg-surface">
 				{activeTab === "diff" && <DiffTab />}
-				{activeTab === "checks" && hasPr && <ChecksTab observation={observation} isLoading={observationLoading} />}
+				{activeTab === "checks" && hasPr && (
+					<ChecksTab observation={observation} isLoading={observationLoading} />
+				)}
 			</div>
 		</>
 	);
@@ -530,24 +549,29 @@ function DiffTab() {
 function DiffSectionView({
 	label,
 	section,
-}: { label: string; section: DiffSection }) {
+}: {
+	label: string;
+	section: DiffSection;
+}) {
 	if (section.files.length === 0) return null;
 
 	return (
 		<div className="border-b border-border-light last:border-b-0">
 			<div className="flex items-center justify-between px-3 py-1.5 text-[11px]">
-				<span className="text-[10px] text-text-muted font-medium uppercase tracking-wide">{label}</span>
+				<span className="text-[10px] text-text-muted font-medium uppercase tracking-wide">
+					{label}
+				</span>
 				<span className="text-text-muted">
 					{section.overview.additions > 0 && (
 						<span className="text-emerald-400">
 							+{section.overview.additions}
 						</span>
 					)}
-					{section.overview.additions > 0 && section.overview.deletions > 0 && " "}
+					{section.overview.additions > 0 &&
+						section.overview.deletions > 0 &&
+						" "}
 					{section.overview.deletions > 0 && (
-						<span className="text-red-400">
-							-{section.overview.deletions}
-						</span>
+						<span className="text-red-400">-{section.overview.deletions}</span>
 					)}
 				</span>
 			</div>
@@ -561,9 +585,7 @@ function DiffSectionView({
 function DiffFileRow({ file }: { file: DiffFile }) {
 	return (
 		<div className="flex items-center justify-between px-3 py-1 text-[11px] hover:bg-btn-hover transition-colors">
-			<span className="truncate min-w-0 text-text-muted">
-				{file.path}
-			</span>
+			<span className="truncate min-w-0 text-text-muted">{file.path}</span>
 			<span className="shrink-0 ml-2 text-text-muted">
 				{file.additions > 0 && (
 					<span className="text-emerald-400">+{file.additions}</span>
@@ -581,7 +603,13 @@ function DiffFileRow({ file }: { file: DiffFile }) {
 // Checks Tab
 // ---------------------------------------------------------------------------
 
-function ChecksTab({ observation, isLoading }: { observation: import("../../lib/git").PullRequestObservation | null; isLoading: boolean }) {
+function ChecksTab({
+	observation,
+	isLoading,
+}: {
+	observation: import("../lib/git").PullRequestObservation | null;
+	isLoading: boolean;
+}) {
 	if (isLoading || !observation) {
 		return (
 			<div className="flex items-center justify-center py-8">
@@ -620,15 +648,17 @@ function ChecksTab({ observation, isLoading }: { observation: import("../../lib/
 							type="button"
 							onClick={async () => {
 								if (!d.url) return;
-								const { openUrl } = await import(
-									"@tauri-apps/plugin-opener"
-								);
+								const { openUrl } = await import("@tauri-apps/plugin-opener");
 								openUrl(d.url);
 							}}
 							className="flex items-center gap-2 px-3 py-1 -mx-3 text-[11px] hover:bg-btn-hover transition-colors text-left"
 						>
 							{d.icon_url ? (
-								<img src={d.icon_url} alt="" className="w-3.5 h-3.5 rounded shrink-0" />
+								<img
+									src={d.icon_url}
+									alt=""
+									className="w-3.5 h-3.5 rounded shrink-0"
+								/>
 							) : (
 								<StatusDot state={d.state} />
 							)}
@@ -652,17 +682,13 @@ function ChecksTab({ observation, isLoading }: { observation: import("../../lib/
 							type="button"
 							onClick={async () => {
 								if (!c.link) return;
-								const { openUrl } = await import(
-									"@tauri-apps/plugin-opener"
-								);
+								const { openUrl } = await import("@tauri-apps/plugin-opener");
 								openUrl(c.link);
 							}}
 							className="flex items-center gap-2 px-3 py-1 -mx-3 text-[11px] hover:bg-btn-hover transition-colors text-left"
 						>
 							<CheckStateIcon state={c.state} />
-							<span className="text-text truncate">
-								{c.name}
-							</span>
+							<span className="text-text truncate">{c.name}</span>
 						</button>
 					))}
 				</div>
