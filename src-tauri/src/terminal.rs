@@ -32,9 +32,38 @@ const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
 const REMOTE_BOOTSTRAP_STATE_FILE: &str = "/home/silo/.silo/workspace-bootstrap-state";
 const REMOTE_BOOTSTRAP_LOCK_DIR: &str = "/home/silo/.silo/workspace-bootstrap.lock";
 const REMOTE_CHROME_USER_DATA_DIR: &str = "/home/silo/.config/google-chrome";
-const WORKSPACE_BOOTSTRAP_VERSION: &str = "6";
+const WORKSPACE_BOOTSTRAP_VERSION: &str = "7";
 const TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS: usize = 60;
 const TEMPLATE_BOOTSTRAP_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const CHROME_PROFILE_SYNC_PATHS: &[&str] = &[
+    "Local State",
+    "First Run",
+    "Last Version",
+    "Default/Preferences",
+    "Default/Secure Preferences",
+    "Default/Bookmarks",
+    "Default/Bookmarks.bak",
+    "Default/History",
+    "Default/History-journal",
+    "Default/Favicons",
+    "Default/Favicons-journal",
+    "Default/Web Data",
+    "Default/Web Data-journal",
+    "Default/Login Data",
+    "Default/Login Data-journal",
+    "Default/Login Data For Account",
+    "Default/Cookies",
+    "Default/Cookies-journal",
+    "Default/Network Persistent State",
+    "Default/Account Web Data",
+    "Default/Affiliation Database",
+    "Default/Session Storage",
+    "Default/Local Storage",
+    "Default/IndexedDB",
+    "Default/Service Worker",
+    "Default/Accounts",
+    "Default/trusted_vault.pb",
+];
 
 static TEMPLATE_CHROME_SYNC_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -1287,7 +1316,16 @@ fn load_bootstrap_chrome_profile(configured_path: &str) -> (String, String) {
         return (String::new(), String::new());
     }
 
-    let hash = match hash_chrome_profile_dir(&source_dir) {
+    let sync_paths = chrome_profile_sync_paths(&source_dir);
+    if sync_paths.is_empty() {
+        log::warn!(
+            "skipping chrome profile bootstrap because no syncable profile data was found in {}",
+            source_dir.display()
+        );
+        return (String::new(), String::new());
+    }
+
+    let hash = match hash_chrome_profile_dir(&source_dir, &sync_paths) {
         Ok(hash) => hash,
         Err(error) => {
             log::warn!(
@@ -1375,9 +1413,20 @@ fn bootstrap_env_files_signature(env_files: &[BootstrapEnvFile]) -> String {
         .join(",")
 }
 
-fn hash_chrome_profile_dir(source_dir: &Path) -> Result<String, String> {
+fn chrome_profile_sync_paths(source_dir: &Path) -> Vec<PathBuf> {
+    CHROME_PROFILE_SYNC_PATHS
+        .iter()
+        .map(Path::new)
+        .filter(|relative_path| source_dir.join(relative_path).exists())
+        .map(PathBuf::from)
+        .collect()
+}
+
+fn hash_chrome_profile_dir(source_dir: &Path, sync_paths: &[PathBuf]) -> Result<String, String> {
     let mut hasher = Sha256::new();
-    hash_chrome_profile_entry(source_dir, source_dir, &mut hasher)?;
+    for sync_path in sync_paths {
+        hash_chrome_profile_entry(source_dir, &source_dir.join(sync_path), &mut hasher)?;
+    }
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -1599,8 +1648,20 @@ async fn sync_template_chrome_profile(
         return Ok(());
     }
 
+    let sync_paths = chrome_profile_sync_paths(&source_dir);
+    if sync_paths.is_empty() {
+        log::warn!(
+            "skipping empty chrome profile sync set for template workspace {} from {}",
+            lookup.workspace.name(),
+            source_dir.display()
+        );
+        return Ok(());
+    }
+
     let remote_command = chrome_profile_remote_sync_command();
-    let result = run_remote_command_with_tar_stream(lookup, &remote_command, &source_dir).await?;
+    let result =
+        run_remote_command_with_tar_stream(lookup, &remote_command, &source_dir, sync_paths)
+            .await?;
     if !result.success {
         return Err(remote_command_error(
             "failed to sync chrome profile into template workspace",
@@ -1743,6 +1804,7 @@ async fn run_remote_command_with_tar_stream(
     lookup: &WorkspaceLookup,
     remote_command: &str,
     source_dir: &Path,
+    sync_paths: Vec<PathBuf>,
 ) -> Result<CommandResult, String> {
     let account = lookup.account.clone();
     let project = lookup.gcloud_project.clone();
@@ -1750,6 +1812,7 @@ async fn run_remote_command_with_tar_stream(
     let zone = lookup.workspace.zone().to_string();
     let remote_command = remote_command.to_string();
     let source_dir = source_dir.to_path_buf();
+    let sync_paths = sync_paths;
 
     tauri::async_runtime::spawn_blocking(move || {
         let parent = source_dir.parent().ok_or_else(|| {
@@ -1770,15 +1833,10 @@ async fn run_remote_command_with_tar_stream(
 
         let mut tar = Command::new("tar");
         tar.arg("-C").arg(parent);
-        for pattern in [
-            "SingletonCookie",
-            "SingletonLock",
-            "SingletonSocket",
-            "DevToolsActivePort",
-        ] {
-            tar.arg(format!("--exclude={pattern}"));
+        tar.arg("-czf").arg("-");
+        for sync_path in &sync_paths {
+            tar.arg(Path::new(file_name).join(sync_path));
         }
-        tar.arg("-czf").arg("-").arg(file_name);
         tar.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut tar_child = tar
@@ -2134,28 +2192,35 @@ mod tests {
     }
 
     #[test]
-    fn load_bootstrap_chrome_profile_hashes_directory_and_skips_transient_files() {
+    fn load_bootstrap_chrome_profile_hashes_only_syncable_profile_state() {
         let temp_dir = TempDir::new();
         let chrome_dir = temp_dir.path.join("Chrome");
-        fs::create_dir_all(chrome_dir.join("Default")).expect("chrome profile dir should exist");
+        fs::create_dir_all(chrome_dir.join("Default/Extensions/uBlock"))
+            .expect("chrome extensions dir should exist");
         fs::write(
             chrome_dir.join("Default/Preferences"),
             "{\"theme\":\"dark\"}",
         )
         .expect("preferences file should exist");
-        fs::write(chrome_dir.join("SingletonLock"), "host-specific")
-            .expect("singleton lock should exist");
+        fs::write(
+            chrome_dir.join("Default/Extensions/uBlock/manifest.json"),
+            "{\"name\":\"uBlock\"}",
+        )
+        .expect("extension payload should exist");
 
         let (source_dir, original_hash) =
             load_bootstrap_chrome_profile(&chrome_dir.to_string_lossy());
         assert_eq!(source_dir, chrome_dir.to_string_lossy());
         assert!(!original_hash.is_empty());
 
-        fs::write(chrome_dir.join("SingletonLock"), "changed-host-specific")
-            .expect("singleton lock should update");
-        let (_, hash_with_transient_change) =
+        fs::write(
+            chrome_dir.join("Default/Extensions/uBlock/manifest.json"),
+            "{\"name\":\"uBlock Origin\"}",
+        )
+        .expect("extension payload should update");
+        let (_, hash_with_extension_change) =
             load_bootstrap_chrome_profile(&chrome_dir.to_string_lossy());
-        assert_eq!(hash_with_transient_change, original_hash);
+        assert_eq!(hash_with_extension_change, original_hash);
 
         fs::write(
             chrome_dir.join("Default/Preferences"),
@@ -2165,6 +2230,20 @@ mod tests {
         let (_, hash_with_real_change) =
             load_bootstrap_chrome_profile(&chrome_dir.to_string_lossy());
         assert_ne!(hash_with_real_change, original_hash);
+    }
+
+    #[test]
+    fn chrome_profile_sync_paths_include_profile_state_but_not_extensions_or_caches() {
+        let sync_paths = CHROME_PROFILE_SYNC_PATHS.iter().copied().collect::<HashSet<_>>();
+
+        assert!(sync_paths.contains("Local State"));
+        assert!(sync_paths.contains("Default/Preferences"));
+        assert!(sync_paths.contains("Default/Login Data"));
+        assert!(sync_paths.contains("Default/Cookies"));
+        assert!(!sync_paths.contains("Default/Extensions"));
+        assert!(!sync_paths.contains("component_crx_cache"));
+        assert!(!sync_paths.contains("extensions_crx_cache"));
+        assert!(!sync_paths.contains("screen_ai"));
     }
 
     #[test]
