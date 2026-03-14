@@ -8,10 +8,7 @@ import { createContext, useContext, useEffect, useState } from "react";
 import { invoke } from "../../lib/invoke";
 import type { ListedProject } from "../../lib/projects";
 import type { SnapshotTemplate } from "../../lib/templates";
-import {
-	createWorkspace as createWorkspaceCommand,
-	type Workspace,
-} from "../../lib/workspaces";
+import { createWorkspace as createWorkspaceCommand } from "../../lib/workspaces";
 import {
 	Dialog,
 	DialogContent,

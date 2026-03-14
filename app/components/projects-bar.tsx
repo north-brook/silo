@@ -337,8 +337,6 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 
 	const isStopping =
 		workspace.status === "STOPPING" || workspace.status === "SUSPENDING";
-	const isStarting =
-		workspace.status === "STAGING" || workspace.status === "PROVISIONING";
 	const optimisticStopping = stop.isPending || remove.isPending;
 	const optimisticStarting = start.isPending;
 	const isDisabled = optimisticStopping || isStopping;
