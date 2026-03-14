@@ -126,6 +126,25 @@ EOF
 apt-get update
 apt-get install -y google-chrome-stable
 
+ARCHITECTURE="$(dpkg --print-architecture)"
+UBUNTU_CODENAME="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME}")"
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod 0644 /etc/apt/keyrings/docker.gpg
+cat > /etc/apt/sources.list.d/docker.list <<EOF
+deb [arch=${ARCHITECTURE} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${UBUNTU_CODENAME} stable
+EOF
+apt-get update
+apt-get install -y \
+  containerd.io \
+  docker-buildx-plugin \
+  docker-ce \
+  docker-ce-cli \
+  docker-compose-plugin
+systemctl enable containerd.service docker.service
+systemctl start containerd.service docker.service
+timeout 60 bash -lc 'until docker info >/dev/null 2>&1; do sleep 1; done'
+
 serial_log "Installing selkies-gstreamer runtime dependencies"
 
 apt-get install -y \
@@ -165,6 +184,7 @@ if ! id -u "${DEVELOPER_USER}" >/dev/null 2>&1; then
 fi
 
 usermod -aG sudo "${DEVELOPER_USER}"
+usermod -aG docker "${DEVELOPER_USER}"
 install -d -m 0750 -o "${DEVELOPER_USER}" -g "${DEVELOPER_USER}" "${DEVELOPER_HOME}"
 install -d -m 0750 /etc/sudoers.d
 cat > /etc/sudoers.d/silo <<EOF
@@ -283,7 +303,7 @@ fi
 
 export PATH="${DEVELOPER_HOME}/.local/bin:${PATH}"
 
-for command_name in bun cargo claude codex corepack direnv gh google-chrome just node npm npx pnpm rustc shellcheck yarn zig zmx; do
+for command_name in bun cargo claude codex corepack direnv docker gh google-chrome just node npm npx pnpm rustc shellcheck yarn zig zmx; do
   target_path="$(command -v "${command_name}" || true)"
   if [[ -n "${target_path}" ]]; then
     ln -sf "${target_path}" "/usr/local/bin/${command_name}"
@@ -324,6 +344,10 @@ npm --version
 yarn --version
 pnpm --version
 bun --version
+docker --version
+docker compose version
+systemctl is-enabled docker.service
+systemctl is-active docker.service
 command -v codex
 command -v claude
 cargo --version
@@ -345,7 +369,8 @@ cat /opt/selkies-version
 python3 -c 'import selkies_gstreamer'
 test -d /opt/gstreamer
 test -d /opt/gst-web
-su - "${DEVELOPER_USER}" -s /bin/bash -c 'for command_name in brew bun cargo claude codex curl fd git gh google-chrome jq node npm pnpm python3 rg rustc yarn yq zig zmx zsh; do command -v "${command_name}" >/dev/null; done'
+su - "${DEVELOPER_USER}" -s /bin/bash -c 'for command_name in brew bun cargo claude codex curl docker fd git gh google-chrome jq node npm pnpm python3 rg rustc yarn yq zig zmx zsh; do command -v "${command_name}" >/dev/null; done'
+su - "${DEVELOPER_USER}" -s /bin/bash -c 'docker version >/dev/null && docker info >/dev/null && docker compose version >/dev/null'
 su - "${DEVELOPER_USER}" -s /bin/bash -c 'test -f /opt/selkies-version && python3 -c "import selkies_gstreamer"'
 su - "${DEVELOPER_USER}" -s /bin/bash -c '
   prefix="$(brew --prefix)"

@@ -52,7 +52,7 @@ Published images are shared by default with `allAuthenticatedUsers`, so they can
 The binary will:
 
 - create a temporary Ubuntu 24.04 builder VM
-- provision the shared toolchain, including Rust
+- provision the shared toolchain, including Rust and Docker Engine
 - create a new versioned image in the target family
 - grant `roles/compute.imageUser` on the image to `allAuthenticatedUsers` plus any additional configured IAM members
 - delete the builder VM unless `--keep-builder-on-failure` is set
