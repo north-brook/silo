@@ -6,10 +6,10 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { type ReactNode, Suspense, useEffect, useRef, useState } from "react";
 import { invoke } from "../../../lib/invoke";
 import type { Workspace } from "../../../lib/workspaces";
-import { Loader } from "../../components/loader";
-import { ChromeIcon } from "../../icons/chrome";
-import { GCloudIcon } from "../../icons/gcloud";
-import { SiloIcon } from "../../icons/silo";
+import { Loader } from "../../../components/loader";
+import { ChromeIcon } from "../../../components/icons/chrome";
+import { GCloudIcon } from "../../../components/icons/gcloud";
+import { SiloIcon } from "../../../components/icons/silo";
 
 interface Step {
 	label: string;
@@ -35,16 +35,12 @@ function useSavingSteps(status: string, deleted: boolean): Step[] {
 	}, [isStopped]);
 
 	// 1. Syncing Chrome profile — active until VM starts stopping
-	const chromeState: Step["state"] = wasStopping || isStopped
-		? "done"
-		: "active";
+	const chromeState: Step["state"] =
+		wasStopping || isStopped ? "done" : "active";
 
 	// 2. Stopping virtual machine — active while stopping, done once stopped
-	const stopState: Step["state"] = isStopped || wasStopped
-		? "done"
-		: isStopping
-			? "active"
-			: "pending";
+	const stopState: Step["state"] =
+		isStopped || wasStopped ? "done" : isStopping ? "active" : "pending";
 
 	// 3. Snapshotting disk — active once stopped, done when VM is deleted
 	const snapshotState: Step["state"] = deleted
@@ -61,17 +57,35 @@ function useSavingSteps(status: string, deleted: boolean): Step[] {
 			: "pending";
 
 	return [
-		{ label: "Syncing Chrome profile", icon: <ChromeIcon height={ICON_SIZE} />, state: chromeState },
-		{ label: "Stopping virtual machine", icon: <GCloudIcon height={ICON_SIZE} />, state: stopState },
-		{ label: "Snapshotting disk", icon: <HardDrive size={ICON_SIZE} />, state: snapshotState },
-		{ label: "Cleaning up", icon: <GCloudIcon height={ICON_SIZE} />, state: cleanupState },
+		{
+			label: "Syncing Chrome profile",
+			icon: <ChromeIcon height={ICON_SIZE} />,
+			state: chromeState,
+		},
+		{
+			label: "Stopping virtual machine",
+			icon: <GCloudIcon height={ICON_SIZE} />,
+			state: stopState,
+		},
+		{
+			label: "Snapshotting disk",
+			icon: <HardDrive size={ICON_SIZE} />,
+			state: snapshotState,
+		},
+		{
+			label: "Cleaning up",
+			icon: <GCloudIcon height={ICON_SIZE} />,
+			state: cleanupState,
+		},
 	];
 }
 
 function StepRow({ step }: { step: Step }) {
 	return (
 		<div className="flex items-center gap-2.5 text-[11px]">
-			<span className={`w-3 flex items-center justify-center shrink-0 ${step.state === "pending" ? "opacity-30" : ""}`}>
+			<span
+				className={`w-3 flex items-center justify-center shrink-0 ${step.state === "pending" ? "opacity-30" : ""}`}
+			>
 				{step.icon}
 			</span>
 			<span

@@ -6,9 +6,9 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import { invoke } from "../../lib/invoke";
 import type { Workspace } from "../../lib/workspaces";
-import { Loader } from "../components/loader";
-import { toast } from "../components/toaster";
-import { TopBar } from "../components/top-bar";
+import { Loader } from "../../components/loader";
+import { toast } from "../../components/toaster";
+import { TopBar } from "../../components/top-bar";
 
 interface TerminalSessionSummary {
 	name: string;

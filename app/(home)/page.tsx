@@ -8,7 +8,7 @@ import type { ListedProject } from "../../lib/projects";
 import { useNewWorkspace } from "../components/new-workspace";
 import { useOpenProject } from "../components/open-project";
 import { StatusIcons } from "../components/status-icons";
-import { SiloIcon } from "../icons/silo";
+import { SiloIcon } from "../../components/icons/silo";
 
 function Kbd({ children }: { children: React.ReactNode }) {
 	return (

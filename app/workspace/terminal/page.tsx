@@ -8,7 +8,7 @@ import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 import "@xterm/xterm/css/xterm.css";
 import { invoke } from "../../../lib/invoke";
-import { Loader } from "../../components/loader";
+import { Loader } from "../../../components/loader";
 import { attachTerminalBindings } from "./bindings";
 
 const DELETE_BYTE = 0x7f;

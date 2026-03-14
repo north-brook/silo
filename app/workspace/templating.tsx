@@ -5,14 +5,14 @@ import { Check, Laptop, Terminal } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { type ReactNode, useEffect, useState } from "react";
 import { invoke } from "../../lib/invoke";
-import { Loader } from "../components/loader";
-import { toast } from "../components/toaster";
-import { ChromeIcon } from "../icons/chrome";
-import { ClaudeIcon } from "../icons/claude";
-import { CodexIcon } from "../icons/codex";
-import { GCloudIcon } from "../icons/gcloud";
-import { GHIcon } from "../icons/gh";
-import { SiloIcon } from "../icons/silo";
+import { Loader } from "../../components/loader";
+import { toast } from "../../components/toaster";
+import { ChromeIcon } from "../../components/icons/chrome";
+import { ClaudeIcon } from "../../components/icons/claude";
+import { CodexIcon } from "../../components/icons/codex";
+import { GCloudIcon } from "../../components/icons/gcloud";
+import { GHIcon } from "../../components/icons/gh";
+import { SiloIcon } from "../../components/icons/silo";
 
 interface Step {
 	label: string;
@@ -29,8 +29,7 @@ function useProvisioningSteps(
 	const [configIndex, setConfigIndex] = useState(-1);
 
 	const isRunning = status === "RUNNING";
-	const isProvisioning =
-		status === "STAGING" || status === "PROVISIONING";
+	const isProvisioning = status === "STAGING" || status === "PROVISIONING";
 
 	// VM-derived step states
 	const vmProvisionState: Step["state"] = isRunning
@@ -45,10 +44,26 @@ function useProvisioningSteps(
 			: "pending";
 
 	const configSteps = [
-		{ label: "Configuring git", icon: <GHIcon height={ICON_SIZE} />, delay: 2_000 },
-		{ label: "Configuring codex", icon: <CodexIcon height={ICON_SIZE} />, delay: 2_000 },
-		{ label: "Configuring claude code", icon: <ClaudeIcon height={ICON_SIZE} />, delay: 2_000 },
-		{ label: "Configuring chrome", icon: <ChromeIcon height={ICON_SIZE} />, delay: 30_000 },
+		{
+			label: "Configuring git",
+			icon: <GHIcon height={ICON_SIZE} />,
+			delay: 2_000,
+		},
+		{
+			label: "Configuring codex",
+			icon: <CodexIcon height={ICON_SIZE} />,
+			delay: 2_000,
+		},
+		{
+			label: "Configuring claude code",
+			icon: <ClaudeIcon height={ICON_SIZE} />,
+			delay: 2_000,
+		},
+		{
+			label: "Configuring chrome",
+			icon: <ChromeIcon height={ICON_SIZE} />,
+			delay: 30_000,
+		},
 	];
 
 	// Start config timers once VM is running
@@ -77,8 +92,16 @@ function useProvisioningSteps(
 			: "pending";
 
 	const steps: Step[] = [
-		{ label: "Provisioning virtual machine", icon: <GCloudIcon height={ICON_SIZE} />, state: vmProvisionState },
-		{ label: "Starting virtual machine", icon: <GCloudIcon height={ICON_SIZE} />, state: vmStartState },
+		{
+			label: "Provisioning virtual machine",
+			icon: <GCloudIcon height={ICON_SIZE} />,
+			state: vmProvisionState,
+		},
+		{
+			label: "Starting virtual machine",
+			icon: <GCloudIcon height={ICON_SIZE} />,
+			state: vmStartState,
+		},
 		...configSteps.map(({ label, icon }, i) => {
 			let state: Step["state"] = ready ? "done" : "pending";
 			if (!ready) {
@@ -87,7 +110,11 @@ function useProvisioningSteps(
 			}
 			return { label, icon, state };
 		}),
-		{ label: "Configuring secure access", icon: <GCloudIcon height={ICON_SIZE} />, state: secureAccessState },
+		{
+			label: "Configuring secure access",
+			icon: <GCloudIcon height={ICON_SIZE} />,
+			state: secureAccessState,
+		},
 	];
 
 	const allDone = ready;
@@ -98,7 +125,9 @@ function useProvisioningSteps(
 function StepRow({ step }: { step: Step }) {
 	return (
 		<div className="flex items-center gap-2.5 text-[11px]">
-			<span className={`w-3 flex items-center justify-center shrink-0 ${step.state === "pending" ? "opacity-30" : ""}`}>
+			<span
+				className={`w-3 flex items-center justify-center shrink-0 ${step.state === "pending" ? "opacity-30" : ""}`}
+			>
 				{step.icon}
 			</span>
 			<span
@@ -153,7 +182,11 @@ export function TemplatingWorkspace({
 			);
 		},
 		onError: (error) => {
-			toast({ variant: "error", title: "Failed to create terminal", description: error.message });
+			toast({
+				variant: "error",
+				title: "Failed to create terminal",
+				description: error.message,
+			});
 		},
 	});
 

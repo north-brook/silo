@@ -5,11 +5,15 @@ import { ArrowUp, ChevronsUpDown, Laptop, Terminal } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "../../lib/invoke";
-import { Popover, PopoverContent, PopoverTrigger } from "../components/popover";
-import { Loader } from "../components/loader";
-import { toast } from "../components/toaster";
-import { ClaudeIcon } from "../icons/claude";
-import { CodexIcon } from "../icons/codex";
+import {
+	Popover,
+	PopoverContent,
+	PopoverTrigger,
+} from "../../components/popover";
+import { Loader } from "../../components/loader";
+import { toast } from "../../components/toaster";
+import { ClaudeIcon } from "../../components/icons/claude";
+import { CodexIcon } from "../../components/icons/codex";
 
 type Provider = {
 	id: "codex" | "claude";
@@ -86,7 +90,11 @@ export function PromptWorkspace({
 			);
 		},
 		onError: (error) => {
-			toast({ variant: "error", title: "Failed to create terminal", description: error.message });
+			toast({
+				variant: "error",
+				title: "Failed to create terminal",
+				description: error.message,
+			});
 		},
 	});
 
@@ -175,7 +183,9 @@ export function PromptWorkspace({
 				) : (
 					<div className="flex items-center gap-2 mt-3 px-2 py-1 text-[11px] text-text-muted">
 						<Loader className="text-text-muted" />
-						<span>{isRunning ? "Waiting for SSH..." : statusMessage(status)}</span>
+						<span>
+							{isRunning ? "Waiting for SSH..." : statusMessage(status)}
+						</span>
 					</div>
 				)}
 			</div>
