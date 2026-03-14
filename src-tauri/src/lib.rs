@@ -6,6 +6,7 @@ mod gcloud;
 mod git;
 mod logging;
 mod projects;
+mod prompts;
 mod river_names;
 mod system;
 mod templates;
@@ -51,6 +52,13 @@ pub fn run() {
             git::git_configured,
             git::git_username,
             git::git_project_branches,
+            git::git_diff,
+            git::git_pr_status,
+            git::git_pr_observe,
+            git::git_tree_dirty,
+            git::git_push,
+            git::git_create_pr,
+            git::git_merge_pr,
             gcloud::gcloud_authenticate,
             gcloud::gcloud_configure,
             gcloud::gcloud_installed,
