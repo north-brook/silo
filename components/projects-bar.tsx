@@ -6,6 +6,7 @@ import {
 	EllipsisVertical,
 	FolderOpen,
 	PanelLeft,
+	Pause,
 	Play,
 	Plus,
 	Save,
@@ -332,6 +333,8 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 	const isRunning = workspace.status === "RUNNING";
 	const isStopped =
 		workspace.status === "TERMINATED" || workspace.status === "STOPPED";
+	const isSuspended = workspace.status === "SUSPENDED";
+	const isSuspending = workspace.status === "SUSPENDING";
 	const isTemplate = isTemplateWorkspace(workspace);
 
 	const start = useMutation({
@@ -365,6 +368,46 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 			toast({
 				variant: "error",
 				title: "Failed to stop",
+				description: error.message,
+			});
+		},
+	});
+
+	const suspend = useMutation({
+		mutationFn: () =>
+			invoke("workspaces_suspend_workspace", { workspace: workspace.name }),
+		onSuccess: () => {
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_list_workspaces"],
+			});
+			toast({ variant: "success", title: "Workspace suspended" });
+		},
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to suspend",
+				description: error.message,
+			});
+		},
+	});
+
+	const resume = useMutation({
+		mutationFn: () =>
+			invoke("workspaces_resume_workspace", { workspace: workspace.name }),
+		onMutate: () => {
+			router.push(
+				`/workspace/resuming?project=${encodeURIComponent(workspace.project ?? "")}&workspace=${encodeURIComponent(workspace.name)}`,
+			);
+		},
+		onSuccess: () => {
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_list_workspaces"],
+			});
+		},
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to resume",
 				description: error.message,
 			});
 		},
@@ -434,11 +477,11 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 		},
 	});
 
-	const isStopping =
-		workspace.status === "STOPPING" || workspace.status === "SUSPENDING";
+	const isStopping = workspace.status === "STOPPING";
 	const optimisticStopping = stop.isPending || remove.isPending;
+	const optimisticSuspending = suspend.isPending;
 	const optimisticStarting = start.isPending;
-	const isDisabled = optimisticStopping || isStopping;
+	const isDisabled = optimisticStopping || optimisticSuspending || isStopping || isSuspending;
 	const [menuOpen, setMenuOpen] = useState(false);
 
 	const navigate = () =>
@@ -451,11 +494,21 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 		<div
 			role="button"
 			tabIndex={0}
-			onClick={navigate}
+			onClick={() => {
+				if (isSuspended && !isTemplate) {
+					resume.mutate();
+				} else {
+					navigate();
+				}
+			}}
 			onKeyDown={(e) => {
 				if (e.key === "Enter" || e.key === " ") {
 					e.preventDefault();
-					navigate();
+					if (isSuspended && !isTemplate) {
+						resume.mutate();
+					} else {
+						navigate();
+					}
 				}
 			}}
 			className={`group flex items-center w-full pl-5 pr-3 py-2 text-xs transition-colors cursor-pointer ${
@@ -473,6 +526,7 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 						isTemplate,
 						optimisticStarting,
 						optimisticStopping,
+						optimisticSuspending,
 					}}
 				/>
 				<span className={`truncate ${isDisabled ? "opacity-30" : ""}`}>
@@ -485,7 +539,7 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 						type="button"
 						onClick={(e) => e.stopPropagation()}
 						className={`group/action shrink-0 ml-auto p-1 -mr-1 w-5 h-5 flex items-center justify-center text-text-placeholder hover:text-text-bright transition-opacity ${
-							isRunning && !isTemplate && (workspace.working || workspace.unread)
+							(isRunning && !isTemplate && (workspace.working || workspace.unread)) || (isSuspended && !isTemplate)
 								? ""
 								: "opacity-0 group-hover:opacity-100"
 						}`}
@@ -495,6 +549,11 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 						) : isRunning && !isTemplate && workspace.unread ? (
 							<>
 								<span className="block w-2 h-2 rounded-full bg-blue-400 group-hover/action:hidden" />
+								<EllipsisVertical size={12} className="hidden group-hover/action:block" />
+							</>
+						) : isSuspended && !isTemplate ? (
+							<>
+								<span className="block w-2 h-2 rounded-full bg-yellow-400 group-hover/action:hidden" />
 								<EllipsisVertical size={12} className="hidden group-hover/action:block" />
 							</>
 						) : (
@@ -551,6 +610,34 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 									>
 										<Play size={12} />
 										Start
+									</button>
+								)}
+								{isSuspended && (
+									<button
+										type="button"
+										onClick={(e) => {
+											e.stopPropagation();
+											setMenuOpen(false);
+											resume.mutate();
+										}}
+										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+									>
+										<Play size={12} />
+										Resume
+									</button>
+								)}
+								{isRunning && (
+									<button
+										type="button"
+										onClick={(e) => {
+											e.stopPropagation();
+											setMenuOpen(false);
+											suspend.mutate();
+										}}
+										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+									>
+										<Pause size={12} />
+										Suspend
 									</button>
 								)}
 								{isRunning && (
