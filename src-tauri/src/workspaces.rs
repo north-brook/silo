@@ -346,40 +346,6 @@ pub async fn workspaces_delete_workspace(workspace: String) -> Result<(), String
     Ok(())
 }
 
-#[tauri::command]
-pub async fn workspaces_update_workspace_branch(
-    workspace: String,
-    branch: String,
-) -> Result<(), String> {
-    log::info!("updating branch metadata for workspace {workspace}");
-    let lookup = find_workspace(&workspace).await?;
-    if lookup.workspace.is_template() {
-        return Err(format!(
-            "template workspace {} does not have a branch",
-            workspace
-        ));
-    }
-
-    update_workspace_metadata_in_lookup(lookup, "branch", &branch).await
-}
-
-#[tauri::command]
-pub async fn workspaces_update_workspace_target_branch(
-    workspace: String,
-    target_branch: String,
-) -> Result<(), String> {
-    log::info!("updating target branch metadata for workspace {workspace}");
-    let lookup = find_workspace(&workspace).await?;
-    if lookup.workspace.is_template() {
-        return Err(format!(
-            "template workspace {} does not have a target branch",
-            workspace
-        ));
-    }
-
-    update_workspace_metadata_in_lookup(lookup, "target_branch", &target_branch).await
-}
-
 pub(crate) async fn set_workspace_label(
     workspace: &str,
     label: &str,
@@ -389,7 +355,6 @@ pub(crate) async fn set_workspace_label(
     update_workspace_label_in_lookup(lookup, label, value).await
 }
 
-#[allow(dead_code)]
 pub(crate) async fn set_workspace_metadata(
     workspace: &str,
     key: &str,
