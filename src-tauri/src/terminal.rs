@@ -291,6 +291,7 @@ pub async fn terminal_create_terminal(workspace: String) -> Result<TerminalCreat
         &lookup,
         mutate_sessions(
             lookup.workspace.sessions(),
+            lookup.workspace.last_working(),
             SessionMutation::Upsert(session.clone()),
         ),
     )
@@ -341,6 +342,7 @@ pub async fn terminal_attach_terminal(
             &lookup,
             mutate_sessions(
                 lookup.workspace.sessions(),
+                lookup.workspace.last_working(),
                 SessionMutation::Upsert(session),
             ),
         )
@@ -419,6 +421,7 @@ pub async fn terminal_run_terminal(
         &lookup,
         mutate_sessions(
             lookup.workspace.sessions(),
+            lookup.workspace.last_working(),
             SessionMutation::Upsert(session.clone()),
         ),
     )
@@ -498,6 +501,7 @@ pub async fn terminal_kill_terminal(
         &lookup,
         mutate_sessions(
             lookup.workspace.sessions(),
+            lookup.workspace.last_working(),
             SessionMutation::Remove(&attachment_id),
         ),
     )
@@ -525,6 +529,7 @@ pub async fn terminal_read_terminal(
         &lookup,
         mutate_sessions(
             lookup.workspace.sessions(),
+            lookup.workspace.last_working(),
             SessionMutation::MarkRead(&attachment_id),
         ),
     )
@@ -2439,10 +2444,12 @@ struct WorkspaceTerminalMetadata {
     unread: bool,
     working: Option<bool>,
     last_active: String,
+    last_working: Option<String>,
 }
 
 fn mutate_sessions(
     current_sessions: &[WorkspaceSession],
+    current_last_working: Option<&str>,
     mutation: SessionMutation<'_>,
 ) -> WorkspaceTerminalMetadata {
     let mut sessions = current_sessions.to_vec();
@@ -2472,14 +2479,21 @@ fn mutate_sessions(
         }
     }
     sort_workspace_sessions_oldest_to_newest(&mut sessions);
+    let now = current_rfc3339_timestamp();
+    let working = sessions
+        .iter()
+        .any(|session| session.working == Some(true))
+        .then_some(true);
     WorkspaceTerminalMetadata {
         unread: sessions.iter().any(|session| session.unread == Some(true)),
-        working: sessions
-            .iter()
-            .any(|session| session.working == Some(true))
-            .then_some(true),
+        working,
         sessions,
-        last_active: current_rfc3339_timestamp(),
+        last_active: now.clone(),
+        last_working: if working.is_some() {
+            Some(now)
+        } else {
+            current_last_working.map(str::to_string)
+        },
     }
 }
 
@@ -2497,16 +2511,16 @@ async fn write_workspace_terminal_metadata(
         "false"
     };
     let last_active = metadata.last_active.as_str();
-    workspaces::set_workspace_metadata_entries(
-        workspace,
-        &[
-            ("sessions", sessions_json.as_str()),
-            ("unread", unread),
-            ("working", working),
-            ("last_active", last_active),
-        ],
-    )
-    .await?;
+    let mut entries = vec![
+        ("sessions", sessions_json.as_str()),
+        ("unread", unread),
+        ("working", working),
+        ("last_active", last_active),
+    ];
+    if let Some(last_working) = metadata.last_working.as_deref() {
+        entries.push(("last_working", last_working));
+    }
+    workspaces::set_workspace_metadata_entries(workspace, &entries).await?;
 
     log::trace!(
         "updated terminal metadata for workspace {} sessions={} unread={} working={}",
@@ -2946,11 +2960,16 @@ mod tests {
                 working: Some(false),
                 unread: Some(true),
             }],
+            Some("2026-03-14T00:00:00Z"),
             SessionMutation::MarkRead("terminal-1"),
         );
 
         assert!(!metadata.unread);
         assert_eq!(metadata.working, None);
+        assert_eq!(
+            metadata.last_working.as_deref(),
+            Some("2026-03-14T00:00:00Z")
+        );
         assert_eq!(metadata.sessions[0].unread, Some(false));
     }
 
@@ -2964,11 +2983,44 @@ mod tests {
                 working: Some(true),
                 unread: Some(false),
             }],
+            Some("2026-03-14T00:00:00Z"),
             SessionMutation::Remove("terminal-1"),
         );
 
         assert!(metadata.sessions.is_empty());
         assert_eq!(metadata.working, None);
+        assert_eq!(
+            metadata.last_working.as_deref(),
+            Some("2026-03-14T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn mutate_sessions_updates_last_working_when_session_is_working() {
+        let metadata = mutate_sessions(
+            &[WorkspaceSession {
+                kind: "terminal".to_string(),
+                name: "codex".to_string(),
+                attachment_id: "terminal-1".to_string(),
+                working: Some(false),
+                unread: Some(false),
+            }],
+            Some("2026-03-14T00:00:00Z"),
+            SessionMutation::Upsert(WorkspaceSession {
+                kind: "terminal".to_string(),
+                name: "codex".to_string(),
+                attachment_id: "terminal-1".to_string(),
+                working: Some(true),
+                unread: Some(false),
+            }),
+        );
+
+        assert_eq!(metadata.working, Some(true));
+        assert!(metadata.last_working.is_some());
+        assert_ne!(
+            metadata.last_working.as_deref(),
+            Some("2026-03-14T00:00:00Z")
+        );
     }
 
     #[test]

@@ -48,6 +48,7 @@ struct WorkspaceBase {
     name: String,
     project: Option<String>,
     last_active: Option<String>,
+    last_working: Option<String>,
     created_at: String,
     status: String,
     zone: String,
@@ -96,6 +97,10 @@ impl Workspace {
 
     fn last_active(&self) -> Option<&str> {
         self.base().last_active.as_deref()
+    }
+
+    pub(crate) fn last_working(&self) -> Option<&str> {
+        self.base().last_working.as_deref()
     }
 
     pub(crate) fn name(&self) -> &str {
@@ -305,6 +310,29 @@ pub async fn workspaces_start_workspace(workspace: String) -> Result<(), String>
 }
 
 #[tauri::command]
+pub async fn workspaces_resume_workspace(workspace: String) -> Result<(), String> {
+    log::info!("resuming workspace {workspace}");
+    let lookup = find_workspace(&workspace).await?;
+
+    let result = run_gcloud(
+        &lookup.account,
+        &lookup.gcloud_project,
+        resume_workspace_args(&workspace, lookup.workspace.zone()),
+    )
+    .await?;
+
+    if !result.success {
+        return Err(gcloud_error("failed to resume workspace", &result.stderr));
+    }
+
+    update_workspace_label_in_lookup(lookup.clone(), "ready", "false").await?;
+    terminal::start_workspace_ssh_readiness(workspace.clone());
+
+    log::info!("workspace {} resume initiated", lookup.workspace.name());
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn workspaces_stop_workspace(workspace: String) -> Result<(), String> {
     log::info!("stopping workspace {workspace}");
     let lookup = find_workspace(&workspace).await?;
@@ -321,6 +349,26 @@ pub async fn workspaces_stop_workspace(workspace: String) -> Result<(), String> 
     }
 
     log::info!("workspace {} stop initiated", lookup.workspace.name());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn workspaces_suspend_workspace(workspace: String) -> Result<(), String> {
+    log::info!("suspending workspace {workspace}");
+    let lookup = find_workspace(&workspace).await?;
+
+    let result = run_gcloud(
+        &lookup.account,
+        &lookup.gcloud_project,
+        suspend_workspace_args(&workspace, lookup.workspace.zone()),
+    )
+    .await?;
+
+    if !result.success {
+        return Err(gcloud_error("failed to suspend workspace", &result.stderr));
+    }
+
+    log::info!("workspace {} suspend initiated", lookup.workspace.name());
     Ok(())
 }
 
@@ -534,6 +582,7 @@ fn pending_workspace(
             name: name.to_string(),
             project: Some(sanitize_label_value(project_label)),
             last_active: None,
+            last_working: None,
             created_at,
             status: "PROVISIONING".to_string(),
             zone: zone.to_string(),
@@ -557,6 +606,7 @@ fn pending_template_workspace(name: &str, project_label: &str, zone: &str) -> Te
             name: name.to_string(),
             project: Some(sanitize_label_value(project_label)),
             last_active: None,
+            last_working: None,
             created_at,
             status: "PROVISIONING".to_string(),
             zone: zone.to_string(),
@@ -927,6 +977,28 @@ fn stop_workspace_args(workspace_name: &str, zone: &str) -> Vec<String> {
         "compute".to_string(),
         "instances".to_string(),
         "stop".to_string(),
+        workspace_name.to_string(),
+        format!("--zone={zone}"),
+        "--async".to_string(),
+    ]
+}
+
+fn suspend_workspace_args(workspace_name: &str, zone: &str) -> Vec<String> {
+    vec![
+        "compute".to_string(),
+        "instances".to_string(),
+        "suspend".to_string(),
+        workspace_name.to_string(),
+        format!("--zone={zone}"),
+        "--async".to_string(),
+    ]
+}
+
+fn resume_workspace_args(workspace_name: &str, zone: &str) -> Vec<String> {
+    vec![
+        "compute".to_string(),
+        "instances".to_string(),
+        "resume".to_string(),
         workspace_name.to_string(),
         format!("--zone={zone}"),
         "--async".to_string(),
@@ -1382,6 +1454,7 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         .and_then(Value::as_str)
         .map(str::to_owned);
     let last_active = metadata.get("last_active").cloned();
+    let last_working = metadata.get("last_working").cloned();
     let ready = labels
         .get("ready")
         .and_then(Value::as_str)
@@ -1393,6 +1466,7 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         name,
         project,
         last_active,
+        last_working,
         created_at,
         status,
         zone,
@@ -1848,6 +1922,7 @@ mod tests {
             name: name.to_string(),
             project: Some("demo".to_string()),
             last_active: last_active.map(str::to_string),
+            last_working: None,
             created_at: "2026-03-11T10:00:00Z".to_string(),
             status: "RUNNING".to_string(),
             zone: "us-east1-b".to_string(),
@@ -2223,6 +2298,40 @@ mod tests {
     }
 
     #[test]
+    fn suspend_workspace_args_run_async() {
+        let args = suspend_workspace_args("ws-demo-123", "us-east1-b");
+
+        assert_eq!(
+            args,
+            vec![
+                "compute".to_string(),
+                "instances".to_string(),
+                "suspend".to_string(),
+                "ws-demo-123".to_string(),
+                "--zone=us-east1-b".to_string(),
+                "--async".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resume_workspace_args_run_async() {
+        let args = resume_workspace_args("ws-demo-123", "us-east1-b");
+
+        assert_eq!(
+            args,
+            vec![
+                "compute".to_string(),
+                "instances".to_string(),
+                "resume".to_string(),
+                "ws-demo-123".to_string(),
+                "--zone=us-east1-b".to_string(),
+                "--async".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn create_template_snapshot_args_use_source_disk_and_zone() {
         let args =
             create_template_snapshot_args("demo-silo-template-123", "disk-1", "us-east1-b", "Demo");
@@ -2292,6 +2401,7 @@ mod tests {
                     { "key": "unread", "value": "true" },
                     { "key": "working", "value": "true" },
                     { "key": "last_active", "value": "2026-03-11T13:05:00Z" },
+                    { "key": "last_working", "value": "2026-03-11T13:04:30Z" },
                     { "key": "sessions", "value": "[{\"type\":\"terminal\",\"name\":\"codex\",\"attachment_id\":\"terminal-1\",\"working\":true,\"unread\":false}]" }
                 ]
             }
@@ -2311,6 +2421,10 @@ mod tests {
         assert_eq!(
             workspace.base.last_active.as_deref(),
             Some("2026-03-11T13:05:00Z")
+        );
+        assert_eq!(
+            workspace.base.last_working.as_deref(),
+            Some("2026-03-11T13:04:30Z")
         );
         assert_eq!(workspace.base.created_at, "2026-03-11T13:00:00.000-04:00");
         assert_eq!(workspace.base.zone, "us-east1-b");
@@ -2379,6 +2493,7 @@ mod tests {
         assert!(!workspace.unread);
         assert_eq!(workspace.working, None);
         assert_eq!(workspace.base.last_active, None);
+        assert_eq!(workspace.base.last_working, None);
     }
 
     #[test]
