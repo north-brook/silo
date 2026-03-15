@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use time::{format_description::well_known::Rfc3339, Duration as TimeDuration, OffsetDateTime};
 
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
@@ -23,6 +23,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const COMPLETION_DEBOUNCE: Duration = Duration::from_millis(1500);
 const FIFO_MODE: u32 = 0o622;
 const LEGACY_METADATA_KEY: &str = "silo_state";
+const AUTO_SUSPEND_IDLE_THRESHOLD: TimeDuration = TimeDuration::hours(4);
 
 fn main() {
     if let Err(error) = run() {
@@ -60,6 +61,7 @@ fn run_daemon(args: &[String]) -> Result<(), String> {
 
     let mut state = load_state(&runtime.state_file).unwrap_or_default();
     let mut last_published = None::<String>;
+    let mut suspend_requested_for_activity = None::<String>;
     let metadata = ComputeMetadataClient::new(
         options.project.clone(),
         options.zone.clone(),
@@ -85,6 +87,20 @@ fn run_daemon(args: &[String]) -> Result<(), String> {
                 eprintln!("workspace-observer: failed to publish metadata: {error}");
             } else {
                 last_published = Some(published_json);
+            }
+        }
+
+        let effective_activity = effective_activity_marker(&state);
+        let should_suspend =
+            should_suspend_for_inactivity_at(&state, OffsetDateTime::now_utc(), published.working);
+        if !should_suspend {
+            suspend_requested_for_activity = None;
+        } else if suspend_requested_for_activity.as_deref() != effective_activity.as_deref() {
+            match metadata.suspend() {
+                Ok(()) => suspend_requested_for_activity = effective_activity,
+                Err(error) => {
+                    eprintln!("workspace-observer: failed to suspend instance: {error}");
+                }
             }
         }
 
@@ -305,6 +321,8 @@ struct ObserverState {
     #[serde(default)]
     last_active: Option<String>,
     #[serde(default)]
+    last_working: Option<String>,
+    #[serde(default)]
     sessions: BTreeMap<String, SessionState>,
 }
 
@@ -328,6 +346,8 @@ struct PublishedState {
     unread: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_active: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_working: Option<String>,
     sessions: Vec<PublishedSession>,
 }
 
@@ -413,11 +433,14 @@ fn apply_event(state: &mut ObserverState, event: ObserverEvent) {
             }
         }
         ObserverEvent::AssistantPromptSubmitted { session, provider } => {
-            let session_state = state.sessions.entry(session).or_default();
-            session_state.active_command = Some(provider.command_name().to_string());
-            session_state.assistant_provider = Some(provider);
-            session_state.working = true;
-            session_state.unread = false;
+            {
+                let session_state = state.sessions.entry(session).or_default();
+                session_state.active_command = Some(provider.command_name().to_string());
+                session_state.assistant_provider = Some(provider);
+                session_state.working = true;
+                session_state.unread = false;
+            }
+            touch_last_working(state);
         }
         ObserverEvent::AssistantTurnCompleted { session, provider } => {
             let session_state = state.sessions.entry(session).or_default();
@@ -499,6 +522,7 @@ fn build_published_state(state: &ObserverState, live_sessions: &[ZmxSession]) ->
         working,
         unread,
         last_active: state.last_active.clone(),
+        last_working: state.last_working.clone(),
         sessions,
     }
 }
@@ -507,10 +531,50 @@ fn touch_last_active(state: &mut ObserverState) {
     state.last_active = Some(current_timestamp());
 }
 
+fn touch_last_working(state: &mut ObserverState) {
+    state.last_working = Some(current_timestamp());
+}
+
 fn current_timestamp() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
+
+fn effective_activity_at(state: &ObserverState) -> Option<OffsetDateTime> {
+    [state.last_active.as_deref(), state.last_working.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter_map(parse_timestamp)
+        .max()
+}
+
+fn effective_activity_marker(state: &ObserverState) -> Option<String> {
+    effective_activity_at(state).and_then(format_timestamp)
+}
+
+fn should_suspend_for_inactivity_at(
+    state: &ObserverState,
+    now: OffsetDateTime,
+    working: bool,
+) -> bool {
+    if working {
+        return false;
+    }
+
+    let Some(effective_activity_at) = effective_activity_at(state) else {
+        return false;
+    };
+
+    now - effective_activity_at >= AUTO_SUSPEND_IDLE_THRESHOLD
+}
+
+fn parse_timestamp(value: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(value, &Rfc3339).ok()
+}
+
+fn format_timestamp(timestamp: OffsetDateTime) -> Option<String> {
+    timestamp.format(&Rfc3339).ok()
 }
 
 fn load_state(path: &Path) -> Result<ObserverState, String> {
@@ -805,6 +869,27 @@ impl ComputeMetadataClient {
         Err(format!("setMetadata failed with status {status}: {body}"))
     }
 
+    fn suspend(&self) -> Result<(), String> {
+        let token = self.fetch_access_token()?;
+        let url = format!(
+            "https://compute.googleapis.com/compute/v1/projects/{}/zones/{}/instances/{}/suspend",
+            self.project, self.zone, self.instance
+        );
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(token)
+            .send()
+            .map_err(|error| format!("failed to call suspend: {error}"))?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        Err(format!("suspend failed with status {status}: {body}"))
+    }
+
     fn fetch_access_token(&self) -> Result<String, String> {
         let response = self
             .client
@@ -900,6 +985,11 @@ fn flat_metadata_items(
         Some(bool_metadata_value(published.working)),
     );
     update_metadata_item(&mut items, "last_active", published.last_active.as_deref());
+    update_metadata_item(
+        &mut items,
+        "last_working",
+        published.last_working.as_deref(),
+    );
     let sessions = serde_json::to_string(&published.sessions)
         .map_err(|error| format!("failed to serialize session metadata: {error}"))?;
     update_metadata_item(&mut items, "sessions", Some(&sessions));
@@ -1204,11 +1294,13 @@ fn collect_submitted_assistant_prompts(buffer: &mut String, input: &str) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::{
-        bool_metadata_value, collect_submitted_assistant_prompts, flat_metadata_items,
-        normalize_assistant_input, parse_zmx_session, resolve_assistant_provider,
-        update_metadata_item, AssistantProvider, PublishedSession, PublishedState,
+        bool_metadata_value, collect_submitted_assistant_prompts, effective_activity_at,
+        flat_metadata_items, normalize_assistant_input, parse_timestamp, parse_zmx_session,
+        resolve_assistant_provider, should_suspend_for_inactivity_at, update_metadata_item,
+        AssistantProvider, ObserverEvent, ObserverState, PublishedSession, PublishedState,
     };
     use std::collections::BTreeMap;
+    use time::Duration as TimeDuration;
 
     #[test]
     fn assistant_input_strips_escape_sequences() {
@@ -1259,6 +1351,7 @@ mod tests {
             working: false,
             unread: true,
             last_active: Some("2026-03-14T00:00:00Z".to_string()),
+            last_working: Some("2026-03-14T01:00:00Z".to_string()),
             sessions: vec![PublishedSession {
                 kind: "terminal",
                 name: "codex".to_string(),
@@ -1279,6 +1372,10 @@ mod tests {
         assert_eq!(
             items.get("last_active").map(String::as_str),
             Some("2026-03-14T00:00:00Z")
+        );
+        assert_eq!(
+            items.get("last_working").map(String::as_str),
+            Some("2026-03-14T01:00:00Z")
         );
         assert_eq!(items.get("target_branch").map(String::as_str), Some("main"));
         assert_eq!(
@@ -1308,5 +1405,85 @@ mod tests {
         );
         assert_eq!(bool_metadata_value(true), "true");
         assert_eq!(bool_metadata_value(false), "false");
+    }
+
+    #[test]
+    fn assistant_prompt_submitted_updates_last_working() {
+        let mut state = ObserverState::default();
+
+        super::apply_event(
+            &mut state,
+            ObserverEvent::AssistantPromptSubmitted {
+                session: "terminal-1".to_string(),
+                provider: AssistantProvider::Codex,
+            },
+        );
+
+        assert!(state.last_active.is_some());
+        assert!(state.last_working.is_some());
+        assert_eq!(
+            state
+                .sessions
+                .get("terminal-1")
+                .and_then(|session| session.working.then_some(true)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn effective_activity_prefers_most_recent_timestamp() {
+        let state = ObserverState {
+            last_active: Some("2026-03-14T00:00:00Z".to_string()),
+            last_working: Some("2026-03-14T03:00:00Z".to_string()),
+            ..ObserverState::default()
+        };
+
+        assert_eq!(
+            effective_activity_at(&state),
+            parse_timestamp("2026-03-14T03:00:00Z")
+        );
+    }
+
+    #[test]
+    fn effective_activity_falls_back_to_last_active() {
+        let state = ObserverState {
+            last_active: Some("2026-03-14T00:00:00Z".to_string()),
+            ..ObserverState::default()
+        };
+
+        assert_eq!(
+            effective_activity_at(&state),
+            parse_timestamp("2026-03-14T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn idle_suspend_requires_four_hours_of_inactivity() {
+        let last_active = parse_timestamp("2026-03-14T00:00:00Z").expect("timestamp should parse");
+        let now = last_active + TimeDuration::hours(4);
+        let state = ObserverState {
+            last_active: Some("2026-03-14T00:00:00Z".to_string()),
+            last_working: Some("2026-03-13T23:00:00Z".to_string()),
+            ..ObserverState::default()
+        };
+
+        assert!(should_suspend_for_inactivity_at(&state, now, false));
+        assert!(!should_suspend_for_inactivity_at(
+            &state,
+            now - TimeDuration::seconds(1),
+            false
+        ));
+    }
+
+    #[test]
+    fn idle_suspend_does_not_fire_while_working() {
+        let state = ObserverState {
+            last_active: Some("2026-03-14T00:00:00Z".to_string()),
+            last_working: Some("2026-03-14T00:00:00Z".to_string()),
+            ..ObserverState::default()
+        };
+        let now = parse_timestamp("2026-03-14T05:00:00Z").expect("timestamp should parse");
+
+        assert!(!should_suspend_for_inactivity_at(&state, now, true));
     }
 }
