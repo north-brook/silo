@@ -19,13 +19,18 @@ Safety:
 
 Push the branch to origin without force pushing.
 
+Pull request:
+- Check whether an open GitHub pull request already exists for this branch.
+- If an open pull request exists, review its title and body against the current branch diff and update them if they are stale, vague, or no longer match the change.
+- Keep PR updates focused on making the existing pull request accurate and reviewer-friendly. Do not open a new pull request from this flow.
+
 Constraints:
-- Do not create or modify a pull request.
 - Do not merge anything.
+- Do not create a new pull request.
 - Do not use force push or force-with-lease.
 - If there is nothing to commit or nothing new to push, explain that clearly instead of inventing work.
 
-When finished, print a concise summary of the commits you created, what you pushed, and any validation you ran."#,
+When finished, print a concise summary of the commits you created, what you pushed, any validation you ran, and any pull request updates you made."#,
         branch = branch,
         target_branch = target_branch,
     )
