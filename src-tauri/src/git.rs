@@ -1,13 +1,17 @@
 use crate::config::{ConfigStore, ProjectConfig};
 use crate::prompts;
 use crate::terminal;
+use crate::terminal::TerminalManager;
 use crate::workspaces::{self, WorkspaceLookup};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Instant;
+use tauri::State;
 use toml::Value as TomlValue;
 
 const MAX_CHECK_LOG_BYTES: usize = 16 * 1024;
@@ -367,13 +371,16 @@ pub async fn git_pr_observe(workspace: String) -> Result<Option<PullRequestObser
 }
 
 #[tauri::command]
-pub async fn git_push(workspace: String) -> Result<GitTerminalResult, String> {
+pub async fn git_push(
+    state: State<'_, TerminalManager>,
+    workspace: String,
+) -> Result<GitTerminalResult, String> {
     log::info!("pushing workspace branch for {workspace}");
     let context = branch_workspace_context(&workspace).await?;
     let branch = current_workspace_branch(&context).await?;
     let prompt = prompts::git_push_prompt(&branch, &context.target_branch);
-    let command = format!("codex -c -- {}", shell_quote(&prompt));
-    let terminal = terminal::start_terminal_command(&workspace, &command).await?;
+    let command = codex_prompt_command(&prompt);
+    let terminal = terminal::start_terminal_command(state.inner(), &workspace, &command).await?;
 
     Ok(GitTerminalResult { terminal })
 }
@@ -401,13 +408,16 @@ pub async fn git_merge_pr(workspace: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn git_create_pr(workspace: String) -> Result<GitTerminalResult, String> {
+pub async fn git_create_pr(
+    state: State<'_, TerminalManager>,
+    workspace: String,
+) -> Result<GitTerminalResult, String> {
     log::info!("creating pull request for workspace {workspace}");
     let context = branch_workspace_context(&workspace).await?;
     let branch = current_workspace_branch(&context).await?;
     let prompt = prompts::git_create_pr_prompt(&branch, &context.target_branch);
-    let command = format!("codex -c -- {}", shell_quote(&prompt));
-    let terminal = terminal::start_terminal_command(&workspace, &command).await?;
+    let command = codex_prompt_command(&prompt);
+    let terminal = terminal::start_terminal_command(state.inner(), &workspace, &command).await?;
 
     Ok(GitTerminalResult { terminal })
 }
@@ -469,7 +479,7 @@ async fn run_workspace_command(
     context: &BranchWorkspaceContext,
     command: &str,
 ) -> Result<terminal::CommandResult, String> {
-    let remote_command = terminal::workspace_shell_command(command);
+    let remote_command = terminal::workspace_shell_command_with_credentials(command);
     terminal::run_remote_command(&context.lookup, &remote_command).await
 }
 
@@ -710,6 +720,14 @@ while IFS= read -r -d \"\" path; do\n\
   fi\n\
 done < <(git -c core.quotepath=false ls-files --others --exclude-standard -z)",
         target_branch = shell_quote(target_branch),
+    )
+}
+
+fn codex_prompt_command(prompt: &str) -> String {
+    let encoded_prompt = BASE64_STANDARD.encode(prompt);
+    format!(
+        "command codex -- \"$(printf %s {} | base64 --decode)\"",
+        shell_quote(&encoded_prompt)
     )
 }
 
@@ -1481,6 +1499,30 @@ index 1111111..2222222 100644\n\
         assert!(command.contains("git diff --quiet --ignore-submodules --"));
         assert!(command.contains("git diff --cached --quiet --ignore-submodules --"));
         assert!(command.contains("git ls-files --others --exclude-standard"));
+    }
+
+    #[test]
+    fn codex_prompt_command_encodes_multiline_prompt_on_one_line() {
+        let prompt = "what is this project?\ninclude 'quotes' too";
+        let command = codex_prompt_command(prompt);
+
+        assert!(command.starts_with("command codex -- \"$(printf %s '"));
+        assert!(command.contains("| base64 --decode)\""));
+        assert!(!command.contains("what is this project?"));
+        assert_eq!(command.lines().count(), 1);
+
+        let encoded = command
+            .split("printf %s '")
+            .nth(1)
+            .and_then(|tail| tail.split("' | base64 --decode").next())
+            .expect("command should embed a base64 prompt");
+        let decoded = String::from_utf8(
+            BASE64_STANDARD
+                .decode(encoded)
+                .expect("embedded prompt should decode"),
+        )
+        .expect("embedded prompt should be utf8");
+        assert_eq!(decoded, prompt);
     }
 
     #[test]

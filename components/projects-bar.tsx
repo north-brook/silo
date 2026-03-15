@@ -5,6 +5,7 @@ import {
 	Cpu,
 	EllipsisVertical,
 	FolderOpen,
+	PanelLeft,
 	Play,
 	Plus,
 	Save,
@@ -14,7 +15,14 @@ import {
 } from "lucide-react";
 import Image from "next/image";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
+import {
+	createContext,
+	Suspense,
+	useContext,
+	useEffect,
+	useState,
+	type ReactNode,
+} from "react";
 import { invoke } from "../lib/invoke";
 import type { ListedProject } from "../lib/projects";
 import type { SnapshotTemplate } from "../lib/templates";
@@ -32,6 +40,92 @@ import { toast } from "./toaster";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
 import { LogoIcon } from "./icons/logo";
 import { WorkspaceIndicator } from "./workspace-status";
+
+// ---------------------------------------------------------------------------
+// Context
+// ---------------------------------------------------------------------------
+
+interface ProjectsBarContextValue {
+	isOpen: boolean;
+	toggle: () => void;
+}
+
+const ProjectsBarContext = createContext<ProjectsBarContextValue>({
+	isOpen: true,
+	toggle: () => {},
+});
+
+export function useProjectsBar() {
+	return useContext(ProjectsBarContext);
+}
+
+// ---------------------------------------------------------------------------
+// Provider
+// ---------------------------------------------------------------------------
+
+function ProjectsBarProviderInner({ children }: { children: ReactNode }) {
+	const [isOpen, setIsOpen] = useState(true);
+
+	useEffect(() => {
+		const handler = (e: KeyboardEvent) => {
+			if (e.metaKey && !e.shiftKey && e.key === "b") {
+				e.preventDefault();
+				setIsOpen((o) => !o);
+			}
+		};
+		window.addEventListener("keydown", handler);
+		return () => window.removeEventListener("keydown", handler);
+	}, []);
+
+	return (
+		<ProjectsBarContext.Provider value={{ isOpen, toggle: () => setIsOpen((o) => !o) }}>
+			{children}
+		</ProjectsBarContext.Provider>
+	);
+}
+
+export function ProjectsBarProvider({ children }: { children: ReactNode }) {
+	return (
+		<Suspense fallback={children}>
+			<ProjectsBarProviderInner>{children}</ProjectsBarProviderInner>
+		</Suspense>
+	);
+}
+
+// ---------------------------------------------------------------------------
+// Toggle
+// ---------------------------------------------------------------------------
+
+export function ProjectsBarToggle() {
+	const { toggle } = useProjectsBar();
+
+	return (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<button
+					type="button"
+					onClick={toggle}
+					className="flex items-center px-1.5 py-0.5 rounded text-text-muted hover:bg-btn-hover hover:text-text-bright transition-colors"
+				>
+					<PanelLeft size={12} />
+				</button>
+			</TooltipTrigger>
+			<TooltipContent side="bottom">
+				<span className="flex items-center gap-1.5">
+					Toggle Projects Bar
+					<span className="flex items-center gap-0.5">
+						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+							⌘
+						</kbd>
+						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+							B
+						</kbd>
+					</span>
+				</span>
+			</TooltipContent>
+		</Tooltip>
+	);
+}
 
 function ProjectRow({
 	project,
@@ -524,6 +618,7 @@ function BarFooter() {
 }
 
 export function ProjectsBar() {
+	const { isOpen } = useProjectsBar();
 	const router = useRouter();
 	const pathname = usePathname();
 	const isHome = pathname === "/";
@@ -554,6 +649,7 @@ export function ProjectsBar() {
 	});
 	const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
+	if (!isOpen) return null;
 	if (!projects.data || projects.data.length === 0) return null;
 
 	const isExpanded = (name: string) => expanded[name] !== false;
@@ -562,7 +658,9 @@ export function ProjectsBar() {
 
 	return (
 		<aside className="w-48 shrink-0 border-r border-border-light bg-bg flex flex-col">
-			<div data-tauri-drag-region className="h-9 shrink-0" />
+			<div data-tauri-drag-region className="h-9 shrink-0 flex items-center justify-end pr-1.5">
+				<ProjectsBarToggle />
+			</div>
 			{/* biome-ignore lint/a11y/useSemanticElements: can't use <button> because it contains interactive children */}
 			<div
 				role="button"

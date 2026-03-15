@@ -10,7 +10,7 @@ export interface WorkspaceBase {
 	ready: boolean;
 }
 
-export interface WorkspaceProcess {
+export interface WorkspaceSession {
 	type: string;
 	name: string;
 	attachment_id: string;
@@ -23,7 +23,7 @@ export interface BranchWorkspace extends WorkspaceBase {
 	target_branch: string;
 	unread: boolean;
 	working: boolean | null;
-	processes: WorkspaceProcess[];
+	sessions: WorkspaceSession[];
 }
 
 export interface TemplateWorkspace extends WorkspaceBase {

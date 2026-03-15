@@ -1,15 +1,20 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, ChevronsUpDown, GitBranch, Save } from "lucide-react";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { Box, ChevronRight, ChevronsUpDown, GitBranch, PanelLeft, Save } from "lucide-react";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "../lib/invoke";
+import type { ListedProject } from "../lib/projects";
 import { isTemplateWorkspace, type Workspace } from "../lib/workspaces";
 import { GitToggle } from "./git-bar";
 import { Loader } from "./loader";
 import { Popover, PopoverContent, PopoverTrigger } from "./popover";
+import { useProjectsBar } from "./projects-bar";
 import { toast } from "./toaster";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
 
 export function TopBar({ workspace }: { workspace: Workspace }) {
 	if (isTemplateWorkspace(workspace)) {
@@ -19,9 +24,51 @@ export function TopBar({ workspace }: { workspace: Workspace }) {
 	return <BranchTopBar workspace={workspace} />;
 }
 
+function ProjectsBarReopenButton() {
+	const { isOpen, toggle } = useProjectsBar();
+
+	if (isOpen) return null;
+
+	return (
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<button
+					type="button"
+					onClick={toggle}
+					className="flex items-center px-1.5 py-0.5 mr-1.5 rounded text-text-muted hover:bg-btn-hover hover:text-text-bright transition-colors"
+				>
+					<PanelLeft size={12} />
+				</button>
+			</TooltipTrigger>
+			<TooltipContent side="bottom">
+				<span className="flex items-center gap-1.5">
+					Toggle Projects Bar
+					<span className="flex items-center gap-0.5">
+						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+							⌘
+						</kbd>
+						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+							B
+						</kbd>
+					</span>
+				</span>
+			</TooltipContent>
+		</Tooltip>
+	);
+}
+
 function TemplateTopBar({ workspace }: { workspace: Workspace }) {
+	const { isOpen: projectsBarOpen } = useProjectsBar();
 	const router = useRouter();
 	const queryClient = useQueryClient();
+
+	const projects = useQuery({
+		queryKey: ["projects_list_projects"],
+		queryFn: () => invoke<ListedProject[]>("projects_list_projects"),
+	});
+	const projectImage = projects.data?.find(
+		(p) => p.name === workspace.project,
+	)?.image;
 
 	const save = useMutation({
 		mutationFn: () =>
@@ -50,17 +97,31 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 
 	return (
 		<header className="h-9 w-full border-b border-border-light shrink-0 flex items-center relative">
-			<div className="relative flex items-center justify-between w-full px-3 h-full z-10">
-				<span className="text-[11px] text-text-muted">
-					<span className="text-text">{workspace.project}</span> template
-				</span>
+			<div className={`relative flex items-center justify-between w-full px-3 h-full z-10 ${!projectsBarOpen ? "pl-20" : ""}`}>
+				<div className="flex items-center gap-2 text-[11px] text-text-muted">
+					<ProjectsBarReopenButton />
+					{projectImage ? (
+						<Image
+							width={14}
+							height={14}
+							src={convertFileSrc(projectImage)}
+							alt={workspace.project ?? ""}
+							className="rounded object-cover shrink-0"
+						/>
+					) : (
+						<div className="w-3.5 h-3.5 rounded bg-border-light shrink-0" />
+					)}
+					<ChevronRight size={10} className="shrink-0 text-text-placeholder" />
+					<Box size={12} className="shrink-0 text-text-placeholder" />
+					<span className="text-text">Template</span>
+				</div>
 				<div data-tauri-drag-region className="h-full flex-1" />
 				{workspace.ready && (
 					<button
 						type="button"
 						disabled={save.isPending}
 						onClick={() => save.mutate()}
-						className="flex items-center gap-1.5 justify-center px-3 py-0.5 rounded text-[11px] font-medium bg-green-600 text-white transition-colors hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
+						className="flex items-center gap-1.5 justify-center px-2.5 py-1 rounded text-[11px] font-medium bg-green-600 text-white transition-colors hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
 					>
 						{save.isPending ? (
 							<Loader className="text-white" />
@@ -76,6 +137,7 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 }
 
 function BranchTopBar({ workspace }: { workspace: Workspace }) {
+	const { isOpen: projectsBarOpen } = useProjectsBar();
 	const queryClient = useQueryClient();
 	const branchWorkspace = isTemplateWorkspace(workspace) ? null : workspace;
 
@@ -84,6 +146,14 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 	const inputRef = useRef<HTMLInputElement>(null);
 
 	const [targetOpen, setTargetOpen] = useState(false);
+
+	const projects = useQuery({
+		queryKey: ["projects_list_projects"],
+		queryFn: () => invoke<ListedProject[]>("projects_list_projects"),
+	});
+	const projectImage = projects.data?.find(
+		(p) => p.name === workspace.project,
+	)?.image;
 
 	const branches = useQuery({
 		queryKey: ["git_project_branches", workspace.project],
@@ -167,8 +237,21 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 
 	return (
 		<header className="h-9 w-full border-b border-border-light shrink-0 flex items-center relative">
-			<div className="relative flex items-center justify-between w-full pl-3 pr-2 h-full z-10">
-				<div className="flex items-center gap-1.5 text-[11px] text-text-muted">
+			<div className={`relative flex items-center justify-between w-full pr-2 h-full z-10 ${!projectsBarOpen ? "pl-20" : "pl-3"}`}>
+				<div className="flex items-center gap-2 text-[11px] text-text-muted">
+					<ProjectsBarReopenButton />
+					{projectImage ? (
+						<Image
+							width={14}
+							height={14}
+							src={convertFileSrc(projectImage)}
+							alt={workspace.project ?? ""}
+							className="rounded object-cover shrink-0"
+						/>
+					) : (
+						<div className="w-3.5 h-3.5 rounded bg-border-light shrink-0" />
+					)}
+					<ChevronRight size={10} className="shrink-0 text-text-placeholder" />
 					<GitBranch size={12} className="shrink-0 text-text-placeholder" />
 					{editingBranch ? (
 						<input

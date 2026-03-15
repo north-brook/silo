@@ -25,7 +25,7 @@ pub struct BranchWorkspace {
     target_branch: String,
     unread: bool,
     working: Option<bool>,
-    processes: Vec<WorkspaceProcess>,
+    sessions: Vec<WorkspaceSession>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -55,7 +55,7 @@ struct WorkspaceBase {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct WorkspaceProcess {
+pub struct WorkspaceSession {
     #[serde(rename = "type")]
     kind: String,
     name: String,
@@ -70,11 +70,11 @@ struct WorkspaceObserverState {
     working: Option<bool>,
     unread: Option<bool>,
     #[serde(default)]
-    processes: Vec<WorkspaceObserverProcess>,
+    sessions: Vec<WorkspaceObserverSession>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
-struct WorkspaceObserverProcess {
+struct WorkspaceObserverSession {
     #[serde(rename = "type")]
     kind: String,
     name: String,
@@ -90,7 +90,7 @@ impl Workspace {
         target_branch: String,
         unread: bool,
         working: Option<bool>,
-        processes: Vec<WorkspaceProcess>,
+        sessions: Vec<WorkspaceSession>,
     ) -> Self {
         Self::Branch(BranchWorkspace {
             base,
@@ -98,7 +98,7 @@ impl Workspace {
             target_branch,
             unread,
             working,
-            processes,
+            sessions,
         })
     }
 
@@ -1497,19 +1497,19 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
             observer_state
                 .map(|state| {
                     state
-                        .processes
+                        .sessions
                         .into_iter()
-                        .filter(|process| {
-                            !process.kind.trim().is_empty()
-                                && !process.name.trim().is_empty()
-                                && !process.attachment_id.trim().is_empty()
+                        .filter(|session| {
+                            !session.kind.trim().is_empty()
+                                && !session.name.trim().is_empty()
+                                && !session.attachment_id.trim().is_empty()
                         })
-                        .map(|process| WorkspaceProcess {
-                            kind: process.kind,
-                            name: process.name,
-                            attachment_id: process.attachment_id,
-                            working: process.working,
-                            unread: process.unread,
+                        .map(|session| WorkspaceSession {
+                            kind: session.kind,
+                            name: session.name,
+                            attachment_id: session.attachment_id,
+                            working: session.working,
+                            unread: session.unread,
                         })
                         .collect::<Vec<_>>()
                 })
@@ -2416,7 +2416,7 @@ mod tests {
             "metadata": {
                 "items": [
                     { "key": "target_branch", "value": "main" },
-                    { "key": "silo_state", "value": "{\"branch\":\"feature/inbox\",\"working\":true,\"unread\":true,\"processes\":[{\"type\":\"terminal\",\"name\":\"codex\",\"attachment_id\":\"terminal-1\",\"working\":true,\"unread\":false}]}" }
+                    { "key": "silo_state", "value": "{\"branch\":\"feature/inbox\",\"working\":true,\"unread\":true,\"sessions\":[{\"type\":\"terminal\",\"name\":\"codex\",\"attachment_id\":\"terminal-1\",\"working\":true,\"unread\":false}]}" }
                 ]
             }
         }))
@@ -2430,12 +2430,12 @@ mod tests {
         assert_eq!(workspace.target_branch, "main");
         assert!(workspace.unread);
         assert_eq!(workspace.working, Some(true));
-        assert_eq!(workspace.processes.len(), 1);
-        assert_eq!(workspace.processes[0].kind, "terminal");
-        assert_eq!(workspace.processes[0].name, "codex");
-        assert_eq!(workspace.processes[0].attachment_id, "terminal-1");
-        assert_eq!(workspace.processes[0].working, Some(true));
-        assert_eq!(workspace.processes[0].unread, Some(false));
+        assert_eq!(workspace.sessions.len(), 1);
+        assert_eq!(workspace.sessions[0].kind, "terminal");
+        assert_eq!(workspace.sessions[0].name, "codex");
+        assert_eq!(workspace.sessions[0].attachment_id, "terminal-1");
+        assert_eq!(workspace.sessions[0].working, Some(true));
+        assert_eq!(workspace.sessions[0].unread, Some(false));
     }
 
     #[test]

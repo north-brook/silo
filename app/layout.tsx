@@ -7,7 +7,7 @@ import { initializeFrontendLogging } from "../lib/invoke";
 import { GitBar, GitBarProvider } from "../components/git-bar";
 import { NewWorkspaceProvider } from "../components/new-workspace";
 import { OpenProjectProvider } from "../components/open-project";
-import { ProjectsBar } from "../components/projects-bar";
+import { ProjectsBar, ProjectsBarProvider } from "../components/projects-bar";
 import { Toaster } from "../components/toaster";
 import { TooltipProvider } from "../components/tooltip";
 
@@ -33,17 +33,19 @@ export default function RootLayout({
 				>
 					<body className="flex flex-col h-screen overflow-hidden">
 						<GitBarProvider>
-							<OpenProjectProvider>
-								<NewWorkspaceProvider>
-									<div className="flex flex-1 min-h-0">
-										<ProjectsBar />
-										<main className="flex-1 min-w-0 overflow-hidden flex flex-col">
-											{children}
-										</main>
-										<GitBar />
-									</div>
-								</NewWorkspaceProvider>
-							</OpenProjectProvider>
+							<ProjectsBarProvider>
+								<OpenProjectProvider>
+									<NewWorkspaceProvider>
+										<div className="flex flex-1 min-h-0">
+											<ProjectsBar />
+											<main className="flex-1 min-w-0 overflow-hidden flex flex-col">
+												{children}
+											</main>
+											<GitBar />
+										</div>
+									</NewWorkspaceProvider>
+								</OpenProjectProvider>
+							</ProjectsBarProvider>
 						</GitBarProvider>
 						<Toaster />
 					</body>

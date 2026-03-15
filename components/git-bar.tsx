@@ -179,7 +179,7 @@ export function GitBarProvider({ children }: { children: ReactNode }) {
 export function GitToggle() {
 	const { isOpen, toggle, diff, hasChanges, isInBranchWorkspace } = useGitBar();
 
-	if (!isInBranchWorkspace || !hasChanges) return null;
+	if (isOpen || !isInBranchWorkspace || !hasChanges) return null;
 
 	const additions = diff?.overview.additions ?? 0;
 	const deletions = diff?.overview.deletions ?? 0;
@@ -190,11 +190,9 @@ export function GitToggle() {
 				<button
 					type="button"
 					onClick={toggle}
-					className={`flex items-center px-1.5 py-0.5 rounded text-text-muted hover:bg-btn-hover hover:text-text-bright transition-colors ${isOpen ? "" : "gap-1.5"}`}
+					className="flex items-center gap-2.5 px-1.5 py-0.5 rounded text-text-muted hover:bg-btn-hover hover:text-text-bright transition-colors"
 				>
-					<span
-						className={`flex items-center gap-1.5 text-[11px] font-medium transition-opacity overflow-hidden ${isOpen ? "opacity-0 w-0" : "opacity-100"}`}
-					>
+					<span className="flex items-center gap-1.5 text-[11px] font-medium">
 						<span className="text-emerald-400">+{additions}</span>
 						<span className="text-red-400">-{deletions}</span>
 					</span>
@@ -243,7 +241,7 @@ export function GitBar() {
 // ---------------------------------------------------------------------------
 
 function GitBarHeader() {
-	const { workspace, project, prStatus: pr, prStatusLoading } = useGitBar();
+	const { workspace, project, toggle, prStatus: pr, prStatusLoading } = useGitBar();
 	const router = useRouter();
 	const queryClient = useQueryClient();
 
@@ -365,8 +363,35 @@ function GitBarHeader() {
 	);
 
 	return (
-		<div className="h-9 flex items-center justify-between px-3 border-b border-border-light shrink-0">
-			<div>
+		<div className="h-9 flex items-center justify-between pl-1.5 pr-3 border-b border-border-light shrink-0">
+			<div className="flex items-center gap-2">
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<button
+							type="button"
+							onClick={toggle}
+							className="flex items-center px-1.5 py-0.5 rounded text-text-muted hover:bg-btn-hover hover:text-text-bright transition-colors"
+						>
+							<PanelRight size={12} />
+						</button>
+					</TooltipTrigger>
+					<TooltipContent side="bottom">
+						<span className="flex items-center gap-1.5">
+							Toggle Git Bar
+							<span className="flex items-center gap-0.5">
+								<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+									⌘
+								</kbd>
+								<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+									⇧
+								</kbd>
+								<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+									B
+								</kbd>
+							</span>
+						</span>
+					</TooltipContent>
+				</Tooltip>
 				{pr?.status === "open" && (
 					<button
 						type="button"

@@ -10,6 +10,7 @@ import type { ListedProject } from "../lib/projects";
 import type { SnapshotTemplate } from "../lib/templates";
 import { createWorkspace as createWorkspaceCommand } from "../lib/workspaces";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./dialog";
+import { Loader } from "./loader";
 import { toast } from "./toaster";
 
 const NewWorkspaceContext = createContext<{ open: () => void }>({
@@ -127,7 +128,7 @@ function NewWorkspaceDialog({
 				<DialogHeader className="p-4 pb-2">
 					<DialogTitle>New Workspace</DialogTitle>
 				</DialogHeader>
-				<div className="flex flex-col py-1">
+				<div className="flex flex-col pt-1 pb-3">
 					{projectsWithTemplates.map((project, index) => (
 						<button
 							key={project.name}
@@ -148,9 +149,13 @@ function NewWorkspaceDialog({
 								<div className="w-4 h-4 rounded bg-border-light shrink-0" />
 							)}
 							<span className="truncate flex-1 text-left">{project.name}</span>
-							<kbd className="shrink-0 text-[10px] text-text-placeholder border border-border-light rounded px-1.5 py-0.5">
-								{index + 1}
-							</kbd>
+							{createWorkspace.isPending && createWorkspace.variables === project.name ? (
+								<Loader className="text-text-muted" />
+							) : (
+								<kbd className="shrink-0 text-[10px] text-text-placeholder border border-border-light rounded px-1.5 py-0.5">
+									{index + 1}
+								</kbd>
+							)}
 						</button>
 					))}
 					{projectsWithTemplates.length === 0 && (

@@ -35,15 +35,11 @@ const REMOTE_CHROME_USER_DATA_DIR: &str = "/home/silo/.config/google-chrome";
 const REMOTE_WORKSPACE_OBSERVER_BIN: &str = "/home/silo/.silo/bin/workspace-observer";
 const REMOTE_WORKSPACE_OBSERVER_PIDFILE: &str = "/home/silo/.silo/workspace-observer/daemon.pid";
 const REMOTE_WORKSPACE_OBSERVER_SHELL_FILE: &str = "/home/silo/.silo/workspace-observer-shell.sh";
-const REMOTE_WORKSPACE_OBSERVER_SOURCE_DIR: &str = "/home/silo/.silo/workspace-observer-src";
-const WORKSPACE_BOOTSTRAP_VERSION: &str = "8";
+const WORKSPACE_BOOTSTRAP_VERSION: &str = "10";
 const TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS: usize = 60;
 const TEMPLATE_BOOTSTRAP_POLL_INTERVAL: Duration = Duration::from_secs(2);
-const WORKSPACE_OBSERVER_CARGO_TOML: &str =
-    include_str!("../../tools/workspace-observer/Cargo.toml");
-const WORKSPACE_OBSERVER_CARGO_LOCK: &str =
-    include_str!("../../tools/workspace-observer/Cargo.lock");
-const WORKSPACE_OBSERVER_MAIN_RS: &str = include_str!("../../tools/workspace-observer/src/main.rs");
+const WORKSPACE_OBSERVER_BIN_BYTES: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/workspace-observer-x86_64-unknown-linux-musl"));
 const CHROME_PROFILE_SYNC_PATHS: &[&str] = &[
     "Local State",
     "First Run",
@@ -161,6 +157,7 @@ struct AttachmentRegistry {
     by_id: HashMap<String, Arc<Attachment>>,
     by_key: HashMap<AttachmentKey, String>,
     reserved_keys: HashSet<AttachmentKey>,
+    startup_commands: HashMap<AttachmentKey, String>,
 }
 
 #[derive(Clone, Default)]
@@ -217,6 +214,16 @@ impl TerminalManager {
     fn remove_by_key(&self, key: &AttachmentKey) -> Option<Arc<Attachment>> {
         let id = self.inner.lock().ok()?.by_key.get(key)?.clone();
         self.remove_by_id(&id)
+    }
+
+    fn set_startup_command(&self, key: AttachmentKey, command: String) {
+        if let Ok(mut registry) = self.inner.lock() {
+            registry.startup_commands.insert(key, command);
+        }
+    }
+
+    fn take_startup_command(&self, key: &AttachmentKey) -> Option<String> {
+        self.inner.lock().ok()?.startup_commands.remove(key)
     }
 
     fn try_reserve(&self, key: &AttachmentKey) -> Option<AttachmentReservation> {
@@ -311,11 +318,19 @@ pub async fn terminal_attach_terminal(
         workspace: workspace.clone(),
         name: name.clone(),
     };
+    let startup_command = command.or_else(|| state.take_startup_command(&key));
 
     let _reservation = match wait_for_attachment_slot(state.inner(), &key, &name).await? {
         AttachmentSlot::Existing(existing) => {
-            return attach_existing_terminal(existing, &lookup, &name, &window, output, command)
-                .await;
+            return attach_existing_terminal(
+                existing,
+                &lookup,
+                &name,
+                &window,
+                output,
+                startup_command,
+            )
+            .await;
         }
         AttachmentSlot::Reserved(reservation) => reservation,
     };
@@ -330,7 +345,7 @@ pub async fn terminal_attach_terminal(
         output,
         window.label().to_string(),
     )?;
-    if let Some(command) = command {
+    if let Some(command) = startup_command {
         queue_attach_command(attachment.clone(), command);
     }
 
@@ -353,14 +368,7 @@ pub async fn terminal_run_terminal(
         return Err(format!("workspace {workspace} is not ready"));
     }
     let created = find_terminal_session(&lookup, &name).await?.is_none();
-    let mut payload = command.into_bytes();
-    if !payload.ends_with(b"\n") {
-        payload.push(b'\n');
-    }
-
-    let result =
-        run_remote_command_with_stdin(&lookup, &terminal_run_remote_command(&name), payload)
-            .await?;
+    let result = run_remote_command(&lookup, &terminal_run_remote_command(&name, &command)).await?;
     if !result.success {
         return Err(remote_command_error(
             "failed to run terminal command",
@@ -376,13 +384,20 @@ pub async fn terminal_run_terminal(
 }
 
 pub(crate) async fn start_terminal_command(
+    manager: &TerminalManager,
     workspace: &str,
     command: &str,
 ) -> Result<String, String> {
     let terminal = terminal_create_terminal(workspace.to_string())
         .await?
         .terminal;
-    terminal_run_terminal(workspace.to_string(), terminal.clone(), command.to_string()).await?;
+    manager.set_startup_command(
+        AttachmentKey {
+            workspace: workspace.to_string(),
+            name: terminal.clone(),
+        },
+        command.to_string(),
+    );
     Ok(terminal)
 }
 
@@ -1192,11 +1207,7 @@ fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBoo
     let claude_state_json = claude_state_json();
     let gh_hosts_yml = gh_hosts_yml(&bootstrap.gh_username, &bootstrap.gh_token);
     let bootstrap_signature = workspace_bootstrap_signature(lookup.workspace.name(), bootstrap);
-    let observer_install = if lookup.workspace.is_template() {
-        String::new()
-    } else {
-        workspace_observer_install_script(lookup)
-    };
+    let observer_install = workspace_observer_install_script(lookup);
     let env_file_sync = if lookup.workspace.is_template() {
         workspace_env_file_sync_script(&bootstrap.env_files)
     } else {
@@ -1219,32 +1230,36 @@ fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBoo
         "unset CLAUDE_CODE_USE_VERTEX".to_string(),
         "unset AWS_BEARER_TOKEN_BEDROCK".to_string(),
         "unset VERTEX_REGION_CLAUDE_CODE".to_string(),
-        if lookup.workspace.is_template() {
-            String::new()
-        } else {
-            format!(
-                "[[ -f {} ]] && source {}",
-                shell_quote(REMOTE_WORKSPACE_OBSERVER_SHELL_FILE),
-                shell_quote(REMOTE_WORKSPACE_OBSERVER_SHELL_FILE)
-            )
-        },
+        format!(
+            "if [[ -f {} ]]; then source {}; fi",
+            shell_quote(REMOTE_WORKSPACE_OBSERVER_SHELL_FILE),
+            shell_quote(REMOTE_WORKSPACE_OBSERVER_SHELL_FILE)
+        ),
     ]
-    .into_iter()
-    .filter(|line| !line.is_empty())
-    .collect::<Vec<_>>()
     .join("\n");
+    let git_clone_target_branch =
+        bootstrap_git_command("clone --branch \"$TARGET_BRANCH\" \"$REMOTE_URL\" \"$WORKSPACE_DIR\"");
+    let git_fetch_target_branch =
+        bootstrap_git_command("-C \"$WORKSPACE_DIR\" fetch origin \"$TARGET_BRANCH\"");
+    let git_pull_target_branch =
+        bootstrap_git_command("-C \"$WORKSPACE_DIR\" pull --ff-only origin \"$TARGET_BRANCH\"");
     let branch_setup = if lookup.workspace.is_template() {
         format!(
-            "if [ ! -d \"$WORKSPACE_DIR/.git\" ]; then\n  rm -rf \"$WORKSPACE_DIR\"\n  git clone --branch \"$TARGET_BRANCH\" \"$REMOTE_URL\" \"$WORKSPACE_DIR\"\nelse\n  git -C \"$WORKSPACE_DIR\" remote set-url origin \"$REMOTE_URL\"\n  git -C \"$WORKSPACE_DIR\" fetch origin \"$TARGET_BRANCH\"\n  git -C \"$WORKSPACE_DIR\" checkout \"$TARGET_BRANCH\"\n  git -C \"$WORKSPACE_DIR\" reset --hard \"origin/$TARGET_BRANCH\"\n  git -C \"$WORKSPACE_DIR\" clean -fd\nfi",
+            "if [ ! -d \"$WORKSPACE_DIR/.git\" ]; then\n  rm -rf \"$WORKSPACE_DIR\"\n  {git_clone_target_branch}\nelse\n  git -C \"$WORKSPACE_DIR\" remote set-url origin \"$REMOTE_URL\"\n  {git_fetch_target_branch}\n  git -C \"$WORKSPACE_DIR\" checkout \"$TARGET_BRANCH\"\n  git -C \"$WORKSPACE_DIR\" reset --hard \"origin/$TARGET_BRANCH\"\n  git -C \"$WORKSPACE_DIR\" clean -fd\nfi",
+            git_clone_target_branch = git_clone_target_branch,
+            git_fetch_target_branch = git_fetch_target_branch,
         )
     } else {
         format!(
-            "if [ ! -d \"$WORKSPACE_DIR/.git\" ]; then\n  rm -rf \"$WORKSPACE_DIR\"\n  git clone --branch \"$TARGET_BRANCH\" \"$REMOTE_URL\" \"$WORKSPACE_DIR\"\nfi\n\
+            "if [ ! -d \"$WORKSPACE_DIR/.git\" ]; then\n  rm -rf \"$WORKSPACE_DIR\"\n  {git_clone_target_branch}\nfi\n\
 git -C \"$WORKSPACE_DIR\" remote set-url origin \"$REMOTE_URL\"\n\
-git -C \"$WORKSPACE_DIR\" fetch origin \"$TARGET_BRANCH\"\n\
+{git_fetch_target_branch}\n\
 git -C \"$WORKSPACE_DIR\" checkout \"$TARGET_BRANCH\"\n\
-git -C \"$WORKSPACE_DIR\" pull --ff-only origin \"$TARGET_BRANCH\"\n\
+{git_pull_target_branch}\n\
 if git -C \"$WORKSPACE_DIR\" show-ref --verify --quiet \"refs/heads/$WORKSPACE_BRANCH\"; then\n  git -C \"$WORKSPACE_DIR\" checkout \"$WORKSPACE_BRANCH\"\nelse\n  git -C \"$WORKSPACE_DIR\" checkout -b \"$WORKSPACE_BRANCH\" \"$TARGET_BRANCH\"\nfi",
+            git_clone_target_branch = git_clone_target_branch,
+            git_fetch_target_branch = git_fetch_target_branch,
+            git_pull_target_branch = git_pull_target_branch,
         )
     };
 
@@ -1347,6 +1362,12 @@ fi\n\
         branch_setup = branch_setup,
         env_file_sync = env_file_sync,
         observer_install = observer_install,
+    )
+}
+
+fn bootstrap_git_command(command: &str) -> String {
+    format!(
+        "env GH_TOKEN=\"$GH_TOKEN\" GITHUB_TOKEN=\"$GITHUB_TOKEN\" GIT_ASKPASS=\"$ASKPASS_PATH\" GIT_TERMINAL_PROMPT=0 git {command}"
     )
 }
 
@@ -1607,60 +1628,23 @@ fn workspace_env_file_sync_script(env_files: &[BootstrapEnvFile]) -> String {
 }
 
 fn workspace_observer_install_script(lookup: &WorkspaceLookup) -> String {
-    let source_root = shell_quote(REMOTE_WORKSPACE_OBSERVER_SOURCE_DIR);
-    let source_src = shell_quote(&format!("{REMOTE_WORKSPACE_OBSERVER_SOURCE_DIR}/src"));
     let bin_path = shell_quote(REMOTE_WORKSPACE_OBSERVER_BIN);
     let pidfile = shell_quote(REMOTE_WORKSPACE_OBSERVER_PIDFILE);
     let shell_path = shell_quote(REMOTE_WORKSPACE_OBSERVER_SHELL_FILE);
-    let manifest_path = shell_quote(&format!(
-        "{REMOTE_WORKSPACE_OBSERVER_SOURCE_DIR}/Cargo.toml"
-    ));
-    let target_binary = shell_quote(&format!(
-        "{REMOTE_WORKSPACE_OBSERVER_SOURCE_DIR}/target/release/workspace-observer"
-    ));
+    let encoded_binary = BASE64_STANDARD.encode(WORKSPACE_OBSERVER_BIN_BYTES);
     let shell_script = workspace_observer_shell_script();
+    let encoded_shell = BASE64_STANDARD.encode(shell_script.as_bytes());
 
-    let source_files = [
-        (
-            format!("{REMOTE_WORKSPACE_OBSERVER_SOURCE_DIR}/Cargo.toml"),
-            WORKSPACE_OBSERVER_CARGO_TOML,
-        ),
-        (
-            format!("{REMOTE_WORKSPACE_OBSERVER_SOURCE_DIR}/Cargo.lock"),
-            WORKSPACE_OBSERVER_CARGO_LOCK,
-        ),
-        (
-            format!("{REMOTE_WORKSPACE_OBSERVER_SOURCE_DIR}/src/main.rs"),
-            WORKSPACE_OBSERVER_MAIN_RS,
-        ),
-        (
-            REMOTE_WORKSPACE_OBSERVER_SHELL_FILE.to_string(),
-            shell_script.as_str(),
-        ),
-    ];
-
-    let mut script = format!(
-        "install -d -m 0700 \"$HOME/.silo\" {source_root} {source_src} \"$HOME/.silo/bin\"\n",
-    );
-    for (index, (path, contents)) in source_files.iter().enumerate() {
-        let encoded = BASE64_STANDARD.encode(contents.as_bytes());
-        if let Some((parent_dir, _)) = path.rsplit_once('/') {
-            script.push_str(&format!(
-                "install -d -m 0700 {parent}\n",
-                parent = shell_quote(parent_dir),
-            ));
-        }
-        script.push_str(&format!(
-            "cat <<'EOF_OBSERVER_{index}' | base64 --decode > {target}\n{contents}\nEOF_OBSERVER_{index}\n",
-            target = shell_quote(path),
-            contents = encoded,
-        ));
-        script.push_str(&format!("chmod 600 {}\n", shell_quote(path)));
-    }
+    let mut script =
+        "install -d -m 0700 \"$HOME/.silo\" \"$HOME/.silo/bin\" \"$HOME/.silo/workspace-observer\"\n"
+            .to_string();
     script.push_str(&format!(
-        "cargo build --manifest-path {manifest_path} --locked --release\n",
+        "cat <<'EOF_OBSERVER_BIN' | base64 --decode > {bin_path}\n{encoded_binary}\nEOF_OBSERVER_BIN\n",
     ));
-    script.push_str(&format!("install -m 0755 {target_binary} {bin_path}\n"));
+    script.push_str(&format!("chmod 0755 {bin_path}\n"));
+    script.push_str(&format!(
+        "cat <<'EOF_OBSERVER_SHELL' | base64 --decode > {shell_path}\n{encoded_shell}\nEOF_OBSERVER_SHELL\n",
+    ));
     script.push_str(&format!("chmod 0755 {shell_path}\n"));
     script.push_str(&format!(
         "if [ -f {pidfile} ]; then kill \"$(cat {pidfile})\" 2>/dev/null || true; rm -f {pidfile}; fi\n",
@@ -1676,9 +1660,7 @@ fn workspace_observer_install_script(lookup: &WorkspaceLookup) -> String {
 
 fn workspace_observer_source_signature() -> String {
     let mut hasher = Sha256::new();
-    hasher.update(WORKSPACE_OBSERVER_CARGO_TOML.as_bytes());
-    hasher.update(WORKSPACE_OBSERVER_CARGO_LOCK.as_bytes());
-    hasher.update(WORKSPACE_OBSERVER_MAIN_RS.as_bytes());
+    hasher.update(WORKSPACE_OBSERVER_BIN_BYTES);
     hasher.update(workspace_observer_shell_script().as_bytes());
     format!("{:x}", hasher.finalize())
 }
@@ -1826,8 +1808,8 @@ fn terminal_attach_remote_command(name: &str) -> String {
     )))
 }
 
-fn terminal_run_remote_command(name: &str) -> String {
-    let command = format!("zmx run {}", shell_quote(name));
+fn terminal_run_remote_command(name: &str, command: &str) -> String {
+    let command = format!("zmx run {} {}", shell_quote(name), shell_quote(command));
     run_terminal_user_command(&terminal_shell_command(&command))
 }
 
@@ -2130,17 +2112,37 @@ fn run_terminal_user_command(command: &str) -> String {
     format!("sudo -iu {TERMINAL_USER} bash -lc {}", shell_quote(command))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn workspace_shell_command(command: &str) -> String {
-    let script = format!(
-        "set -euo pipefail\nexport LC_ALL=C\nexport LANG=C\ncd {}\n{}",
-        shell_quote(TERMINAL_WORKSPACE_DIR),
-        command
-    );
+    workspace_shell_command_with_prelude(None, command)
+}
+
+pub(crate) fn workspace_shell_command_with_credentials(command: &str) -> String {
+    let credentials_path = shell_quote(REMOTE_CREDENTIALS_FILE);
+    workspace_shell_command_with_prelude(
+        Some(&format!(
+            "if [ -f {credentials_path} ]; then\n. {credentials_path}\nfi"
+        )),
+        command,
+    )
+}
+
+fn workspace_shell_command_with_prelude(prelude: Option<&str>, command: &str) -> String {
+    let script = workspace_shell_script(prelude, command);
     let encoded = BASE64_STANDARD.encode(script);
     run_terminal_user_command(&format!(
         "printf %s {} | base64 --decode | bash",
         shell_quote(&encoded)
     ))
+}
+
+fn workspace_shell_script(prelude: Option<&str>, command: &str) -> String {
+    format!(
+        "set -euo pipefail\nexport LC_ALL=C\nexport LANG=C\n{}\ncd {}\n{}",
+        prelude.unwrap_or_default(),
+        shell_quote(TERMINAL_WORKSPACE_DIR),
+        command
+    )
 }
 
 fn shell_quote(value: &str) -> String {
@@ -2329,6 +2331,37 @@ mod tests {
         let command = workspace_shell_command("printf \"hi\\n\"");
         assert!(command.starts_with("sudo -iu silo bash -lc 'printf %s "));
         assert!(command.contains("| base64 --decode | bash"));
+    }
+
+    #[test]
+    fn terminal_run_remote_command_passes_command_as_argument() {
+        assert_eq!(
+            terminal_run_remote_command("terminal-1", "codex -- \"hello\""),
+            "sudo -iu silo bash -lc 'if [ -f '\"'\"'/home/silo/.silo/credentials.sh'\"'\"' ]; then source '\"'\"'/home/silo/.silo/credentials.sh'\"'\"'; fi; cd '\"'\"'/home/silo/workspace'\"'\"'; zmx run '\"'\"'terminal-1'\"'\"' '\"'\"'codex -- \"hello\"'\"'\"''"
+        );
+    }
+
+    #[test]
+    fn workspace_shell_command_with_credentials_sources_credentials_file() {
+        let script = workspace_shell_script(
+            Some(
+                "if [ -f '/home/silo/.silo/credentials.sh' ]; then\n. '/home/silo/.silo/credentials.sh'\nfi",
+            ),
+            "git status --short",
+        );
+
+        assert!(script.contains("if [ -f '/home/silo/.silo/credentials.sh' ]; then"));
+        assert!(script.contains(". '/home/silo/.silo/credentials.sh'"));
+        assert!(script.contains("cd '/home/silo/workspace'"));
+        assert!(script.contains("git status --short"));
+    }
+
+    #[test]
+    fn bootstrap_git_command_inlines_auth_env() {
+        assert_eq!(
+            bootstrap_git_command("-C \"$WORKSPACE_DIR\" fetch origin \"$TARGET_BRANCH\""),
+            "env GH_TOKEN=\"$GH_TOKEN\" GITHUB_TOKEN=\"$GITHUB_TOKEN\" GIT_ASKPASS=\"$ASKPASS_PATH\" GIT_TERMINAL_PROMPT=0 git -C \"$WORKSPACE_DIR\" fetch origin \"$TARGET_BRANCH\""
+        );
     }
 
     #[test]
@@ -2682,6 +2715,23 @@ mod tests {
             "att-1"
         );
         assert!(manager.try_reserve(&key).is_none());
+    }
+
+    #[test]
+    fn terminal_manager_startup_command_is_consumed_once() {
+        let manager = TerminalManager::default();
+        let key = AttachmentKey {
+            workspace: "ws".to_string(),
+            name: "dev".to_string(),
+        };
+
+        manager.set_startup_command(key.clone(), "codex -- \"hello\"".to_string());
+
+        assert_eq!(
+            manager.take_startup_command(&key),
+            Some("codex -- \"hello\"".to_string())
+        );
+        assert_eq!(manager.take_startup_command(&key), None);
     }
 
     #[derive(Debug)]

@@ -140,6 +140,9 @@ fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
     if command.len() > 1 {
         builder.args(&command[1..]);
     }
+    let cwd = env::current_dir().map_err(|error| format!("failed to read current directory: {error}"))?;
+    builder.cwd(&cwd);
+    builder.env("PWD", &cwd);
     builder.env("ZMX_SESSION", &session);
     let mut child = pair
         .slave
@@ -166,26 +169,21 @@ fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
     });
 
     let raw_mode = RawModeGuard::new().map_err(|error| error.to_string())?;
-    let input_result = proxy_input(io::stdin(), writer, Arc::clone(&tracker));
-    drop(raw_mode);
-
-    tracker.finish_turn_if_needed();
-    if input_result.is_err() {
-        let _ = child.kill();
-    }
-
-    while !reader_done.load(Ordering::Relaxed) {
-        if let Ok(Some(_)) = child.try_wait() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-
-    let _ = reader_thread.join();
-    tracker.stop();
+    let input_tracker = Arc::clone(&tracker);
+    let _input_thread = thread::spawn(move || {
+        let _ = proxy_input(io::stdin(), writer, input_tracker);
+    });
     let status = child
         .wait()
         .map_err(|error| format!("assistant command wait failed: {error}"))?;
+    drop(raw_mode);
+    tracker.finish_turn_if_needed();
+    tracker.stop();
+
+    while !reader_done.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(50));
+    }
+    let _ = reader_thread.join();
 
     let code = status.exit_code();
     if code == 0 {
@@ -324,11 +322,11 @@ struct PublishedState {
     branch: Option<String>,
     working: bool,
     unread: bool,
-    processes: Vec<PublishedProcess>,
+    sessions: Vec<PublishedSession>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct PublishedProcess {
+struct PublishedSession {
     #[serde(rename = "type")]
     kind: &'static str,
     name: String,
@@ -458,7 +456,7 @@ fn build_published_state(state: &ObserverState, live_sessions: &[ZmxSession]) ->
         .collect::<HashMap<_, _>>();
     let mut working = false;
     let mut unread = false;
-    let mut processes = state
+    let mut sessions = state
         .sessions
         .iter()
         .filter_map(|(session_name, session_state)| {
@@ -473,7 +471,7 @@ fn build_published_state(state: &ObserverState, live_sessions: &[ZmxSession]) ->
             working |= session_state.working;
             unread |= session_state.unread;
 
-            Some(PublishedProcess {
+            Some(PublishedSession {
                 kind: "terminal",
                 name,
                 attachment_id: session_name.clone(),
@@ -482,13 +480,13 @@ fn build_published_state(state: &ObserverState, live_sessions: &[ZmxSession]) ->
             })
         })
         .collect::<Vec<_>>();
-    processes.sort_by(|left, right| left.attachment_id.cmp(&right.attachment_id));
+    sessions.sort_by(|left, right| left.attachment_id.cmp(&right.attachment_id));
 
     PublishedState {
         branch: state.branch.clone(),
         working,
         unread,
-        processes,
+        sessions,
     }
 }
 
