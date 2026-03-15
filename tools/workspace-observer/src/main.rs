@@ -2,7 +2,7 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
@@ -20,10 +20,14 @@ use time::{format_description::well_known::Rfc3339, Duration as TimeDuration, Of
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
-const COMPLETION_DEBOUNCE: Duration = Duration::from_millis(1500);
+const TURN_OUTPUT_IDLE_TIMEOUT: Duration = Duration::from_secs(4);
+const INITIAL_PROMPT_STARTUP_GRACE: Duration = Duration::from_secs(6);
 const FIFO_MODE: u32 = 0o622;
 const LEGACY_METADATA_KEY: &str = "silo_state";
 const AUTO_SUSPEND_IDLE_THRESHOLD: TimeDuration = TimeDuration::hours(4);
+const POLL_MISS_THRESHOLD_UNMANAGED: u16 = 3;
+const POLL_MISS_THRESHOLD_LIFECYCLE: u16 = 300;
+const SOFT_NEWLINE_SENTINEL: char = '\u{e000}';
 
 fn main() {
     if let Err(error) = run() {
@@ -73,12 +77,13 @@ fn run_daemon(args: &[String]) -> Result<(), String> {
             apply_event(&mut state, event);
         }
 
-        let live_sessions = list_zmx_sessions();
-        reconcile_sessions(&mut state, &live_sessions);
+        if let Err(error) = reconcile_live_sessions(&mut state) {
+            eprintln!("workspace-observer: failed to list zmx sessions: {error}");
+        }
         state.branch = read_workspace_branch();
         persist_state(&runtime.state_file, &state)?;
 
-        let published = build_published_state(&state, &live_sessions);
+        let published = build_published_state(&state);
         let published_json =
             serde_json::to_string(&published).map_err(|error| error.to_string())?;
 
@@ -181,10 +186,13 @@ fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
         .map_err(|error| format!("failed to open pty writer: {error}"))?;
 
     let tracker = AssistantTracker::new(session.clone(), provider, runtime.fifo);
-    if initial_prompt_argv {
-        if let Some(prompt) = initial_prompt_from_command(provider, &command) {
-            tracker.record_initial_prompt(&prompt);
-        }
+    if initial_prompt_argv
+        && command
+            .iter()
+            .last()
+            .is_some_and(|arg| !arg.trim().is_empty())
+    {
+        tracker.record_initial_prompt();
     }
     let reader_tracker = Arc::clone(&tracker);
     let reader_done = Arc::new(AtomicBool::new(false));
@@ -344,6 +352,10 @@ struct SessionState {
     working: bool,
     #[serde(default)]
     unread: bool,
+    #[serde(default)]
+    lifecycle_managed: bool,
+    #[serde(default)]
+    poll_misses: u16,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -398,6 +410,12 @@ impl AssistantProvider {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ObserverEvent {
+    ShellSessionStarted {
+        session: String,
+    },
+    ShellSessionExited {
+        session: String,
+    },
     ShellCommandStarted {
         session: String,
         command: String,
@@ -427,17 +445,28 @@ struct ZmxSession {
 fn apply_event(state: &mut ObserverState, event: ObserverEvent) {
     touch_last_active(state);
     match event {
-        ObserverEvent::ShellCommandStarted { session, command } => {
+        ObserverEvent::ShellSessionStarted { session } => {
             let session_state = state.sessions.entry(session).or_default();
-            session_state.active_command = Some(sanitize_command_name(&command));
+            session_state.lifecycle_managed = true;
+            session_state.poll_misses = 0;
+        }
+        ObserverEvent::ShellSessionExited { session } => {
+            state.sessions.remove(&session);
+        }
+        ObserverEvent::ShellCommandStarted { session, command } => {
+            let command = sanitize_command_name(&command);
+            let session_state = state.sessions.entry(session).or_default();
+            session_state.active_command = Some(command.clone());
             session_state.assistant_provider = resolve_assistant_provider(&command);
             session_state.working = false;
+            session_state.poll_misses = 0;
         }
         ObserverEvent::ShellCommandFinished { session } => {
             if let Some(session_state) = state.sessions.get_mut(&session) {
                 session_state.active_command = None;
                 session_state.assistant_provider = None;
                 session_state.working = false;
+                session_state.poll_misses = 0;
             }
         }
         ObserverEvent::AssistantPromptSubmitted { session, provider } => {
@@ -447,6 +476,7 @@ fn apply_event(state: &mut ObserverState, event: ObserverEvent) {
                 session_state.assistant_provider = Some(provider);
                 session_state.working = true;
                 session_state.unread = false;
+                session_state.poll_misses = 0;
             }
             touch_last_working(state);
         }
@@ -456,6 +486,7 @@ fn apply_event(state: &mut ObserverState, event: ObserverEvent) {
             session_state.assistant_provider = Some(provider);
             session_state.working = false;
             session_state.unread = true;
+            session_state.poll_misses = 0;
         }
         ObserverEvent::MarkRead { session } => {
             if let Some(session_state) = state.sessions.get_mut(&session) {
@@ -465,6 +496,12 @@ fn apply_event(state: &mut ObserverState, event: ObserverEvent) {
     }
 }
 
+fn reconcile_live_sessions(state: &mut ObserverState) -> Result<(), String> {
+    let live_sessions = list_zmx_sessions()?;
+    reconcile_sessions(state, &live_sessions);
+    Ok(())
+}
+
 fn reconcile_sessions(state: &mut ObserverState, live_sessions: &[ZmxSession]) {
     let live = live_sessions
         .iter()
@@ -472,12 +509,9 @@ fn reconcile_sessions(state: &mut ObserverState, live_sessions: &[ZmxSession]) {
         .collect::<Vec<_>>();
     let before = state.sessions.clone();
 
-    state
-        .sessions
-        .retain(|name, _| live.iter().any(|candidate| *candidate == name));
-
     for live_session in live_sessions {
         let session_state = state.sessions.entry(live_session.name.clone()).or_default();
+        session_state.poll_misses = 0;
         if session_state.active_command.is_none() {
             session_state.active_command =
                 live_session.command.as_deref().map(sanitize_command_name);
@@ -487,40 +521,45 @@ fn reconcile_sessions(state: &mut ObserverState, live_sessions: &[ZmxSession]) {
         }
     }
 
+    for (name, session_state) in &mut state.sessions {
+        if live.iter().any(|candidate| *candidate == name) {
+            continue;
+        }
+        session_state.poll_misses = session_state.poll_misses.saturating_add(1);
+    }
+
+    state.sessions.retain(|_, session_state| {
+        session_state.poll_misses < session_poll_miss_threshold(session_state)
+    });
+
     if state.sessions != before {
         touch_last_active(state);
     }
 }
 
-fn build_published_state(state: &ObserverState, live_sessions: &[ZmxSession]) -> PublishedState {
-    let live_map = live_sessions
-        .iter()
-        .map(|session| (session.name.clone(), session))
-        .collect::<HashMap<_, _>>();
+fn build_published_state(state: &ObserverState) -> PublishedState {
     let mut working = false;
     let mut unread = false;
     let mut sessions = state
         .sessions
         .iter()
-        .filter_map(|(session_name, session_state)| {
-            let live_session = live_map.get(session_name)?;
+        .map(|(session_name, session_state)| {
             let name = session_state
                 .active_command
                 .clone()
-                .or_else(|| live_session.command.clone())
                 .unwrap_or_else(|| "shell".to_string());
             let assistant_capable = session_state.assistant_provider.is_some()
                 || resolve_assistant_provider(&name).is_some();
             working |= session_state.working;
             unread |= session_state.unread;
 
-            Some(PublishedSession {
+            PublishedSession {
                 kind: "terminal",
                 name,
                 attachment_id: session_name.clone(),
                 working: assistant_capable.then_some(session_state.working),
                 unread: assistant_capable.then_some(session_state.unread),
-            })
+            }
         })
         .collect::<Vec<_>>();
     sessions.sort_by(|left, right| left.attachment_id.cmp(&right.attachment_id));
@@ -700,6 +739,8 @@ fn parse_emit_event(args: &[String]) -> Result<ObserverEvent, String> {
     let session = required_flag_value(args, "--session")?.to_string();
 
     match kind {
+        "shell_session_started" => Ok(ObserverEvent::ShellSessionStarted { session }),
+        "shell_session_exited" => Ok(ObserverEvent::ShellSessionExited { session }),
         "shell_command_started" => Ok(ObserverEvent::ShellCommandStarted {
             session,
             command: required_flag_value(args, "--command")?.to_string(),
@@ -730,10 +771,24 @@ fn required_flag_value<'a>(args: &'a [String], flag: &str) -> Result<&'a str, St
         .ok_or_else(|| format!("missing value for flag: {flag}"))
 }
 
+fn session_poll_miss_threshold(session: &SessionState) -> u16 {
+    if session.lifecycle_managed {
+        POLL_MISS_THRESHOLD_LIFECYCLE
+    } else {
+        POLL_MISS_THRESHOLD_UNMANAGED
+    }
+}
+
 fn sanitize_command_name(command: &str) -> String {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return "shell".to_string();
+    }
+    if trimmed.eq("silo codex") || trimmed.starts_with("silo codex ") {
+        return "codex".to_string();
+    }
+    if trimmed.eq("silo claude") || trimmed.starts_with("silo claude ") {
+        return "claude".to_string();
     }
 
     trimmed.chars().take(200).collect()
@@ -756,19 +811,28 @@ fn resolve_assistant_provider(command: &str) -> Option<AssistantProvider> {
     }
 }
 
-fn list_zmx_sessions() -> Vec<ZmxSession> {
-    let output = match Command::new("zmx").arg("list").output() {
-        Ok(output) => output,
-        Err(_) => return Vec::new(),
-    };
+fn list_zmx_sessions() -> Result<Vec<ZmxSession>, String> {
+    let output = Command::new("bash")
+        .args(["-lc", "zmx list"])
+        .output()
+        .map_err(|error| format!("spawn failed: {error}"))?;
     if !output.status.success() {
-        return Vec::new();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "exit status {}{}",
+            output.status,
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
     }
 
-    String::from_utf8_lossy(&output.stdout)
+    Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(parse_zmx_session)
-        .collect()
+        .collect())
 }
 
 fn parse_zmx_session(line: &str) -> Option<ZmxSession> {
@@ -1037,6 +1101,8 @@ struct AssistantTrackerState {
     awaiting_turn: bool,
     input_buffer: String,
     deadline: Option<Instant>,
+    initial_prompt_argv_turn: bool,
+    saw_output_for_turn: bool,
 }
 
 impl AssistantTracker {
@@ -1066,15 +1132,11 @@ impl AssistantTracker {
             return;
         }
 
-        self.record_prompt_submission();
+        self.record_prompt_submission(false);
     }
 
-    fn record_initial_prompt(&self, prompt: &str) {
-        if prompt.trim().is_empty() {
-            return;
-        }
-
-        self.record_prompt_submission();
+    fn record_initial_prompt(&self) {
+        self.record_prompt_submission(true);
     }
 
     fn record_output(&self, count: usize) {
@@ -1086,15 +1148,20 @@ impl AssistantTracker {
         if !state.awaiting_turn {
             return;
         }
-        state.deadline = Some(Instant::now() + COMPLETION_DEBOUNCE);
+        let timeout =
+            turn_output_timeout(state.initial_prompt_argv_turn, state.saw_output_for_turn);
+        state.saw_output_for_turn = true;
+        state.deadline = Some(Instant::now() + timeout);
         self.wake.notify_all();
     }
 
-    fn record_prompt_submission(&self) {
+    fn record_prompt_submission(&self, initial_prompt_argv_turn: bool) {
         {
             let mut state = self.state.lock().expect("tracker lock should not poison");
             state.awaiting_turn = true;
             state.deadline = None;
+            state.initial_prompt_argv_turn = initial_prompt_argv_turn;
+            state.saw_output_for_turn = false;
         }
 
         let _ = send_event(
@@ -1116,6 +1183,8 @@ impl AssistantTracker {
                 state.awaiting_turn = false;
                 state.input_buffer.clear();
                 state.deadline = None;
+                state.initial_prompt_argv_turn = false;
+                state.saw_output_for_turn = false;
                 true
             }
         };
@@ -1168,6 +1237,8 @@ impl AssistantTracker {
             state.awaiting_turn = false;
             state.deadline = None;
             state.input_buffer.clear();
+            state.initial_prompt_argv_turn = false;
+            state.saw_output_for_turn = false;
             drop(state);
 
             let _ = send_event(
@@ -1239,6 +1310,14 @@ fn current_terminal_size() -> (u16, u16) {
     (cols, rows)
 }
 
+fn turn_output_timeout(initial_prompt_argv_turn: bool, saw_output_for_turn: bool) -> Duration {
+    if !saw_output_for_turn && initial_prompt_argv_turn {
+        TURN_OUTPUT_IDLE_TIMEOUT + INITIAL_PROMPT_STARTUP_GRACE
+    } else {
+        TURN_OUTPUT_IDLE_TIMEOUT
+    }
+}
+
 fn normalize_assistant_input(input: &str) -> String {
     let chars = input.chars().collect::<Vec<_>>();
     let mut output = String::new();
@@ -1254,10 +1333,15 @@ fn normalize_assistant_input(input: &str) -> String {
 
         let next = chars.get(index + 1).copied();
         if next == Some('[') {
-            index += 2;
+            let params_start = index + 2;
+            index = params_start;
             while index < chars.len() {
                 let control = chars[index];
                 if ('@'..='~').contains(&control) {
+                    let params = chars[params_start..index].iter().collect::<String>();
+                    if is_soft_newline_escape(&params, control) {
+                        output.push(SOFT_NEWLINE_SENTINEL);
+                    }
                     index += 1;
                     break;
                 }
@@ -1302,6 +1386,7 @@ fn collect_submitted_assistant_prompts(buffer: &mut String, input: &str) -> Vec<
                 }
                 buffer.clear();
             }
+            SOFT_NEWLINE_SENTINEL => buffer.push('\n'),
             '\u{0008}' | '\u{007f}' => {
                 buffer.pop();
             }
@@ -1313,42 +1398,19 @@ fn collect_submitted_assistant_prompts(buffer: &mut String, input: &str) -> Vec<
     prompts
 }
 
-fn initial_prompt_from_command(
-    provider: AssistantProvider,
-    command: &[String],
-) -> Option<String> {
-    let (program, args) = command.split_first()?;
-    let program = program
-        .rsplit('/')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-
-    match provider {
-        AssistantProvider::Codex if program == "codex" => {
-            let prompt = (args.len() == 1).then_some(args[0].trim())?;
-            (!prompt.is_empty()).then_some(prompt.to_string())
-        }
-        AssistantProvider::Claude if program == "claude" => {
-            let args = args
-                .iter()
-                .filter(|arg| arg.as_str() != "--dangerously-skip-permissions")
-                .collect::<Vec<_>>();
-            let prompt = (args.len() == 1).then_some(args[0].trim())?;
-            (!prompt.is_empty()).then_some(prompt.to_string())
-        }
-        _ => None,
-    }
+fn is_soft_newline_escape(params: &str, final_char: char) -> bool {
+    matches!((params, final_char), ("13;2", 'u') | ("27;2;13", '~'))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         bool_metadata_value, collect_submitted_assistant_prompts, effective_activity_at,
-        flat_metadata_items, initial_prompt_from_command, normalize_assistant_input,
-        parse_timestamp, parse_zmx_session, resolve_assistant_provider,
-        should_suspend_for_inactivity_at, update_metadata_item, AssistantProvider,
-        ObserverEvent, ObserverState, PublishedSession, PublishedState,
+        flat_metadata_items, normalize_assistant_input, parse_timestamp, parse_zmx_session,
+        resolve_assistant_provider, sanitize_command_name, should_suspend_for_inactivity_at,
+        turn_output_timeout, update_metadata_item, AssistantProvider, ObserverEvent, ObserverState,
+        PublishedSession, PublishedState, INITIAL_PROMPT_STARTUP_GRACE, SOFT_NEWLINE_SENTINEL,
+        TURN_OUTPUT_IDLE_TIMEOUT,
     };
     use std::collections::BTreeMap;
     use time::Duration as TimeDuration;
@@ -1372,51 +1434,43 @@ mod tests {
     }
 
     #[test]
-    fn initial_prompt_from_command_reads_codex_prompt_arg() {
+    fn assistant_input_treats_shift_enter_as_soft_newline() {
+        let mut buffer = String::new();
+
+        assert!(
+            collect_submitted_assistant_prompts(&mut buffer, "line 1\u{001b}[13;2uline 2")
+                .is_empty()
+        );
+        assert_eq!(buffer, "line 1\nline 2");
         assert_eq!(
-            initial_prompt_from_command(
-                AssistantProvider::Codex,
-                &["codex".to_string(), "ship it".to_string()],
-            ),
-            Some("ship it".to_string())
+            collect_submitted_assistant_prompts(&mut buffer, "\r"),
+            vec!["line 1\nline 2".to_string()]
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn assistant_input_normalizes_shift_enter_escape() {
+        assert_eq!(
+            normalize_assistant_input("hello\u{001b}[13;2uworld"),
+            format!("hello{SOFT_NEWLINE_SENTINEL}world")
         );
     }
 
     #[test]
-    fn initial_prompt_from_command_reads_claude_prompt_arg() {
+    fn turn_output_timeout_adds_startup_grace_only_before_first_output() {
         assert_eq!(
-            initial_prompt_from_command(
-                AssistantProvider::Claude,
-                &[
-                    "claude".to_string(),
-                    "--dangerously-skip-permissions".to_string(),
-                    "ship it".to_string(),
-                ],
-            ),
-            Some("ship it".to_string())
+            turn_output_timeout(true, false),
+            TURN_OUTPUT_IDLE_TIMEOUT + INITIAL_PROMPT_STARTUP_GRACE
         );
+        assert_eq!(turn_output_timeout(true, true), TURN_OUTPUT_IDLE_TIMEOUT);
+        assert_eq!(turn_output_timeout(false, false), TURN_OUTPUT_IDLE_TIMEOUT);
     }
 
     #[test]
-    fn initial_prompt_from_command_ignores_non_prompt_subcommands() {
-        assert_eq!(
-            initial_prompt_from_command(
-                AssistantProvider::Codex,
-                &["codex".to_string(), "login".to_string(), "--help".to_string()],
-            ),
-            None
-        );
-        assert_eq!(
-            initial_prompt_from_command(
-                AssistantProvider::Claude,
-                &[
-                    "claude".to_string(),
-                    "install".to_string(),
-                    "stable".to_string(),
-                ],
-            ),
-            None
-        );
+    fn sanitize_command_name_normalizes_silo_assistants() {
+        assert_eq!(sanitize_command_name("silo codex \"ship it\""), "codex");
+        assert_eq!(sanitize_command_name("silo claude \"ship it\""), "claude");
     }
 
     #[test]
@@ -1527,6 +1581,83 @@ mod tests {
                 .and_then(|session| session.working.then_some(true)),
             Some(true)
         );
+    }
+
+    #[test]
+    fn shell_session_lifecycle_events_manage_presence() {
+        let mut state = ObserverState::default();
+
+        super::apply_event(
+            &mut state,
+            ObserverEvent::ShellSessionStarted {
+                session: "terminal-1".to_string(),
+            },
+        );
+        assert!(state
+            .sessions
+            .get("terminal-1")
+            .map(|session| session.lifecycle_managed)
+            .unwrap_or(false));
+
+        super::apply_event(
+            &mut state,
+            ObserverEvent::ShellSessionExited {
+                session: "terminal-1".to_string(),
+            },
+        );
+        assert!(!state.sessions.contains_key("terminal-1"));
+    }
+
+    #[test]
+    fn reconcile_sessions_keeps_lifecycle_managed_session_on_transient_poll_miss() {
+        let mut state = ObserverState::default();
+        state.sessions.insert(
+            "terminal-1".to_string(),
+            super::SessionState {
+                active_command: Some("codex".to_string()),
+                assistant_provider: Some(AssistantProvider::Codex),
+                working: true,
+                unread: false,
+                lifecycle_managed: true,
+                poll_misses: 0,
+            },
+        );
+
+        super::reconcile_sessions(&mut state, &[]);
+
+        assert!(state.sessions.contains_key("terminal-1"));
+        assert_eq!(
+            state
+                .sessions
+                .get("terminal-1")
+                .map(|session| session.poll_misses),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn build_published_state_uses_observer_state_without_live_poll_data() {
+        let mut state = ObserverState::default();
+        state.sessions.insert(
+            "terminal-1".to_string(),
+            super::SessionState {
+                active_command: Some("codex".to_string()),
+                assistant_provider: Some(AssistantProvider::Codex),
+                working: true,
+                unread: false,
+                lifecycle_managed: true,
+                poll_misses: 2,
+            },
+        );
+
+        let published = super::build_published_state(&state);
+
+        assert!(published.working);
+        assert!(!published.unread);
+        assert_eq!(published.sessions.len(), 1);
+        assert_eq!(published.sessions[0].name, "codex");
+        assert_eq!(published.sessions[0].attachment_id, "terminal-1");
+        assert_eq!(published.sessions[0].working, Some(true));
     }
 
     #[test]
