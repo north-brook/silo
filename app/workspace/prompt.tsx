@@ -4,19 +4,23 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowUp, ChevronsUpDown, Laptop, Terminal } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "../../lib/invoke";
-import { submitWorkspacePrompt } from "../../lib/workspaces";
+import { ClaudeIcon } from "../../components/icons/claude";
+import { CodexIcon } from "../../components/icons/codex";
+import { SiloIcon } from "../../components/icons/silo";
+import { Loader } from "../../components/loader";
 import {
 	Popover,
 	PopoverContent,
 	PopoverTrigger,
 } from "../../components/popover";
-import { Loader } from "../../components/loader";
 import { toast } from "../../components/toaster";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../../components/tooltip";
-import { ClaudeIcon } from "../../components/icons/claude";
-import { CodexIcon } from "../../components/icons/codex";
-import { SiloIcon } from "../../components/icons/silo";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "../../components/tooltip";
+import { invoke } from "../../lib/invoke";
+import { submitWorkspacePrompt } from "../../lib/workspaces";
 
 type Provider = {
 	id: "codex" | "claude";
@@ -129,7 +133,6 @@ export function PromptWorkspace({
 				<div className="rounded-lg border border-border-light bg-surface overflow-hidden">
 					<textarea
 						ref={textareaRef}
-						autoFocus
 						value={prompt}
 						onChange={(e) => {
 							setPrompt(e.target.value);
@@ -165,10 +168,17 @@ export function PromptWorkspace({
 											>
 												{provider.icon}
 												{provider.label}
-												<ChevronsUpDown size={10} className="text-text-placeholder" />
+												<ChevronsUpDown
+													size={10}
+													className="text-text-placeholder"
+												/>
 											</button>
 										</PopoverTrigger>
-										<PopoverContent side="bottom" align="start" className="w-36 p-1">
+										<PopoverContent
+											side="bottom"
+											align="start"
+											className="w-36 p-1"
+										>
 											{PROVIDERS.map((p) => (
 												<button
 													key={p.id}
@@ -188,7 +198,7 @@ export function PromptWorkspace({
 												</button>
 											))}
 										</PopoverContent>
-								</Popover>
+									</Popover>
 								</div>
 							</TooltipTrigger>
 							<TooltipContent side="right">
