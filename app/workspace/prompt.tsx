@@ -14,6 +14,7 @@ import { Loader } from "../../components/loader";
 import { toast } from "../../components/toaster";
 import { ClaudeIcon } from "../../components/icons/claude";
 import { CodexIcon } from "../../components/icons/codex";
+import { SiloIcon } from "../../components/icons/silo";
 
 type Provider = {
 	id: "codex" | "claude";
@@ -100,7 +101,10 @@ export function PromptWorkspace({
 
 	return (
 		<div className="flex-1 flex flex-col items-center justify-center p-6">
-			<div className="w-full max-w-2xl">
+			<div className="w-full max-w-lg">
+				<div className="flex justify-center mb-6">
+					<SiloIcon height={32} />
+				</div>
 				<div className="rounded-lg border border-border-light bg-surface overflow-hidden">
 					<textarea
 						ref={textareaRef}
@@ -115,7 +119,7 @@ export function PromptWorkspace({
 								e.preventDefault();
 							}
 						}}
-						placeholder="What do you want to do?"
+						placeholder="What should we ship?"
 						rows={4}
 						className="w-full resize-none bg-transparent border-0 px-4 pt-4 pb-2 text-sm text-text-bright placeholder:text-text-placeholder outline-none focus:border-0 focus:ring-0 min-h-[6rem] max-h-64 overflow-y-auto"
 					/>
