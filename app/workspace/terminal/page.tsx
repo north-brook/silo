@@ -4,7 +4,7 @@ import { Channel } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 import "@xterm/xterm/css/xterm.css";
 import { invoke } from "../../../lib/invoke";
@@ -87,27 +87,43 @@ function TerminalView() {
 	const searchParams = useSearchParams();
 	const workspace = searchParams.get("workspace") ?? "";
 	const attachmentId = searchParams.get("attachment_id") ?? "";
+	const fresh = searchParams.get("fresh") === "1";
+	const cleanParams = new URLSearchParams(searchParams.toString());
+	cleanParams.delete("fresh");
+	const cleanUrl = `/workspace/terminal?${cleanParams.toString()}`;
 
 	if (!workspace || !attachmentId) {
 		return null;
 	}
 
 	return (
-		<WorkspaceTerminal workspace={workspace} attachmentId={attachmentId} />
+		<WorkspaceTerminal
+			key={`${workspace}:${attachmentId}`}
+			workspace={workspace}
+			attachmentId={attachmentId}
+			skipScrollback={fresh}
+			cleanUrl={cleanUrl}
+		/>
 	);
 }
 
 function WorkspaceTerminal({
 	workspace,
 	attachmentId,
+	skipScrollback,
+	cleanUrl,
 }: {
 	workspace: string;
 	attachmentId: string;
+	skipScrollback: boolean;
+	cleanUrl: string;
 }) {
+	const router = useRouter();
 	const containerRef = useRef<HTMLDivElement>(null);
 	const terminalRef = useRef<Terminal | null>(null);
 	const terminalIdRef = useRef<string | null>(null);
 	const pendingDetachRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const initialSkipScrollbackRef = useRef(skipScrollback);
 	const [loading, setLoading] = useState(true);
 
 	useEffect(() => {
@@ -199,7 +215,8 @@ function WorkspaceTerminal({
 					"terminal_attach_terminal",
 					{
 						workspace,
-						attachment_id: attachmentId,
+						attachmentId,
+						skipScrollback: initialSkipScrollbackRef.current,
 						output,
 					},
 				);
@@ -218,6 +235,9 @@ function WorkspaceTerminal({
 					cols: term.cols,
 					rows: term.rows,
 				});
+				if (initialSkipScrollbackRef.current) {
+					router.replace(cleanUrl);
+				}
 				term.focus();
 			} catch (error) {
 				setLoading(false);
@@ -270,7 +290,7 @@ function WorkspaceTerminal({
 				pendingDetachRef.current = setTimeout(() => {
 					void invoke("terminal_detach_terminal", {
 						workspace,
-						attachment_id: attachmentId,
+						attachmentId,
 					});
 					if (terminalIdRef.current === attachedTerminal) {
 						terminalIdRef.current = null;
@@ -279,7 +299,7 @@ function WorkspaceTerminal({
 				}, 250);
 			}
 		};
-	}, [workspace, attachmentId]);
+	}, [workspace, attachmentId, cleanUrl, router]);
 
 	return (
 		<div className="flex-1 min-h-0 bg-surface relative">

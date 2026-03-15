@@ -20,6 +20,7 @@ import {
 	Suspense,
 	useContext,
 	useEffect,
+	useRef,
 	useState,
 	type ReactNode,
 } from "react";
@@ -457,12 +458,12 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 					navigate();
 				}
 			}}
-			className={`group flex items-center w-full pl-5 pr-3 py-1.5 text-xs transition-colors cursor-pointer ${
+			className={`group flex items-center w-full pl-5 pr-3 py-2 text-xs transition-colors cursor-pointer ${
 				isDisabled
 					? "pointer-events-none"
 					: isActive
 						? "bg-btn-hover text-text-bright"
-						: "text-text-muted hover:bg-btn-hover hover:text-text-bright"
+						: "text-text hover:bg-btn-hover hover:text-text-bright"
 			}`}
 		>
 			<span className="flex items-center gap-2 min-w-0 flex-1">
@@ -483,93 +484,106 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 					<button
 						type="button"
 						onClick={(e) => e.stopPropagation()}
-						className="shrink-0 ml-auto p-1 -mr-1 text-text-placeholder hover:text-text-bright opacity-0 group-hover:opacity-100 transition-opacity"
+						className={`group/action shrink-0 ml-auto p-1 -mr-1 w-5 h-5 flex items-center justify-center text-text-placeholder hover:text-text-bright transition-opacity ${
+							isRunning && !isTemplate && (workspace.working || workspace.unread)
+								? ""
+								: "opacity-0 group-hover:opacity-100"
+						}`}
 					>
-						<EllipsisVertical size={12} />
+						{isRunning && !isTemplate && workspace.working ? (
+							<Loader className="text-blue-400" />
+						) : isRunning && !isTemplate && workspace.unread ? (
+							<>
+								<span className="block w-2 h-2 rounded-full bg-blue-400 group-hover/action:hidden" />
+								<EllipsisVertical size={12} className="hidden group-hover/action:block" />
+							</>
+						) : (
+							<EllipsisVertical size={12} />
+						)}
 					</button>
 				</PopoverTrigger>
-				<PopoverContent side="right" align="start" className="w-36 p-1">
-					{isTemplate ? (
-						<>
-							{workspace.ready && (
-								<button
-									type="button"
-									onClick={(e) => {
-										e.stopPropagation();
-										setMenuOpen(false);
-										saveTemplateMut.mutate();
-									}}
-									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
-								>
-									{saveTemplateMut.isPending ? (
-										<Loader className="text-text-bright" />
-									) : (
-										<Save size={12} />
-									)}
-									Save
-								</button>
-							)}
-							<button
-								type="button"
-								onClick={(e) => {
-									e.stopPropagation();
-									setMenuOpen(false);
-									router.push("/");
-									deleteTemplateMut.mutate();
-								}}
-								className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
-							>
-								<Trash2 size={12} />
-								Delete
-							</button>
-						</>
-					) : (
-						<>
-							{isStopped && (
-								<button
-									type="button"
-									onClick={(e) => {
-										e.stopPropagation();
-										start.mutate();
-										setMenuOpen(false);
-									}}
-									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
-								>
-									<Play size={12} />
-									Start
-								</button>
-							)}
-							{isRunning && (
+					<PopoverContent side="right" align="start" className="w-36 p-1">
+						{isTemplate ? (
+							<>
+								{workspace.ready && (
+									<button
+										type="button"
+										onClick={(e) => {
+											e.stopPropagation();
+											setMenuOpen(false);
+											saveTemplateMut.mutate();
+										}}
+										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+									>
+										{saveTemplateMut.isPending ? (
+											<Loader className="text-text-bright" />
+										) : (
+											<Save size={12} />
+										)}
+										Save
+									</button>
+								)}
 								<button
 									type="button"
 									onClick={(e) => {
 										e.stopPropagation();
 										setMenuOpen(false);
 										router.push("/");
-										stop.mutate();
+										deleteTemplateMut.mutate();
 									}}
-									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
 								>
-									<Square size={12} />
-									Stop
+									<Trash2 size={12} />
+									Delete
 								</button>
-							)}
-							<button
-								type="button"
-								onClick={(e) => {
-									e.stopPropagation();
-									setMenuOpen(false);
-									router.push("/");
-									remove.mutate();
-								}}
-								className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
-							>
-								<Trash2 size={12} />
-								Delete
-							</button>
-						</>
-					)}
-				</PopoverContent>
+							</>
+						) : (
+							<>
+								{isStopped && (
+									<button
+										type="button"
+										onClick={(e) => {
+											e.stopPropagation();
+											start.mutate();
+											setMenuOpen(false);
+										}}
+										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+									>
+										<Play size={12} />
+										Start
+									</button>
+								)}
+								{isRunning && (
+									<button
+										type="button"
+										onClick={(e) => {
+											e.stopPropagation();
+											setMenuOpen(false);
+											router.push("/");
+											stop.mutate();
+										}}
+										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+									>
+										<Square size={12} />
+										Stop
+									</button>
+								)}
+								<button
+									type="button"
+									onClick={(e) => {
+										e.stopPropagation();
+										setMenuOpen(false);
+										router.push("/");
+										remove.mutate();
+									}}
+									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
+								>
+									<Trash2 size={12} />
+									Delete
+								</button>
+							</>
+						)}
+					</PopoverContent>
 			</Popover>
 		</div>
 	);
@@ -648,6 +662,29 @@ export function ProjectsBar() {
 		refetchInterval: 15000,
 	});
 	const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+
+	const prevUnreadRef = useRef<Set<string> | null>(null);
+
+	useEffect(() => {
+		if (!workspaces.data) return;
+
+		const currentUnread = new Set(
+			workspaces.data
+				.filter((w) => !isTemplateWorkspace(w) && w.unread)
+				.map((w) => w.name),
+		);
+
+		const prev = prevUnreadRef.current;
+
+		if (prev !== null) {
+			const hasNewUnread = [...currentUnread].some((name) => !prev.has(name));
+			if (hasNewUnread) {
+				new Audio("/sounds/notification.wav").play().catch(() => {});
+			}
+		}
+
+		prevUnreadRef.current = currentUnread;
+	}, [workspaces.data]);
 
 	if (!isOpen) return null;
 	if (!projects.data || projects.data.length === 0) return null;

@@ -87,7 +87,7 @@ export function PromptWorkspace({
 				queryKey: ["terminal_list_terminals", workspace],
 			});
 			router.push(
-				`/workspace/terminal?project=${encodeURIComponent(project ?? "")}&workspace=${encodeURIComponent(workspace)}&attachment_id=${encodeURIComponent(result.attachment_id)}`,
+				`/workspace/terminal?project=${encodeURIComponent(project ?? "")}&workspace=${encodeURIComponent(workspace)}&attachment_id=${encodeURIComponent(result.attachment_id)}&fresh=1`,
 			);
 		},
 		onError: (error) => {

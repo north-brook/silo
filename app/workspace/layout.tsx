@@ -4,6 +4,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Terminal, X } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
+import { ClaudeIcon } from "../../components/icons/claude";
+import { CodexIcon } from "../../components/icons/codex";
 import { invoke } from "../../lib/invoke";
 import type { Workspace, WorkspaceSession } from "../../lib/workspaces";
 import { Loader } from "../../components/loader";
@@ -33,6 +35,32 @@ function LayoutSkeleton({ children }: { children: React.ReactNode }) {
 			{children}
 		</>
 	);
+}
+
+function terminalTabPresentation(name: string) {
+	const trimmed = name.trim();
+	const [token, ...rest] = trimmed.split(/\s+/);
+	const normalizedToken = token?.toLowerCase() ?? "";
+	if (normalizedToken === "cc" || normalizedToken === "claude") {
+		const label =
+			normalizedToken === "cc"
+				? ["claude", ...rest].join(" ").trim()
+				: trimmed || "claude";
+		return {
+			icon: <ClaudeIcon height={12} />,
+			label,
+		};
+	}
+	if (normalizedToken === "codex") {
+		return {
+			icon: <CodexIcon height={12} />,
+			label: trimmed || "codex",
+		};
+	}
+	return {
+		icon: <Terminal size={12} />,
+		label: trimmed || "shell",
+	};
 }
 
 function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
@@ -71,7 +99,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 				},
 			),
 		enabled: !!workspaceName && isWorkspaceReady,
-		refetchInterval: 5000,
+		refetchInterval: 2000,
 	});
 
 	const createTerminal = useMutation({
@@ -84,7 +112,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 				queryKey: ["terminal_list_terminals", workspaceName],
 			});
 			router.push(
-				`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspaceName)}&attachment_id=${encodeURIComponent(result.attachment_id)}`,
+				`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspaceName)}&attachment_id=${encodeURIComponent(result.attachment_id)}&fresh=1`,
 			);
 		},
 		onError: (error) => {
@@ -106,7 +134,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 		mutationFn: (attachment_id: string) =>
 			invoke("terminal_kill_terminal", {
 				workspace: workspaceName,
-				attachment_id,
+				attachmentId: attachment_id,
 			}),
 		onMutate: (attachment_id) => {
 			setKillingTerminal(attachment_id);
@@ -139,7 +167,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 
 		void invoke("terminal_read_terminal", {
 			workspace: workspaceName,
-			attachment_id: activeTerminal,
+			attachmentId: activeTerminal,
 		})
 			.then(() =>
 				queryClient.invalidateQueries({
@@ -166,6 +194,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 				<div className="w-full bg-bg shrink-0 flex items-end overflow-x-auto">
 					{terminalList.map((session) => {
 						const isActive = activeTerminal === session.attachment_id;
+						const { icon, label } = terminalTabPresentation(session.name);
 						return (
 							// biome-ignore lint/a11y/noStaticElementInteractions: can't use <button> because it contains interactive children
 							<div
@@ -183,17 +212,37 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 										);
 									}
 								}}
-								className={`group/tab h-9 flex items-center gap-1.5 pl-3 pr-2 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
+								className={`group/tab h-9 flex items-center gap-1.5 pl-3.5 pr-2.5 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
 									isActive
 										? "bg-surface text-text-bright border-r-border-light border-b-surface"
-										: "text-text-muted border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text"
+										: "text-text border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text-bright"
 								}`}
 							>
-								<Terminal size={12} />
-								<span className="max-w-48 truncate">{session.name}</span>
+								{icon}
+								<span className="max-w-48 truncate">
+									{label}
+								</span>
 								{killingTerminal === session.attachment_id ? (
 									<span className="p-0.5">
 										<Loader />
+									</span>
+								) : session.working ? (
+									<span className="p-0.5">
+										<Loader className="text-blue-400" />
+									</span>
+								) : session.unread && !isActive ? (
+									<span className="group/unread relative p-0.5 flex items-center justify-center">
+										<span className="shrink-0 w-2 h-2 rounded-full bg-blue-400 group-hover/unread:hidden" />
+										<button
+											type="button"
+											onClick={(e) => {
+												e.stopPropagation();
+												killTerminal.mutate(session.attachment_id);
+											}}
+											className="hidden group-hover/unread:block p-0.5 rounded transition-colors hover:bg-border-light text-text-muted hover:text-text-bright"
+										>
+											<X size={10} />
+										</button>
 									</span>
 								) : (
 									<button
