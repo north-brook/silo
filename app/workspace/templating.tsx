@@ -4,15 +4,15 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Check, Laptop, Terminal } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { type ReactNode, useEffect, useState } from "react";
-import { invoke } from "../../lib/invoke";
-import { Loader } from "../../components/loader";
-import { toast } from "../../components/toaster";
 import { ChromeIcon } from "../../components/icons/chrome";
 import { ClaudeIcon } from "../../components/icons/claude";
 import { CodexIcon } from "../../components/icons/codex";
 import { GCloudIcon } from "../../components/icons/gcloud";
 import { GHIcon } from "../../components/icons/gh";
 import { SiloIcon } from "../../components/icons/silo";
+import { Loader } from "../../components/loader";
+import { toast } from "../../components/toaster";
+import { invoke } from "../../lib/invoke";
 
 interface Step {
 	label: string;
@@ -20,7 +20,35 @@ interface Step {
 	state: "pending" | "active" | "done";
 }
 
+type ConfigStep = {
+	label: string;
+	icon: ReactNode;
+	delay: number;
+};
+
 const ICON_SIZE = 12;
+const CONFIG_STEPS: ConfigStep[] = [
+	{
+		label: "Configuring git",
+		icon: <GHIcon height={ICON_SIZE} />,
+		delay: 2_000,
+	},
+	{
+		label: "Configuring codex",
+		icon: <CodexIcon height={ICON_SIZE} />,
+		delay: 2_000,
+	},
+	{
+		label: "Configuring claude code",
+		icon: <ClaudeIcon height={ICON_SIZE} />,
+		delay: 2_000,
+	},
+	{
+		label: "Configuring chrome",
+		icon: <ChromeIcon height={ICON_SIZE} />,
+		delay: 30_000,
+	},
+];
 
 function useProvisioningSteps(
 	status: string,
@@ -43,29 +71,6 @@ function useProvisioningSteps(
 			? "active"
 			: "pending";
 
-	const configSteps = [
-		{
-			label: "Configuring git",
-			icon: <GHIcon height={ICON_SIZE} />,
-			delay: 2_000,
-		},
-		{
-			label: "Configuring codex",
-			icon: <CodexIcon height={ICON_SIZE} />,
-			delay: 2_000,
-		},
-		{
-			label: "Configuring claude code",
-			icon: <ClaudeIcon height={ICON_SIZE} />,
-			delay: 2_000,
-		},
-		{
-			label: "Configuring chrome",
-			icon: <ChromeIcon height={ICON_SIZE} />,
-			delay: 30_000,
-		},
-	];
-
 	// Start config timers once VM is running
 	useEffect(() => {
 		if (!isRunning) return;
@@ -73,8 +78,8 @@ function useProvisioningSteps(
 
 		const timers: ReturnType<typeof setTimeout>[] = [];
 		let cumulative = 0;
-		for (let i = 0; i < configSteps.length; i++) {
-			cumulative += configSteps[i].delay;
+		for (let i = 0; i < CONFIG_STEPS.length; i++) {
+			cumulative += CONFIG_STEPS[i].delay;
 			timers.push(setTimeout(() => setConfigIndex(i + 1), cumulative));
 		}
 
@@ -84,7 +89,7 @@ function useProvisioningSteps(
 	}, [isRunning]);
 
 	// "Configuring secure access" runs until ready
-	const configsDone = configIndex >= configSteps.length;
+	const configsDone = configIndex >= CONFIG_STEPS.length;
 	const secureAccessState: Step["state"] = ready
 		? "done"
 		: configsDone
@@ -102,7 +107,7 @@ function useProvisioningSteps(
 			icon: <GCloudIcon height={ICON_SIZE} />,
 			state: vmStartState,
 		},
-		...configSteps.map(({ label, icon }, i) => {
+		...CONFIG_STEPS.map(({ label, icon }, i) => {
 			let state: Step["state"] = ready ? "done" : "pending";
 			if (!ready) {
 				if (configIndex > i) state = "done";
