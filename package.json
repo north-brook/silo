@@ -11,7 +11,7 @@
 		"check": "bun x @biomejs/biome check .",
 		"check:fix": "bun x @biomejs/biome check --write .",
 		"reset": "rm -rf \"$HOME/.silo\"",
-		"reset:gcp": "python3 tools/reset_gcp.py"
+		"reset:gcp": "python3 scripts/reset_gcp.py"
 	},
 	"dependencies": {
 		"@radix-ui/react-dialog": "^1.1.15",

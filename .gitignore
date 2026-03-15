@@ -12,6 +12,7 @@ dist
 dist-ssr
 .next
 out
+target
 *.local
 .next
 tsconfig.tsbuildinfo
@@ -26,3 +27,5 @@ tsconfig.tsbuildinfo
 *.njsproj
 *.sln
 *.sw?
+__pycache__/
+*.py[cod]
