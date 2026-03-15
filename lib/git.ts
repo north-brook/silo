@@ -145,6 +145,23 @@ export function gitTreeDirty(workspace: string): Promise<boolean> {
 	);
 }
 
+export function gitUpdateBranch(
+	workspace: string,
+	branch: string,
+): Promise<void> {
+	return invoke<void>("git_update_branch", { workspace, branch });
+}
+
+export function gitUpdateTargetBranch(
+	workspace: string,
+	targetBranch: string,
+): Promise<void> {
+	return invoke<void>("git_update_target_branch", {
+		workspace,
+		target_branch: targetBranch,
+	});
+}
+
 export function gitPush(workspace: string): Promise<GitTerminalResult> {
 	return invoke<GitTerminalResult>("git_push", { workspace });
 }

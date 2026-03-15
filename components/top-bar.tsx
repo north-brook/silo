@@ -2,10 +2,18 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Box, ChevronRight, ChevronsUpDown, GitBranch, PanelLeft, Save } from "lucide-react";
+import {
+	Box,
+	ChevronRight,
+	ChevronsUpDown,
+	GitBranch,
+	PanelLeft,
+	Save,
+} from "lucide-react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+import { gitUpdateBranch, gitUpdateTargetBranch } from "../lib/git";
 import { invoke } from "../lib/invoke";
 import type { ListedProject } from "../lib/projects";
 import { isTemplateWorkspace, type Workspace } from "../lib/workspaces";
@@ -97,7 +105,9 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 
 	return (
 		<header className="h-9 w-full border-b border-border-light shrink-0 flex items-center relative">
-			<div className={`relative flex items-center justify-between w-full px-3 h-full z-10 ${!projectsBarOpen ? "pl-20" : ""}`}>
+			<div
+				className={`relative flex items-center justify-between w-full px-3 h-full z-10 ${!projectsBarOpen ? "pl-20" : ""}`}
+			>
 				<div className="flex items-center gap-2 text-[11px] text-text-muted">
 					<ProjectsBarReopenButton />
 					{projectImage ? (
@@ -164,10 +174,7 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 
 	const updateBranch = useMutation({
 		mutationFn: (newBranch: string) =>
-			invoke("workspaces_update_workspace_branch", {
-				workspace: workspace.name,
-				branch: newBranch,
-			}),
+			gitUpdateBranch(workspace.name, newBranch),
 		onSuccess: () => {
 			queryClient.invalidateQueries({
 				queryKey: ["workspaces_get_workspace", workspace.name],
@@ -176,20 +183,31 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 				queryKey: ["workspaces_list_workspaces"],
 			});
 		},
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to rename branch",
+				description: error.message,
+			});
+		},
 	});
 
 	const updateTargetBranch = useMutation({
 		mutationFn: (newTargetBranch: string) =>
-			invoke("workspaces_update_workspace_target_branch", {
-				workspace: workspace.name,
-				target_branch: newTargetBranch,
-			}),
+			gitUpdateTargetBranch(workspace.name, newTargetBranch),
 		onSuccess: () => {
 			queryClient.invalidateQueries({
 				queryKey: ["workspaces_get_workspace", workspace.name],
 			});
 			queryClient.invalidateQueries({
 				queryKey: ["workspaces_list_workspaces"],
+			});
+		},
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to update target branch",
+				description: error.message,
 			});
 		},
 	});
@@ -237,7 +255,9 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 
 	return (
 		<header className="h-9 w-full border-b border-border-light shrink-0 flex items-center relative">
-			<div className={`relative flex items-center justify-between w-full pr-2 h-full z-10 ${!projectsBarOpen ? "pl-20" : "pl-3"}`}>
+			<div
+				className={`relative flex items-center justify-between w-full pr-2 h-full z-10 ${!projectsBarOpen ? "pl-20" : "pl-3"}`}
+			>
 				<div className="flex items-center gap-2 text-[11px] text-text-muted">
 					<ProjectsBarReopenButton />
 					{projectImage ? (
