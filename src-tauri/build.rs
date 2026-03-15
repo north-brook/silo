@@ -1,6 +1,6 @@
 use std::env;
-use std::fs;
 use std::ffi::OsString;
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -13,7 +13,8 @@ fn main() {
 }
 
 fn build_workspace_observer() {
-    let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("missing CARGO_MANIFEST_DIR"));
+    let manifest_dir =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("missing CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir
         .parent()
         .expect("src-tauri should live under the workspace root");
@@ -27,8 +28,7 @@ fn build_workspace_observer() {
     println!("cargo:rerun-if-changed={}", observer_main.display());
     println!("cargo:rerun-if-env-changed=ZIG");
 
-    let out_dir =
-        PathBuf::from(env::var_os("OUT_DIR").expect("missing OUT_DIR for build script"));
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("missing OUT_DIR for build script"));
     let linker_path = out_dir.join("zig-linux-musl-linker.sh");
     let zig = env::var("ZIG").unwrap_or_else(|_| "zig".to_string());
     fs::write(
@@ -53,8 +53,10 @@ fn build_workspace_observer() {
 
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let target_dir = workspace_root.join("target/workspace-observer-host-build");
-    let encoded_rustflags =
-        append_encoded_rustflags(env::var_os("CARGO_ENCODED_RUSTFLAGS"), "-Clink-self-contained=no");
+    let encoded_rustflags = append_encoded_rustflags(
+        env::var_os("CARGO_ENCODED_RUSTFLAGS"),
+        "-Clink-self-contained=no",
+    );
     let status = Command::new(cargo)
         .current_dir(workspace_root)
         .arg("build")
