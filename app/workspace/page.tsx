@@ -69,9 +69,7 @@ function WorkspaceView() {
 		);
 	}
 
-	const isPrompt = !workspace.data.last_active;
-
-	return isPrompt ? (
+	return (
 		<PromptWorkspace
 			isRunning={isRunning}
 			ready={workspace.data.ready}
@@ -79,7 +77,5 @@ function WorkspaceView() {
 			workspace={workspace.data.name}
 			project={workspace.data.project}
 		/>
-	) : (
-		<div className="flex-1 overflow-auto p-4" />
 	);
 }
