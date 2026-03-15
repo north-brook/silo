@@ -89,7 +89,7 @@ pub struct TerminalAttachResult {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TerminalCreateResult {
-    attachment_id: String,
+    pub(crate) attachment_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -457,6 +457,14 @@ pub(crate) async fn start_terminal_command(
         command.to_string(),
     );
     Ok(attachment_id)
+}
+
+pub(crate) fn codex_prompt_command(prompt: &str) -> String {
+    assistant_prompt_command("codex", prompt)
+}
+
+pub(crate) fn claude_prompt_command(prompt: &str) -> String {
+    assistant_prompt_command("cc", prompt)
 }
 
 #[tauri::command]
@@ -1865,9 +1873,18 @@ _silo_observer_emit() {{\n\
 }}\n\
 _silo_observer_wrap_assistant() {{\n\
   local provider=\"$1\"\n\
+  local initial_prompt_argv=0\n\
   shift\n\
+  if [ \"${{1:-}}\" = \"--silo-argv-prompt\" ]; then\n\
+    initial_prompt_argv=1\n\
+    shift\n\
+  fi\n\
   if [ -z \"${{ZMX_SESSION:-}}\" ] || [ ! -x \"${{SILO_WORKSPACE_OBSERVER_BIN:-}}\" ]; then\n\
     command \"$@\"\n\
+    return\n\
+  fi\n\
+  if [ \"$initial_prompt_argv\" = \"1\" ]; then\n\
+    command \"$SILO_WORKSPACE_OBSERVER_BIN\" assistant-proxy --provider \"$provider\" --initial-prompt-argv -- \"$@\"\n\
     return\n\
   fi\n\
   command \"$SILO_WORKSPACE_OBSERVER_BIN\" assistant-proxy --provider \"$provider\" -- \"$@\"\n\
@@ -2001,6 +2018,14 @@ fn terminal_attach_remote_command(name: &str) -> String {
 fn terminal_run_remote_command(name: &str, command: &str) -> String {
     let command = format!("zmx run {} {}", shell_quote(name), shell_quote(command));
     run_terminal_user_command(&terminal_shell_command(&command))
+}
+
+fn assistant_prompt_command(prefix: &str, prompt: &str) -> String {
+    let encoded_prompt = BASE64_STANDARD.encode(prompt);
+    format!(
+        "{prefix} --silo-argv-prompt \"$(printf %s {} | base64 --decode)\"",
+        shell_quote(&encoded_prompt)
+    )
 }
 
 fn terminal_shell_command(command: &str) -> String {
@@ -2549,6 +2574,16 @@ fn sanitize_session_display_name(command: &str) -> String {
     if trimmed.is_empty() {
         return "shell".to_string();
     }
+    if trimmed.starts_with("codex --silo-argv-prompt \"$(printf %s ")
+        && trimmed.ends_with("| base64 --decode)\"")
+    {
+        return "codex".to_string();
+    }
+    if trimmed.starts_with("cc --silo-argv-prompt \"$(printf %s ")
+        && trimmed.ends_with("| base64 --decode)\"")
+    {
+        return "claude".to_string();
+    }
     trimmed.chars().take(200).collect()
 }
 
@@ -2633,6 +2668,48 @@ mod tests {
             terminal_run_remote_command("terminal-1", "codex -- \"hello\""),
             "sudo -iu silo bash -lc 'if [ -f '\"'\"'/home/silo/.silo/credentials.sh'\"'\"' ]; then source '\"'\"'/home/silo/.silo/credentials.sh'\"'\"'; fi; cd '\"'\"'/home/silo/workspace'\"'\"'; zmx run '\"'\"'terminal-1'\"'\"' '\"'\"'codex -- \"hello\"'\"'\"''"
         );
+    }
+
+    #[test]
+    fn codex_prompt_command_encodes_multiline_prompt_on_one_line() {
+        let prompt = "what is this project?\ninclude 'quotes' too";
+        let command = codex_prompt_command(prompt);
+
+        assert!(command.starts_with("codex --silo-argv-prompt \"$(printf %s '"));
+        assert!(command.ends_with("| base64 --decode)\""));
+
+        let encoded = command
+            .strip_prefix("codex --silo-argv-prompt \"$(printf %s '")
+            .and_then(|value| value.strip_suffix("' | base64 --decode)\""))
+            .expect("command should embed a base64 prompt");
+        let decoded = String::from_utf8(
+            BASE64_STANDARD
+                .decode(encoded)
+                .expect("embedded prompt should decode"),
+        )
+        .expect("embedded prompt should be utf8");
+        assert_eq!(decoded, prompt);
+    }
+
+    #[test]
+    fn claude_prompt_command_encodes_multiline_prompt_on_one_line() {
+        let prompt = "ship the change\ninclude 'quotes' too";
+        let command = claude_prompt_command(prompt);
+
+        assert!(command.starts_with("cc --silo-argv-prompt \"$(printf %s '"));
+        assert!(command.ends_with("| base64 --decode)\""));
+
+        let encoded = command
+            .strip_prefix("cc --silo-argv-prompt \"$(printf %s '")
+            .and_then(|value| value.strip_suffix("' | base64 --decode)\""))
+            .expect("command should embed a base64 prompt");
+        let decoded = String::from_utf8(
+            BASE64_STANDARD
+                .decode(encoded)
+                .expect("embedded prompt should decode"),
+        )
+        .expect("embedded prompt should be utf8");
+        assert_eq!(decoded, prompt);
     }
 
     #[test]
@@ -2948,6 +3025,17 @@ mod tests {
         assert_eq!(session.name, "shell");
         assert_eq!(session.working, None);
         assert_eq!(session.unread, None);
+    }
+
+    #[test]
+    fn session_for_command_normalizes_generated_claude_prompt_name() {
+        let session = session_for_command(
+            "terminal-1",
+            "cc --silo-argv-prompt \"$(printf %s 'c2hpcCBpdA==' | base64 --decode)\"",
+        );
+        assert_eq!(session.name, "claude");
+        assert_eq!(session.working, Some(false));
+        assert_eq!(session.unread, Some(false));
     }
 
     #[test]

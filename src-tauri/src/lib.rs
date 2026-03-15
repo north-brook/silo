@@ -83,6 +83,7 @@ pub fn run() {
             workspaces::workspaces_stop_workspace,
             workspaces::workspaces_suspend_workspace,
             workspaces::workspaces_get_workspace,
+            workspaces::workspaces_submit_prompt,
             workspaces::workspaces_delete_workspace,
             terminal::terminal_create_terminal,
             terminal::terminal_list_terminals,
