@@ -16,16 +16,21 @@ import {
 	SkipForward,
 	X,
 } from "lucide-react";
+import Image from "next/image";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
 	createContext,
+	type ReactNode,
 	Suspense,
 	useContext,
 	useEffect,
 	useState,
-	type ReactNode,
 } from "react";
 import {
+	type CheckState,
+	type Diff,
+	type DiffFile,
+	type DiffSection,
 	gitCreatePr,
 	gitDiff,
 	gitMergePr,
@@ -33,10 +38,6 @@ import {
 	gitPrStatus,
 	gitPush,
 	gitTreeDirty,
-	type CheckState,
-	type Diff,
-	type DiffFile,
-	type DiffSection,
 } from "../lib/git";
 import { invoke } from "../lib/invoke";
 import { isTemplateWorkspace, type Workspace } from "../lib/workspaces";
@@ -243,7 +244,13 @@ export function GitBar() {
 // ---------------------------------------------------------------------------
 
 function GitBarHeader() {
-	const { workspace, project, toggle, prStatus: pr, prStatusLoading } = useGitBar();
+	const {
+		workspace,
+		project,
+		toggle,
+		prStatus: pr,
+		prStatusLoading,
+	} = useGitBar();
 	const router = useRouter();
 	const queryClient = useQueryClient();
 
@@ -566,7 +573,7 @@ function DiffTab() {
 	if (!diff) return null;
 
 	return (
-		<div className="flex flex-col">
+		<div className="flex flex-col gap-2">
 			<DiffSectionView label="Local" section={diff.local} />
 			<DiffSectionView label="Remote" section={diff.remote} />
 		</div>
@@ -583,7 +590,7 @@ function DiffSectionView({
 	if (section.files.length === 0) return null;
 
 	return (
-		<div className="border-b border-border-light last:border-b-0">
+		<div>
 			<div className="flex items-center justify-between px-3 py-1.5 text-[11px]">
 				<span className="text-[10px] text-text-muted font-medium uppercase tracking-wide">
 					{label}
@@ -681,9 +688,12 @@ function ChecksTab({
 							className="flex items-center gap-2 px-3 py-1 -mx-3 text-[11px] hover:bg-btn-hover transition-colors text-left"
 						>
 							{d.icon_url ? (
-								<img
+								<Image
 									src={d.icon_url}
 									alt=""
+									unoptimized
+									width={14}
+									height={14}
 									className="w-3.5 h-3.5 rounded shrink-0"
 								/>
 							) : (
@@ -777,8 +787,6 @@ function CheckStateIcon({ state }: { state: CheckState }) {
 			return <Ellipsis size={size} className="shrink-0 text-yellow-400" />;
 		case "neutral":
 			return <Minus size={size} className="shrink-0 text-text-muted" />;
-		case "stale":
-		case "unknown":
 		default:
 			return <Minus size={size} className="shrink-0 text-text-muted" />;
 	}
