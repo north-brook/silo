@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
+	Box,
 	ChevronDown,
 	Cpu,
 	EllipsisVertical,
@@ -10,7 +11,6 @@ import {
 	Play,
 	Plus,
 	Save,
-	Box,
 	Square,
 	Trash2,
 } from "lucide-react";
@@ -18,12 +18,12 @@ import Image from "next/image";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
 	createContext,
+	type ReactNode,
 	Suspense,
 	useContext,
 	useEffect,
 	useRef,
 	useState,
-	type ReactNode,
 } from "react";
 import { invoke } from "../lib/invoke";
 import type { ListedProject } from "../lib/projects";
@@ -34,13 +34,13 @@ import {
 	type Workspace,
 	workspaceLabel,
 } from "../lib/workspaces";
+import { LogoIcon } from "./icons/logo";
+import { Loader } from "./loader";
 import { useNewWorkspace } from "./new-workspace";
 import { useOpenProject } from "./open-project";
 import { Popover, PopoverContent, PopoverTrigger } from "./popover";
-import { Loader } from "./loader";
 import { toast } from "./toaster";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
-import { LogoIcon } from "./icons/logo";
 import { WorkspaceIndicator } from "./workspace-status";
 
 // ---------------------------------------------------------------------------
@@ -80,7 +80,9 @@ function ProjectsBarProviderInner({ children }: { children: ReactNode }) {
 	}, []);
 
 	return (
-		<ProjectsBarContext.Provider value={{ isOpen, toggle: () => setIsOpen((o) => !o) }}>
+		<ProjectsBarContext.Provider
+			value={{ isOpen, toggle: () => setIsOpen((o) => !o) }}
+		>
 			{children}
 		</ProjectsBarContext.Provider>
 	);
@@ -481,7 +483,8 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 	const optimisticStopping = stop.isPending || remove.isPending;
 	const optimisticSuspending = suspend.isPending;
 	const optimisticStarting = start.isPending;
-	const isDisabled = optimisticStopping || optimisticSuspending || isStopping || isSuspending;
+	const isDisabled =
+		optimisticStopping || optimisticSuspending || isStopping || isSuspending;
 	const [menuOpen, setMenuOpen] = useState(false);
 
 	const navigate = () =>
@@ -539,7 +542,11 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 						type="button"
 						onClick={(e) => e.stopPropagation()}
 						className={`group/action shrink-0 ml-auto p-1 -mr-1 w-5 h-5 flex items-center justify-center text-text-placeholder hover:text-text-bright transition-opacity ${
-							(isRunning && !isTemplate && (workspace.working || workspace.unread)) || (isSuspended && !isTemplate)
+							(
+								isRunning &&
+									!isTemplate &&
+									(workspace.working || workspace.unread)
+							) || (isSuspended && !isTemplate)
 								? ""
 								: "opacity-0 group-hover:opacity-100"
 						}`}
@@ -549,128 +556,134 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 						) : isRunning && !isTemplate && workspace.unread ? (
 							<>
 								<span className="block w-2 h-2 rounded-full bg-blue-400 group-hover/action:hidden" />
-								<EllipsisVertical size={12} className="hidden group-hover/action:block" />
+								<EllipsisVertical
+									size={12}
+									className="hidden group-hover/action:block"
+								/>
 							</>
 						) : isSuspended && !isTemplate ? (
 							<>
 								<span className="block w-2 h-2 rounded-full bg-yellow-400 group-hover/action:hidden" />
-								<EllipsisVertical size={12} className="hidden group-hover/action:block" />
+								<EllipsisVertical
+									size={12}
+									className="hidden group-hover/action:block"
+								/>
 							</>
 						) : (
 							<EllipsisVertical size={12} />
 						)}
 					</button>
 				</PopoverTrigger>
-					<PopoverContent side="right" align="start" className="w-36 p-1">
-						{isTemplate ? (
-							<>
-								{workspace.ready && (
-									<button
-										type="button"
-										onClick={(e) => {
-											e.stopPropagation();
-											setMenuOpen(false);
-											saveTemplateMut.mutate();
-										}}
-										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
-									>
-										{saveTemplateMut.isPending ? (
-											<Loader className="text-text-bright" />
-										) : (
-											<Save size={12} />
-										)}
-										Save
-									</button>
-								)}
+				<PopoverContent side="right" align="start" className="w-36 p-1">
+					{isTemplate ? (
+						<>
+							{workspace.ready && (
 								<button
 									type="button"
 									onClick={(e) => {
 										e.stopPropagation();
 										setMenuOpen(false);
-										router.push("/");
-										deleteTemplateMut.mutate();
+										saveTemplateMut.mutate();
 									}}
-									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
+									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
 								>
-									<Trash2 size={12} />
-									Delete
+									{saveTemplateMut.isPending ? (
+										<Loader className="text-text-bright" />
+									) : (
+										<Save size={12} />
+									)}
+									Save
 								</button>
-							</>
-						) : (
-							<>
-								{isStopped && (
-									<button
-										type="button"
-										onClick={(e) => {
-											e.stopPropagation();
-											start.mutate();
-											setMenuOpen(false);
-										}}
-										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
-									>
-										<Play size={12} />
-										Start
-									</button>
-								)}
-								{isSuspended && (
-									<button
-										type="button"
-										onClick={(e) => {
-											e.stopPropagation();
-											setMenuOpen(false);
-											resume.mutate();
-										}}
-										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
-									>
-										<Play size={12} />
-										Resume
-									</button>
-								)}
-								{isRunning && (
-									<button
-										type="button"
-										onClick={(e) => {
-											e.stopPropagation();
-											setMenuOpen(false);
-											suspend.mutate();
-										}}
-										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
-									>
-										<Pause size={12} />
-										Suspend
-									</button>
-								)}
-								{isRunning && (
-									<button
-										type="button"
-										onClick={(e) => {
-											e.stopPropagation();
-											setMenuOpen(false);
-											router.push("/");
-											stop.mutate();
-										}}
-										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
-									>
-										<Square size={12} />
-										Stop
-									</button>
-								)}
+							)}
+							<button
+								type="button"
+								onClick={(e) => {
+									e.stopPropagation();
+									setMenuOpen(false);
+									if (isActive) router.push("/");
+									deleteTemplateMut.mutate();
+								}}
+								className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
+							>
+								<Trash2 size={12} />
+								Delete
+							</button>
+						</>
+					) : (
+						<>
+							{isStopped && (
+								<button
+									type="button"
+									onClick={(e) => {
+										e.stopPropagation();
+										start.mutate();
+										setMenuOpen(false);
+									}}
+									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+								>
+									<Play size={12} />
+									Start
+								</button>
+							)}
+							{isSuspended && (
 								<button
 									type="button"
 									onClick={(e) => {
 										e.stopPropagation();
 										setMenuOpen(false);
-										router.push("/");
-										remove.mutate();
+										resume.mutate();
 									}}
-									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
+									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
 								>
-									<Trash2 size={12} />
-									Delete
+									<Play size={12} />
+									Resume
 								</button>
-							</>
-						)}
-					</PopoverContent>
+							)}
+							{isRunning && (
+								<button
+									type="button"
+									onClick={(e) => {
+										e.stopPropagation();
+										setMenuOpen(false);
+										suspend.mutate();
+									}}
+									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+								>
+									<Pause size={12} />
+									Suspend
+								</button>
+							)}
+							{isRunning && (
+								<button
+									type="button"
+									onClick={(e) => {
+										e.stopPropagation();
+										setMenuOpen(false);
+										if (isActive) router.push("/");
+										stop.mutate();
+									}}
+									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+								>
+									<Square size={12} />
+									Stop
+								</button>
+							)}
+							<button
+								type="button"
+								onClick={(e) => {
+									e.stopPropagation();
+									setMenuOpen(false);
+									if (isActive) router.push("/");
+									remove.mutate();
+								}}
+								className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
+							>
+								<Trash2 size={12} />
+								Delete
+							</button>
+						</>
+					)}
+				</PopoverContent>
 			</Popover>
 		</div>
 	);
@@ -782,7 +795,10 @@ export function ProjectsBar() {
 
 	return (
 		<aside className="w-48 shrink-0 border-r border-border-light bg-bg flex flex-col">
-			<div data-tauri-drag-region className="h-9 shrink-0 flex items-center justify-end pr-1.5">
+			<div
+				data-tauri-drag-region
+				className="h-9 shrink-0 flex items-center justify-end pr-1.5"
+			>
 				<ProjectsBarToggle />
 			</div>
 			{/* biome-ignore lint/a11y/useSemanticElements: can't use <button> because it contains interactive children */}
@@ -822,9 +838,9 @@ export function ProjectsBar() {
 			</div>
 			<div className="flex-1 overflow-y-auto pb-1 mt-0.5 flex flex-col gap-0.5">
 				{projects.data.map((project) => {
-					const projectWorkspaces = (workspaces.data ?? []).filter(
-						(w) => w.project === project.name,
-					);
+					const projectWorkspaces = (workspaces.data ?? [])
+						.filter((w) => w.project === project.name)
+						.sort((a, b) => a.created_at.localeCompare(b.created_at));
 					const hasTemplate = (templates.data ?? []).some(
 						(t) => t.project === project.name,
 					);

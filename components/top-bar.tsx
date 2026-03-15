@@ -313,7 +313,10 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 						</button>
 					)}
 					<ChevronRight size={10} className="shrink-0 text-text-placeholder" />
-					<Popover open={hasPr ? false : targetOpen} onOpenChange={hasPr ? undefined : setTargetOpen}>
+					<Popover
+						open={hasPr ? false : targetOpen}
+						onOpenChange={hasPr ? undefined : setTargetOpen}
+					>
 						<PopoverTrigger asChild>
 							<button
 								type="button"
@@ -321,7 +324,9 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 								className={`flex items-center gap-1 transition-colors ${hasPr ? "text-text cursor-default" : "text-text hover:text-text-bright"}`}
 							>
 								{targetBranch || "target branch"}
-								{!hasPr && <ChevronsUpDown size={10} className="text-text-placeholder" />}
+								{!hasPr && (
+									<ChevronsUpDown size={10} className="text-text-placeholder" />
+								)}
 							</button>
 						</PopoverTrigger>
 						<PopoverContent

@@ -18,16 +18,14 @@ export function WorkspaceIndicator({
 	workspace: WorkspaceStatus;
 }) {
 	const isSuspending =
-		workspace.optimisticSuspending ||
-		workspace.status === "SUSPENDING";
+		workspace.optimisticSuspending || workspace.status === "SUSPENDING";
 	const isSuspended = workspace.status === "SUSPENDED";
 	const isStarting =
 		workspace.optimisticStarting ||
 		workspace.status === "STAGING" ||
 		workspace.status === "PROVISIONING";
 	const isStopping =
-		workspace.optimisticStopping ||
-		workspace.status === "STOPPING";
+		workspace.optimisticStopping || workspace.status === "STOPPING";
 	const isRunning = workspace.status === "RUNNING";
 	const isCreating = isRunning && !workspace.ready;
 
@@ -36,7 +34,8 @@ export function WorkspaceIndicator({
 	if (isStarting || isCreating) return <Loader className="text-text-muted" />;
 
 	const Icon = workspace.isTemplate ? Box : GitBranch;
-	if (isSuspended) return <Icon size={12} className="shrink-0 text-yellow-400" />;
+	if (isSuspended)
+		return <Icon size={12} className="shrink-0 text-yellow-400" />;
 	return <Icon size={12} className="shrink-0" />;
 }
 
