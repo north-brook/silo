@@ -10,9 +10,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, EventTarget, State, WebviewWindow};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
@@ -38,8 +38,10 @@ const REMOTE_WORKSPACE_OBSERVER_SHELL_FILE: &str = "/home/silo/.silo/workspace-o
 const WORKSPACE_BOOTSTRAP_VERSION: &str = "10";
 const TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS: usize = 60;
 const TEMPLATE_BOOTSTRAP_POLL_INTERVAL: Duration = Duration::from_secs(2);
-const WORKSPACE_OBSERVER_BIN_BYTES: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/workspace-observer-x86_64-unknown-linux-musl"));
+const WORKSPACE_OBSERVER_BIN_BYTES: &[u8] = include_bytes!(concat!(
+    env!("OUT_DIR"),
+    "/workspace-observer-x86_64-unknown-linux-musl"
+));
 const CHROME_PROFILE_SYNC_PATHS: &[&str] = &[
     "Local State",
     "First Run",
@@ -861,6 +863,8 @@ async fn resolve_attached_session(
 }
 
 async fn bootstrap_workspace(lookup: &WorkspaceLookup) -> Result<(), String> {
+    let started = Instant::now();
+    log::info!("bootstrapping workspace {}", lookup.workspace.name());
     let bootstrap = workspace_bootstrap(lookup)?;
     let bootstrap_signature = workspace_bootstrap_signature(lookup.workspace.name(), &bootstrap);
     let script = workspace_bootstrap_script(lookup, &bootstrap);
@@ -878,6 +882,11 @@ async fn bootstrap_workspace(lookup: &WorkspaceLookup) -> Result<(), String> {
     }
 
     persist_workspace_bootstrap_state(lookup, &bootstrap_signature).await?;
+    log::info!(
+        "workspace {} bootstrap completed duration_ms={}",
+        lookup.workspace.name(),
+        started.elapsed().as_millis()
+    );
 
     if lookup.workspace.is_template() {
         spawn_template_chrome_profile_sync(lookup.clone(), bootstrap);
@@ -1039,14 +1048,16 @@ pub(crate) async fn wait_for_template_chrome_sync(workspace: &str) -> Result<(),
 }
 
 fn should_retry_template_bootstrap(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
     [
-        "Connection refused",
-        "System is booting up",
+        "connection refused",
+        "system is booting up",
         "not permitted to log in yet",
         "port 22",
+        "broken pipe",
     ]
     .iter()
-    .any(|needle| error.contains(needle))
+    .any(|needle| lower.contains(needle))
 }
 
 fn template_bootstrap_in_progress(workspace: &str) -> bool {
@@ -1057,6 +1068,8 @@ fn template_bootstrap_in_progress(workspace: &str) -> bool {
 }
 
 async fn wait_until_workspace_ssh_ready(workspace: &str) -> Result<(), String> {
+    let started = Instant::now();
+    let mut logged_running = false;
     for attempt in 0..TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS {
         let lookup = match workspaces::find_workspace(workspace).await {
             Ok(lookup) => lookup,
@@ -1073,10 +1086,23 @@ async fn wait_until_workspace_ssh_ready(workspace: &str) -> Result<(), String> {
             std::thread::sleep(TEMPLATE_BOOTSTRAP_POLL_INTERVAL);
             continue;
         }
+        if !logged_running {
+            log::info!(
+                "workspace {} reached RUNNING; probing ssh readiness",
+                workspace
+            );
+            logged_running = true;
+        }
 
         let result = run_remote_command(&lookup, &run_terminal_user_command("true")).await;
         match result {
             Ok(result) if result.success => {
+                log::info!(
+                    "workspace {} ssh probe succeeded attempt={} elapsed_ms={}",
+                    workspace,
+                    attempt + 1,
+                    started.elapsed().as_millis()
+                );
                 if !lookup.workspace.is_template() {
                     match bootstrap_workspace(&lookup).await {
                         Ok(()) => {}
@@ -1085,6 +1111,13 @@ async fn wait_until_workspace_ssh_ready(workspace: &str) -> Result<(), String> {
                                 return Err(error);
                             }
                             if should_retry_template_bootstrap(&error) {
+                                log::debug!(
+                                    "workspace {} bootstrap retryable failure attempt={} elapsed_ms={} error={}",
+                                    workspace,
+                                    attempt + 1,
+                                    started.elapsed().as_millis(),
+                                    error
+                                );
                                 std::thread::sleep(TEMPLATE_BOOTSTRAP_POLL_INTERVAL);
                                 continue;
                             }
@@ -1093,6 +1126,11 @@ async fn wait_until_workspace_ssh_ready(workspace: &str) -> Result<(), String> {
                     }
                 }
                 workspaces::set_workspace_label(workspace, "ready", "true").await?;
+                log::info!(
+                    "workspace {} marked ready elapsed_ms={}",
+                    workspace,
+                    started.elapsed().as_millis()
+                );
                 return Ok(());
             }
             Ok(result) => {
@@ -1105,6 +1143,13 @@ async fn wait_until_workspace_ssh_ready(workspace: &str) -> Result<(), String> {
                         &result.stderr,
                     ));
                 }
+                log::debug!(
+                    "workspace {} ssh probe retryable failure attempt={} elapsed_ms={} error={}",
+                    workspace,
+                    attempt + 1,
+                    started.elapsed().as_millis(),
+                    error
+                );
             }
             Err(error) => {
                 if attempt + 1 == TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS
@@ -1112,6 +1157,13 @@ async fn wait_until_workspace_ssh_ready(workspace: &str) -> Result<(), String> {
                 {
                     return Err(error);
                 }
+                log::debug!(
+                    "workspace {} ssh command retryable failure attempt={} elapsed_ms={} error={}",
+                    workspace,
+                    attempt + 1,
+                    started.elapsed().as_millis(),
+                    error
+                );
             }
         }
 
@@ -1237,8 +1289,9 @@ fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBoo
         ),
     ]
     .join("\n");
-    let git_clone_target_branch =
-        bootstrap_git_command("clone --branch \"$TARGET_BRANCH\" \"$REMOTE_URL\" \"$WORKSPACE_DIR\"");
+    let git_clone_target_branch = bootstrap_git_command(
+        "clone --branch \"$TARGET_BRANCH\" \"$REMOTE_URL\" \"$WORKSPACE_DIR\"",
+    );
     let git_fetch_target_branch =
         bootstrap_git_command("-C \"$WORKSPACE_DIR\" fetch origin \"$TARGET_BRANCH\"");
     let git_pull_target_branch =
@@ -1867,11 +1920,7 @@ async fn persist_workspace_bootstrap_state(
     lookup: &WorkspaceLookup,
     signature: &str,
 ) -> Result<(), String> {
-    let state_path = shell_quote(REMOTE_BOOTSTRAP_STATE_FILE);
-    let signature = shell_quote(signature);
-    let command = format!(
-        "mkdir -p \"$HOME/.silo\" && BOOT_ID=\"$(cat /proc/sys/kernel/random/boot_id)\" && printf '%s\\n%s\\n' \"$BOOT_ID\" {signature} > {state_path} && chmod 600 {state_path}",
-    );
+    let command = persist_workspace_bootstrap_state_command(signature);
     let result = run_remote_command(lookup, &run_terminal_user_command(&command)).await?;
     if !result.success {
         return Err(remote_command_error(
@@ -1881,6 +1930,14 @@ async fn persist_workspace_bootstrap_state(
     }
 
     Ok(())
+}
+
+fn persist_workspace_bootstrap_state_command(signature: &str) -> String {
+    let state_path = shell_quote(REMOTE_BOOTSTRAP_STATE_FILE);
+    let signature_base64 = shell_quote(&BASE64_STANDARD.encode(signature));
+    format!(
+        "mkdir -p \"$HOME/.silo\" && BOOT_ID=\"$(cat /proc/sys/kernel/random/boot_id)\" && {{ printf '%s\\n' \"$BOOT_ID\"; printf %s {signature_base64} | base64 --decode; printf '\\n'; }} > {state_path} && chmod 600 {state_path}",
+    )
 }
 
 fn spawn_template_chrome_profile_sync(lookup: WorkspaceLookup, bootstrap: WorkspaceBootstrap) {
@@ -1971,9 +2028,13 @@ async fn run_gcloud_ssh_command(
 
         if let Some(stdin_bytes) = stdin_bytes {
             if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(&stdin_bytes)
-                    .map_err(|error| format!("failed to write gcloud ssh stdin: {error}"))?;
+                if let Err(error) = stdin.write_all(&stdin_bytes) {
+                    drop(stdin);
+                    let output = child.wait_with_output().map_err(|wait_error| {
+                        format!("failed to read gcloud ssh output: {wait_error}")
+                    })?;
+                    return Ok(command_result_with_stdin_write_error(output, &error));
+                }
             }
         }
 
@@ -1981,14 +2042,30 @@ async fn run_gcloud_ssh_command(
             .wait_with_output()
             .map_err(|error| format!("failed to read gcloud ssh output: {error}"))?;
 
-        Ok(CommandResult {
-            success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
+        Ok(command_result_from_output(output))
     })
     .await
     .map_err(|error| format!("gcloud ssh task failed: {error}"))?
+}
+
+fn command_result_from_output(output: Output) -> CommandResult {
+    CommandResult {
+        success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+fn command_result_with_stdin_write_error(output: Output, error: &std::io::Error) -> CommandResult {
+    let mut result = command_result_from_output(output);
+    let write_error = format!("failed to write gcloud ssh stdin: {error}");
+    result.success = false;
+    result.stderr = if result.stderr.trim().is_empty() {
+        write_error
+    } else {
+        format!("{}\n{write_error}", result.stderr.trim_end())
+    };
+    result
 }
 
 async fn run_remote_command_with_tar_stream(
@@ -2297,7 +2374,11 @@ mod tests {
     use super::*;
     use crate::config::ProjectConfig;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
     use std::path::{Path, PathBuf};
+    #[cfg(unix)]
+    use std::process::{ExitStatus, Output};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -2362,6 +2443,39 @@ mod tests {
             bootstrap_git_command("-C \"$WORKSPACE_DIR\" fetch origin \"$TARGET_BRANCH\""),
             "env GH_TOKEN=\"$GH_TOKEN\" GITHUB_TOKEN=\"$GITHUB_TOKEN\" GIT_ASKPASS=\"$ASKPASS_PATH\" GIT_TERMINAL_PROMPT=0 git -C \"$WORKSPACE_DIR\" fetch origin \"$TARGET_BRANCH\""
         );
+    }
+
+    #[test]
+    fn bootstrap_retry_detects_broken_pipe() {
+        assert!(should_retry_template_bootstrap(
+            "failed to write gcloud ssh stdin: Broken pipe (os error 32)"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdin_write_error_preserves_remote_stderr_and_forces_failure() {
+        let output = Output {
+            status: ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+            stderr: b"ssh: connect to host 1.2.3.4 port 22: Connection refused\n".to_vec(),
+        };
+        let error = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Broken pipe");
+
+        let result = command_result_with_stdin_write_error(output, &error);
+
+        assert!(!result.success);
+        assert!(result.stderr.contains("Connection refused"));
+        assert!(result.stderr.contains("Broken pipe"));
+    }
+
+    #[test]
+    fn persist_bootstrap_state_command_streams_base64_signature() {
+        let command = persist_workspace_bootstrap_state_command("version=10\nworkspace=demo");
+
+        assert!(command.contains("base64 --decode"));
+        assert!(command.contains("/home/silo/.silo/workspace-bootstrap-state"));
+        assert!(!command.contains("workspace=demo"));
     }
 
     #[test]
