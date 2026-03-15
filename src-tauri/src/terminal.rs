@@ -313,13 +313,22 @@ pub async fn terminal_attach_terminal(
     state: State<'_, TerminalManager>,
     workspace: String,
     attachment_id: String,
+    skip_scrollback: Option<bool>,
     command: Option<String>,
     output: Channel<Vec<u8>>,
 ) -> Result<TerminalAttachResult, String> {
+    let attach_started = Instant::now();
     let lookup = workspaces::find_workspace(&workspace).await?;
     if !lookup.workspace.ready() {
         return Err(format!("workspace {workspace} is not ready"));
     }
+    let scrollback_mode = attach_scrollback_mode(skip_scrollback);
+    log::info!(
+        "terminal attach start workspace={} attachment_id={} skip_scrollback={}",
+        workspace,
+        attachment_id,
+        matches!(scrollback_mode, AttachScrollbackMode::Skip)
+    );
     let key = AttachmentKey {
         workspace: workspace.clone(),
         name: attachment_id.clone(),
@@ -344,17 +353,21 @@ pub async fn terminal_attach_terminal(
                 existing,
                 &lookup,
                 &attachment_id,
+                scrollback_mode,
                 &window,
                 output,
                 startup_command,
+                attach_started,
             )
             .await;
         }
         AttachmentSlot::Reserved(reservation) => reservation,
     };
 
-    let (scrollback_vt, scrollback_truncated) = load_scrollback(&lookup, &attachment_id).await?;
+    let (scrollback_vt, scrollback_truncated) =
+        prepare_attach_scrollback(&lookup, &attachment_id, scrollback_mode).await?;
 
+    let spawn_started = Instant::now();
     let attachment = spawn_terminal_attachment(
         app,
         state.inner().clone(),
@@ -363,10 +376,22 @@ pub async fn terminal_attach_terminal(
         output,
         window.label().to_string(),
     )?;
+    log::info!(
+        "terminal attach spawned pty workspace={} attachment_id={} elapsed_ms={}",
+        workspace,
+        attachment_id,
+        spawn_started.elapsed().as_millis()
+    );
     if let Some(command) = startup_command {
         queue_attach_command(attachment.clone(), command);
     }
 
+    log::info!(
+        "terminal attach ready workspace={} attachment_id={} elapsed_ms={}",
+        workspace,
+        attachment_id,
+        attach_started.elapsed().as_millis()
+    );
     Ok(TerminalAttachResult {
         terminal_id: attachment.id.clone(),
         session: resolve_attached_session(&lookup, &attachment_id).await?,
@@ -789,11 +814,14 @@ async fn attach_existing_terminal(
     existing: Arc<Attachment>,
     lookup: &WorkspaceLookup,
     name: &str,
+    scrollback_mode: AttachScrollbackMode,
     window: &WebviewWindow,
     output: Channel<Vec<u8>>,
     command: Option<String>,
+    attach_started: Instant,
 ) -> Result<TerminalAttachResult, String> {
-    let (scrollback_vt, scrollback_truncated) = load_scrollback(lookup, name).await?;
+    let (scrollback_vt, scrollback_truncated) =
+        prepare_attach_scrollback(lookup, name, scrollback_mode).await?;
     if let Ok(mut current_output) = existing.output.lock() {
         *current_output = output;
     }
@@ -804,6 +832,12 @@ async fn attach_existing_terminal(
         queue_attach_command(existing.clone(), command);
     }
 
+    log::info!(
+        "terminal attach reused existing pty workspace={} attachment_id={} elapsed_ms={}",
+        lookup.workspace.name(),
+        name,
+        attach_started.elapsed().as_millis()
+    );
     Ok(TerminalAttachResult {
         terminal_id: existing.id.clone(),
         session: resolve_attached_session(lookup, name).await?,
@@ -881,6 +915,68 @@ async fn load_scrollback(lookup: &WorkspaceLookup, name: &str) -> Result<(String
     }
 
     Ok(truncate_scrollback(result.stdout, MAX_SCROLLBACK_BYTES))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttachScrollbackMode {
+    Load,
+    Skip,
+}
+
+fn attach_scrollback_mode(skip_scrollback: Option<bool>) -> AttachScrollbackMode {
+    if skip_scrollback.unwrap_or(false) {
+        AttachScrollbackMode::Skip
+    } else {
+        AttachScrollbackMode::Load
+    }
+}
+
+async fn prepare_attach_scrollback(
+    lookup: &WorkspaceLookup,
+    attachment_id: &str,
+    mode: AttachScrollbackMode,
+) -> Result<(String, bool), String> {
+    let started = Instant::now();
+    match mode {
+        AttachScrollbackMode::Skip => {
+            log::info!(
+                "terminal attach scrollback skipped workspace={} attachment_id={} elapsed_ms=0",
+                lookup.workspace.name(),
+                attachment_id
+            );
+            Ok((String::new(), false))
+        }
+        AttachScrollbackMode::Load => {
+            log::info!(
+                "terminal attach scrollback load start workspace={} attachment_id={}",
+                lookup.workspace.name(),
+                attachment_id
+            );
+            let result = load_scrollback(lookup, attachment_id).await;
+            match &result {
+                Ok((scrollback, truncated)) => {
+                    log::info!(
+                        "terminal attach scrollback load complete workspace={} attachment_id={} bytes={} truncated={} elapsed_ms={}",
+                        lookup.workspace.name(),
+                        attachment_id,
+                        scrollback.len(),
+                        truncated,
+                        started.elapsed().as_millis()
+                    );
+                }
+                Err(error) => {
+                    log::warn!(
+                        "terminal attach scrollback load failed workspace={} attachment_id={} elapsed_ms={} error={}",
+                        lookup.workspace.name(),
+                        attachment_id,
+                        started.elapsed().as_millis(),
+                        error
+                    );
+                }
+            }
+            result
+        }
+    }
 }
 
 async fn resolve_attached_session(
@@ -2586,6 +2682,23 @@ mod tests {
         let (scrollback, truncated) = truncate_scrollback("abcdef".to_string(), 3);
         assert!(truncated);
         assert_eq!(scrollback, "def");
+    }
+
+    #[test]
+    fn attach_scrollback_mode_skips_when_requested() {
+        assert_eq!(
+            attach_scrollback_mode(Some(true)),
+            AttachScrollbackMode::Skip
+        );
+    }
+
+    #[test]
+    fn attach_scrollback_mode_loads_by_default() {
+        assert_eq!(attach_scrollback_mode(None), AttachScrollbackMode::Load);
+        assert_eq!(
+            attach_scrollback_mode(Some(false)),
+            AttachScrollbackMode::Load
+        );
     }
 
     #[test]

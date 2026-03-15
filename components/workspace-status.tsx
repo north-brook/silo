@@ -29,8 +29,6 @@ export function WorkspaceIndicator({
 
 	if (isStopping) return <Loader className="text-error" />;
 	if (isStarting || isCreating) return <Loader className="text-text-muted" />;
-	if (isRunning && workspace.working)
-		return <Loader className="text-emerald-400" />;
 
 	const Icon = workspace.isTemplate ? Box : GitBranch;
 	return <Icon size={12} className="shrink-0" />;
