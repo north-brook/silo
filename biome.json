@@ -1,4 +1,7 @@
 {
+	"files": {
+		"includes": ["**", "!.next", "!out", "!**/target"]
+	},
 	"css": {
 		"parser": {
 			"tailwindDirectives": true
