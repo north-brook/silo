@@ -5,6 +5,7 @@ import { ArrowUp, ChevronsUpDown, Laptop, Terminal } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "../../lib/invoke";
+import { submitWorkspacePrompt } from "../../lib/workspaces";
 import {
 	Popover,
 	PopoverContent,
@@ -12,6 +13,7 @@ import {
 } from "../../components/popover";
 import { Loader } from "../../components/loader";
 import { toast } from "../../components/toaster";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../../components/tooltip";
 import { ClaudeIcon } from "../../components/icons/claude";
 import { CodexIcon } from "../../components/icons/codex";
 import { SiloIcon } from "../../components/icons/silo";
@@ -75,7 +77,6 @@ export function PromptWorkspace({
 	}, []);
 	const [provider, setProvider] = useState(PROVIDERS[0]);
 	const [providerOpen, setProviderOpen] = useState(false);
-	const canSubmit = isRunning && ready && prompt.trim().length > 0;
 
 	const createTerminal = useMutation({
 		mutationFn: () =>
@@ -98,16 +99,37 @@ export function PromptWorkspace({
 			});
 		},
 	});
+	const submitPrompt = useMutation({
+		mutationFn: () => submitWorkspacePrompt(workspace, prompt, provider.id),
+		onSuccess: (result) => {
+			queryClient.invalidateQueries({
+				queryKey: ["terminal_list_terminals", workspace],
+			});
+			router.push(
+				`/workspace/terminal?project=${encodeURIComponent(project ?? "")}&workspace=${encodeURIComponent(workspace)}&attachment_id=${encodeURIComponent(result.attachment_id)}&fresh=1`,
+			);
+		},
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to submit prompt",
+				description: error.message,
+			});
+		},
+	});
+	const canSubmit =
+		isRunning && ready && prompt.trim().length > 0 && !submitPrompt.isPending;
 
 	return (
 		<div className="flex-1 flex flex-col items-center justify-center p-6">
-			<div className="w-full max-w-xl">
+			<div className="w-full max-w-2xl">
 				<div className="flex justify-center mb-6">
 					<SiloIcon height={32} />
 				</div>
 				<div className="rounded-lg border border-border-light bg-surface overflow-hidden">
 					<textarea
 						ref={textareaRef}
+						autoFocus
 						value={prompt}
 						onChange={(e) => {
 							setPrompt(e.target.value);
@@ -115,8 +137,16 @@ export function PromptWorkspace({
 							e.target.style.height = `${e.target.scrollHeight}px`;
 						}}
 						onKeyDown={(e) => {
+							if (e.key === "Tab" && e.shiftKey) {
+								e.preventDefault();
+								setProvider((prev) => {
+									const idx = PROVIDERS.findIndex((p) => p.id === prev.id);
+									return PROVIDERS[(idx + 1) % PROVIDERS.length];
+								});
+							}
 							if (e.key === "Enter" && !e.shiftKey && canSubmit) {
 								e.preventDefault();
+								submitPrompt.mutate();
 							}
 						}}
 						placeholder="What should we ship?"
@@ -124,44 +154,68 @@ export function PromptWorkspace({
 						className="w-full resize-none bg-transparent border-0 px-4 pt-4 pb-2 text-sm text-text-bright placeholder:text-text-placeholder outline-none focus:border-0 focus:ring-0 min-h-[6rem] max-h-64 overflow-y-auto"
 					/>
 					<div className="flex items-center justify-between px-3 pb-3">
-						<Popover open={providerOpen} onOpenChange={setProviderOpen}>
-							<PopoverTrigger asChild>
-								<button
-									type="button"
-									className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-text hover:bg-btn-hover rounded transition-colors"
-								>
-									{provider.icon}
-									{provider.label}
-									<ChevronsUpDown size={10} className="text-text-placeholder" />
-								</button>
-							</PopoverTrigger>
-							<PopoverContent side="bottom" align="start" className="w-36 p-1">
-								{PROVIDERS.map((p) => (
-									<button
-										key={p.id}
-										type="button"
-										onClick={() => {
-											setProvider(p);
-											setProviderOpen(false);
-										}}
-										className={`flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded transition-colors ${
-											p.id === provider.id
-												? "text-text-bright bg-btn-hover"
-												: "text-text hover:bg-btn-hover hover:text-text-bright"
-										}`}
-									>
-										{p.icon}
-										{p.label}
-									</button>
-								))}
-							</PopoverContent>
-						</Popover>
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<div>
+									<Popover open={providerOpen} onOpenChange={setProviderOpen}>
+										<PopoverTrigger asChild>
+											<button
+												type="button"
+												className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-text hover:bg-btn-hover rounded transition-colors"
+											>
+												{provider.icon}
+												{provider.label}
+												<ChevronsUpDown size={10} className="text-text-placeholder" />
+											</button>
+										</PopoverTrigger>
+										<PopoverContent side="bottom" align="start" className="w-36 p-1">
+											{PROVIDERS.map((p) => (
+												<button
+													key={p.id}
+													type="button"
+													onClick={() => {
+														setProvider(p);
+														setProviderOpen(false);
+													}}
+													className={`flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded transition-colors ${
+														p.id === provider.id
+															? "text-text-bright bg-btn-hover"
+															: "text-text hover:bg-btn-hover hover:text-text-bright"
+													}`}
+												>
+													{p.icon}
+													{p.label}
+												</button>
+											))}
+										</PopoverContent>
+								</Popover>
+								</div>
+							</TooltipTrigger>
+							<TooltipContent side="right">
+								<span className="flex items-center gap-1.5">
+									Toggle model
+									<span className="flex items-center gap-0.5">
+										<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+											⇧
+										</kbd>
+										<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+											⇥
+										</kbd>
+									</span>
+								</span>
+							</TooltipContent>
+						</Tooltip>
 						<button
 							type="button"
 							disabled={!canSubmit}
+							onClick={() => submitPrompt.mutate()}
 							className="flex items-center justify-center w-7 h-7 rounded-md bg-white text-bg transition-colors hover:bg-white/80 disabled:opacity-30 disabled:cursor-not-allowed"
 						>
-							<ArrowUp size={14} strokeWidth={2.5} />
+							{submitPrompt.isPending ? (
+								<Loader className="text-bg" />
+							) : (
+								<ArrowUp size={14} strokeWidth={2.5} />
+							)}
 						</button>
 					</div>
 				</div>
