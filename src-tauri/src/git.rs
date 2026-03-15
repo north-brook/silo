@@ -319,6 +319,64 @@ pub async fn git_diff(workspace: String) -> Result<Diff, String> {
 }
 
 #[tauri::command]
+pub async fn git_update_branch(workspace: String, branch: String) -> Result<(), String> {
+    log::info!("updating workspace branch for {workspace}");
+    let context = branch_workspace_context(&workspace).await?;
+    let branch = trim_branch_input(&branch, "branch")?;
+    ensure_workspace_tree_clean(&context, "rename workspace branch").await?;
+
+    let current_branch = current_workspace_branch(&context).await?;
+    let metadata_branch = context
+        .lookup
+        .workspace
+        .branch_name()
+        .unwrap_or_default()
+        .trim();
+    if branch == current_branch {
+        if branch == metadata_branch {
+            return Ok(());
+        }
+        return workspaces::set_workspace_metadata(&workspace, "branch", &branch).await;
+    }
+
+    let result = run_workspace_command(&context, &rename_branch_remote_command(&branch)).await?;
+    if !result.success {
+        return Err(git_error(
+            "failed to rename workspace branch",
+            &result.stderr,
+        ));
+    }
+
+    workspaces::set_workspace_metadata(&workspace, "branch", &branch).await
+}
+
+#[tauri::command]
+pub async fn git_update_target_branch(
+    workspace: String,
+    target_branch: String,
+) -> Result<(), String> {
+    log::info!("updating workspace target branch for {workspace}");
+    let context = branch_workspace_context(&workspace).await?;
+    let target_branch = trim_branch_input(&target_branch, "target branch")?;
+    ensure_workspace_tree_clean(&context, "retarget workspace branch").await?;
+
+    if target_branch == context.target_branch {
+        return Ok(());
+    }
+
+    let result =
+        run_workspace_command(&context, &retarget_branch_remote_command(&target_branch)).await?;
+    if !result.success {
+        return Err(git_error(
+            "failed to rebase workspace branch onto target branch",
+            &result.stderr,
+        ));
+    }
+
+    workspaces::set_workspace_metadata(&workspace, "target_branch", &target_branch).await
+}
+
+#[tauri::command]
 pub async fn git_pr_status(workspace: String) -> Result<Option<PullRequestStatus>, String> {
     log::info!("checking PR status for workspace {workspace}");
     let context = branch_workspace_context(&workspace).await?;
@@ -335,21 +393,7 @@ pub async fn git_pr_status(workspace: String) -> Result<Option<PullRequestStatus
 pub async fn git_tree_dirty(workspace: String) -> Result<bool, String> {
     log::info!("checking tree dirtiness for workspace {workspace}");
     let context = branch_workspace_context(&workspace).await?;
-    let result = run_workspace_command(&context, tree_dirty_remote_command()).await?;
-    if !result.success {
-        return Err(git_error(
-            "failed to check workspace tree dirtiness",
-            &result.stderr,
-        ));
-    }
-
-    match result.stdout.trim() {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        value => Err(format!(
-            "failed to check workspace tree dirtiness: unexpected output {value:?}"
-        )),
-    }
+    workspace_tree_dirty(&context).await
 }
 
 #[tauri::command]
@@ -483,6 +527,31 @@ async fn run_workspace_command(
 ) -> Result<terminal::CommandResult, String> {
     let remote_command = terminal::workspace_shell_command_with_credentials(command);
     terminal::run_remote_command(&context.lookup, &remote_command).await
+}
+
+async fn workspace_tree_dirty(context: &BranchWorkspaceContext) -> Result<bool, String> {
+    let result = run_workspace_command(context, tree_dirty_remote_command()).await?;
+    if !result.success {
+        return Err(git_error(
+            "failed to check workspace tree dirtiness",
+            &result.stderr,
+        ));
+    }
+
+    parse_tree_dirty_output(&result.stdout)
+}
+
+async fn ensure_workspace_tree_clean(
+    context: &BranchWorkspaceContext,
+    operation: &str,
+) -> Result<(), String> {
+    if workspace_tree_dirty(context).await? {
+        return Err(format!(
+            "cannot {operation}: workspace has uncommitted changes"
+        ));
+    }
+
+    Ok(())
 }
 
 async fn current_workspace_branch(context: &BranchWorkspaceContext) -> Result<String, String> {
@@ -725,6 +794,25 @@ done < <(git -c core.quotepath=false ls-files --others --exclude-standard -z)",
     )
 }
 
+fn rename_branch_remote_command(branch: &str) -> String {
+    format!(
+        "BRANCH={branch}\n\
+git check-ref-format --branch \"$BRANCH\" >/dev/null\n\
+git branch -m \"$BRANCH\"",
+        branch = shell_quote(branch),
+    )
+}
+
+fn retarget_branch_remote_command(target_branch: &str) -> String {
+    format!(
+        "TARGET_BRANCH={target_branch}\n\
+git check-ref-format --branch \"$TARGET_BRANCH\" >/dev/null\n\
+git fetch --quiet origin \"$TARGET_BRANCH\"\n\
+git rebase \"origin/$TARGET_BRANCH\"",
+        target_branch = shell_quote(target_branch),
+    )
+}
+
 fn codex_prompt_command(prompt: &str) -> String {
     let encoded_prompt = BASE64_STANDARD.encode(prompt);
     format!(
@@ -740,6 +828,25 @@ if ! git diff --quiet --ignore-submodules -- || ! git diff --cached --quiet --ig
 else\n\
   printf 'false\\n'\n\
 fi"
+}
+
+fn trim_branch_input(value: &str, field: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{field} must not be empty"));
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn parse_tree_dirty_output(stdout: &str) -> Result<bool, String> {
+    match stdout.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        value => Err(format!(
+            "failed to check workspace tree dirtiness: unexpected output {value:?}"
+        )),
+    }
 }
 
 fn parse_diff(stdout: &str) -> Result<Diff, String> {
@@ -1501,6 +1608,43 @@ index 1111111..2222222 100644\n\
         assert!(command.contains("git diff --quiet --ignore-submodules --"));
         assert!(command.contains("git diff --cached --quiet --ignore-submodules --"));
         assert!(command.contains("git ls-files --others --exclude-standard"));
+    }
+
+    #[test]
+    fn rename_branch_remote_command_validates_and_renames_branch() {
+        let command = rename_branch_remote_command("feature/test");
+        assert!(command.contains("BRANCH='feature/test'"));
+        assert!(command.contains("git check-ref-format --branch \"$BRANCH\" >/dev/null"));
+        assert!(command.contains("git branch -m \"$BRANCH\""));
+    }
+
+    #[test]
+    fn retarget_branch_remote_command_fetches_and_rebases_target_branch() {
+        let command = retarget_branch_remote_command("release/2026");
+        assert!(command.contains("TARGET_BRANCH='release/2026'"));
+        assert!(command.contains("git fetch --quiet origin \"$TARGET_BRANCH\""));
+        assert!(command.contains("git rebase \"origin/$TARGET_BRANCH\""));
+    }
+
+    #[test]
+    fn trim_branch_input_rejects_empty_values() {
+        assert_eq!(
+            trim_branch_input("  feature/test  ", "branch").expect("branch should trim"),
+            "feature/test"
+        );
+        assert_eq!(
+            trim_branch_input(" \t ", "target branch").unwrap_err(),
+            "target branch must not be empty"
+        );
+    }
+
+    #[test]
+    fn parse_tree_dirty_output_accepts_boolean_output() {
+        assert!(parse_tree_dirty_output("true\n").expect("true should parse"));
+        assert!(!parse_tree_dirty_output("false\n").expect("false should parse"));
+        assert!(parse_tree_dirty_output("maybe\n")
+            .expect_err("unexpected output should fail")
+            .contains("unexpected output"));
     }
 
     #[test]
