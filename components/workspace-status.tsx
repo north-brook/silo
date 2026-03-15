@@ -3,6 +3,7 @@ import { Loader } from "./loader";
 
 interface WorkspaceStatus {
 	status: string;
+	ready?: boolean;
 	working?: boolean | null;
 	unread?: boolean;
 	isTemplate?: boolean;
@@ -24,9 +25,10 @@ export function WorkspaceIndicator({
 		workspace.status === "STOPPING" ||
 		workspace.status === "SUSPENDING";
 	const isRunning = workspace.status === "RUNNING";
+	const isCreating = isRunning && !workspace.ready;
 
 	if (isStopping) return <Loader className="text-error" />;
-	if (isStarting) return <Loader className="text-text-muted" />;
+	if (isStarting || isCreating) return <Loader className="text-text-muted" />;
 	if (isRunning && workspace.working)
 		return <Loader className="text-emerald-400" />;
 
@@ -42,8 +44,9 @@ export function workspaceStatusLabel(workspace: WorkspaceStatus): string {
 	const isRunning = workspace.status === "RUNNING";
 	const isStopped =
 		workspace.status === "TERMINATED" || workspace.status === "STOPPED";
+	const isCreating = isRunning && !workspace.ready;
 
-	if (isStarting) return "Starting...";
+	if (isStarting || isCreating) return "Creating...";
 	if (isStopping) return "Stopping...";
 	if (isRunning && workspace.working) return "Working";
 	if (isRunning) return "Running";

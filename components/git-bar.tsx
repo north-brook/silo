@@ -103,11 +103,13 @@ function GitBarProviderInner({ children }: { children: ReactNode }) {
 		!!workspaceName &&
 		!!workspaceQuery.data &&
 		!isTemplateWorkspace(workspaceQuery.data);
+	const isReadyBranchWorkspace =
+		isInBranchWorkspace && workspaceQuery.data?.ready === true;
 
 	const diff = useQuery({
 		queryKey: ["git_diff", workspaceName],
 		queryFn: () => gitDiff(workspaceName),
-		enabled: isInBranchWorkspace,
+		enabled: isReadyBranchWorkspace,
 		refetchInterval: 5000,
 	});
 
@@ -119,7 +121,7 @@ function GitBarProviderInner({ children }: { children: ReactNode }) {
 	const prStatusQuery = useQuery({
 		queryKey: ["git_pr_status", workspaceName],
 		queryFn: () => gitPrStatus(workspaceName),
-		enabled: isInBranchWorkspace,
+		enabled: isReadyBranchWorkspace,
 		refetchInterval: 10000,
 	});
 
@@ -128,7 +130,7 @@ function GitBarProviderInner({ children }: { children: ReactNode }) {
 	const observationQuery = useQuery({
 		queryKey: ["git_pr_observe", workspaceName],
 		queryFn: () => gitPrObserve(workspaceName),
-		enabled: isInBranchWorkspace && hasPr,
+		enabled: isReadyBranchWorkspace && hasPr,
 		refetchInterval: 15000,
 	});
 

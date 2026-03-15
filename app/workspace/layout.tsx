@@ -64,6 +64,8 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 		enabled: !!workspaceName,
 		refetchInterval: 10000,
 	});
+	const isWorkspaceReady =
+		workspace.data?.status === "RUNNING" && workspace.data?.ready === true;
 
 	const terminals = useQuery({
 		queryKey: ["terminal_list_terminals", workspaceName],
@@ -76,7 +78,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 					key: `poll:terminal_list_terminals:${workspaceName}`,
 				},
 			),
-		enabled: !!workspaceName && workspace.data?.status === "RUNNING",
+		enabled: !!workspaceName && isWorkspaceReady,
 		refetchInterval: 5000,
 	});
 
