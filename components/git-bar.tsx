@@ -267,7 +267,7 @@ function GitBarHeader() {
 				queryKey: ["terminal_list_terminals", workspace],
 			});
 			router.push(
-				`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspace)}&terminal=${encodeURIComponent(result.terminal)}`,
+				`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspace)}&attachment_id=${encodeURIComponent(result.attachment_id)}`,
 			);
 		},
 		onError: (error) => {
@@ -295,7 +295,7 @@ function GitBarHeader() {
 				queryKey: ["terminal_list_terminals", workspace],
 			});
 			router.push(
-				`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspace)}&terminal=${encodeURIComponent(result.terminal)}`,
+				`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspace)}&attachment_id=${encodeURIComponent(result.attachment_id)}`,
 			);
 		},
 		onError: (error) => {

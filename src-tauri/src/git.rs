@@ -136,7 +136,7 @@ pub struct PullRequestStatus {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct GitTerminalResult {
-    terminal: String,
+    attachment_id: String,
 }
 
 async fn run_gh<I, S>(args: I) -> Option<CommandResult>
@@ -380,9 +380,10 @@ pub async fn git_push(
     let branch = current_workspace_branch(&context).await?;
     let prompt = prompts::git_push_prompt(&branch, &context.target_branch);
     let command = codex_prompt_command(&prompt);
-    let terminal = terminal::start_terminal_command(state.inner(), &workspace, &command).await?;
+    let attachment_id =
+        terminal::start_terminal_command(state.inner(), &workspace, &command).await?;
 
-    Ok(GitTerminalResult { terminal })
+    Ok(GitTerminalResult { attachment_id })
 }
 
 #[tauri::command]
@@ -417,9 +418,10 @@ pub async fn git_create_pr(
     let branch = current_workspace_branch(&context).await?;
     let prompt = prompts::git_create_pr_prompt(&branch, &context.target_branch);
     let command = codex_prompt_command(&prompt);
-    let terminal = terminal::start_terminal_command(state.inner(), &workspace, &command).await?;
+    let attachment_id =
+        terminal::start_terminal_command(state.inner(), &workspace, &command).await?;
 
-    Ok(GitTerminalResult { terminal })
+    Ok(GitTerminalResult { attachment_id })
 }
 
 async fn git_repo_name(project: &ProjectConfig) -> Result<String, String> {

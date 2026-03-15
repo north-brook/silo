@@ -1,5 +1,5 @@
 use crate::config::ConfigStore;
-use crate::workspaces::{self, WorkspaceLookup};
+use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -80,30 +80,21 @@ static WORKSPACE_SSH_READY_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct TerminalSessionSummary {
-    name: String,
-    pid: Option<u32>,
-    clients: u32,
-    started_in: Option<String>,
-    created_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TerminalAttachResult {
-    terminal: String,
-    session: TerminalSessionSummary,
+    terminal_id: String,
+    session: WorkspaceSession,
     scrollback_vt: String,
     scrollback_truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TerminalCreateResult {
-    terminal: String,
+    attachment_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TerminalRunResult {
-    session: TerminalSessionSummary,
+    session: WorkspaceSession,
     created: bool,
 }
 
@@ -124,14 +115,14 @@ pub struct TerminalReadResult {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct TerminalExitPayload {
-    terminal: String,
+    terminal_id: String,
     exit_code: u32,
     signal: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct TerminalErrorPayload {
-    terminal: String,
+    terminal_id: String,
     message: String,
 }
 
@@ -285,18 +276,31 @@ pub async fn terminal_create_terminal(workspace: String) -> Result<TerminalCreat
     let existing_names = list_terminals_in_workspace(&lookup)
         .await?
         .into_iter()
-        .map(|session| session.name)
+        .map(|session| session.attachment_id)
         .collect::<HashSet<_>>();
+    let attachment_id = generate_terminal_attachment_id(&existing_names);
+    let session = WorkspaceSession {
+        kind: "terminal".to_string(),
+        name: "shell".to_string(),
+        attachment_id: attachment_id.clone(),
+        working: None,
+        unread: None,
+    };
+    write_workspace_terminal_metadata(
+        &workspace,
+        &lookup,
+        mutate_sessions(
+            lookup.workspace.sessions(),
+            SessionMutation::Upsert(session.clone()),
+        ),
+    )
+    .await?;
 
-    Ok(TerminalCreateResult {
-        terminal: generate_terminal_attachment_id(&existing_names),
-    })
+    Ok(TerminalCreateResult { attachment_id })
 }
 
 #[tauri::command]
-pub async fn terminal_list_terminals(
-    workspace: String,
-) -> Result<Vec<TerminalSessionSummary>, String> {
+pub async fn terminal_list_terminals(workspace: String) -> Result<Vec<WorkspaceSession>, String> {
     log::trace!("listing terminals for workspace {workspace}");
     let lookup = workspaces::find_workspace(&workspace).await?;
     list_terminals_in_workspace(&lookup).await
@@ -308,7 +312,7 @@ pub async fn terminal_attach_terminal(
     window: WebviewWindow,
     state: State<'_, TerminalManager>,
     workspace: String,
-    name: String,
+    attachment_id: String,
     command: Option<String>,
     output: Channel<Vec<u8>>,
 ) -> Result<TerminalAttachResult, String> {
@@ -318,16 +322,28 @@ pub async fn terminal_attach_terminal(
     }
     let key = AttachmentKey {
         workspace: workspace.clone(),
-        name: name.clone(),
+        name: attachment_id.clone(),
     };
     let startup_command = command.or_else(|| state.take_startup_command(&key));
+    if let Some(command) = startup_command.as_deref() {
+        let session = session_for_command(&attachment_id, command);
+        write_workspace_terminal_metadata(
+            &workspace,
+            &lookup,
+            mutate_sessions(
+                lookup.workspace.sessions(),
+                SessionMutation::Upsert(session),
+            ),
+        )
+        .await?;
+    }
 
-    let _reservation = match wait_for_attachment_slot(state.inner(), &key, &name).await? {
+    let _reservation = match wait_for_attachment_slot(state.inner(), &key, &attachment_id).await? {
         AttachmentSlot::Existing(existing) => {
             return attach_existing_terminal(
                 existing,
                 &lookup,
-                &name,
+                &attachment_id,
                 &window,
                 output,
                 startup_command,
@@ -337,7 +353,7 @@ pub async fn terminal_attach_terminal(
         AttachmentSlot::Reserved(reservation) => reservation,
     };
 
-    let (scrollback_vt, scrollback_truncated) = load_scrollback(&lookup, &name).await?;
+    let (scrollback_vt, scrollback_truncated) = load_scrollback(&lookup, &attachment_id).await?;
 
     let attachment = spawn_terminal_attachment(
         app,
@@ -352,8 +368,8 @@ pub async fn terminal_attach_terminal(
     }
 
     Ok(TerminalAttachResult {
-        terminal: attachment.id.clone(),
-        session: resolve_attached_session(&lookup, &name).await?,
+        terminal_id: attachment.id.clone(),
+        session: resolve_attached_session(&lookup, &attachment_id).await?,
         scrollback_vt,
         scrollback_truncated,
     })
@@ -362,25 +378,37 @@ pub async fn terminal_attach_terminal(
 #[tauri::command]
 pub async fn terminal_run_terminal(
     workspace: String,
-    name: String,
+    attachment_id: String,
     command: String,
 ) -> Result<TerminalRunResult, String> {
     let lookup = workspaces::find_workspace(&workspace).await?;
     if !lookup.workspace.ready() {
         return Err(format!("workspace {workspace} is not ready"));
     }
-    let created = find_terminal_session(&lookup, &name).await?.is_none();
-    let result = run_remote_command(&lookup, &terminal_run_remote_command(&name, &command)).await?;
+    let session = session_for_command(&attachment_id, &command);
+    let created = find_terminal_session(&lookup, &attachment_id)
+        .await?
+        .is_none();
+    write_workspace_terminal_metadata(
+        &workspace,
+        &lookup,
+        mutate_sessions(
+            lookup.workspace.sessions(),
+            SessionMutation::Upsert(session.clone()),
+        ),
+    )
+    .await?;
+    let result = run_remote_command(
+        &lookup,
+        &terminal_run_remote_command(&attachment_id, &command),
+    )
+    .await?;
     if !result.success {
         return Err(remote_command_error(
             "failed to run terminal command",
             &result.stderr,
         ));
     }
-
-    let session = find_terminal_session(&lookup, &name)
-        .await?
-        .ok_or_else(|| format!("terminal session not found after run: {name}"))?;
 
     Ok(TerminalRunResult { session, created })
 }
@@ -390,26 +418,29 @@ pub(crate) async fn start_terminal_command(
     workspace: &str,
     command: &str,
 ) -> Result<String, String> {
-    let terminal = terminal_create_terminal(workspace.to_string())
+    let attachment_id = terminal_create_terminal(workspace.to_string())
         .await?
-        .terminal;
+        .attachment_id;
     manager.set_startup_command(
         AttachmentKey {
             workspace: workspace.to_string(),
-            name: terminal.clone(),
+            name: attachment_id.clone(),
         },
         command.to_string(),
     );
-    Ok(terminal)
+    Ok(attachment_id)
 }
 
 #[tauri::command]
 pub fn terminal_detach_terminal(
     state: State<'_, TerminalManager>,
     workspace: String,
-    name: String,
+    attachment_id: String,
 ) -> Result<TerminalDetachResult, String> {
-    let key = AttachmentKey { workspace, name };
+    let key = AttachmentKey {
+        workspace,
+        name: attachment_id,
+    };
     if let Some(attachment) = state.remove_by_key(&key) {
         kill_local_attachment(&attachment)?;
         return Ok(TerminalDetachResult { detached: true });
@@ -422,12 +453,12 @@ pub fn terminal_detach_terminal(
 pub async fn terminal_kill_terminal(
     state: State<'_, TerminalManager>,
     workspace: String,
-    name: String,
+    attachment_id: String,
 ) -> Result<TerminalKillResult, String> {
     let lookup = workspaces::find_workspace(&workspace).await?;
     let result = run_remote_command(
         &lookup,
-        &run_terminal_user_command(&format!("zmx kill {}", shell_quote(&name))),
+        &run_terminal_user_command(&format!("zmx kill {}", shell_quote(&attachment_id))),
     )
     .await?;
     if !result.success {
@@ -437,7 +468,20 @@ pub async fn terminal_kill_terminal(
         ));
     }
 
-    let key = AttachmentKey { workspace, name };
+    write_workspace_terminal_metadata(
+        &workspace,
+        &lookup,
+        mutate_sessions(
+            lookup.workspace.sessions(),
+            SessionMutation::Remove(&attachment_id),
+        ),
+    )
+    .await?;
+
+    let key = AttachmentKey {
+        workspace,
+        name: attachment_id,
+    };
     if let Some(attachment) = state.remove_by_key(&key) {
         kill_local_attachment(&attachment)?;
     }
@@ -448,13 +492,22 @@ pub async fn terminal_kill_terminal(
 #[tauri::command]
 pub async fn terminal_read_terminal(
     workspace: String,
-    name: String,
+    attachment_id: String,
 ) -> Result<TerminalReadResult, String> {
     let lookup = workspaces::find_workspace(&workspace).await?;
+    write_workspace_terminal_metadata(
+        &workspace,
+        &lookup,
+        mutate_sessions(
+            lookup.workspace.sessions(),
+            SessionMutation::MarkRead(&attachment_id),
+        ),
+    )
+    .await?;
     let command = run_terminal_user_command(&format!(
-        "if [ -x {observer_bin} ]; then {observer_bin} mark-read --session {session}; fi",
+        "if [ -x {observer_bin} ]; then {observer_bin} mark-read --session {attachment_id}; fi",
         observer_bin = shell_quote(REMOTE_WORKSPACE_OBSERVER_BIN),
-        session = shell_quote(&name),
+        attachment_id = shell_quote(&attachment_id),
     ));
     let result = run_remote_command(&lookup, &command).await?;
     if !result.success {
@@ -630,7 +683,7 @@ fn spawn_waiter_loop(
         match status {
             Ok(status) => {
                 let payload = TerminalExitPayload {
-                    terminal: attachment.id.clone(),
+                    terminal_id: attachment.id.clone(),
                     exit_code: status.exit_code(),
                     signal: status.signal().map(ToOwned::to_owned),
                 };
@@ -669,7 +722,7 @@ fn emit_terminal_error(attachment: &Attachment, message: String) {
                 EventTarget::webview_window(window_label),
                 TERMINAL_ERROR_EVENT,
                 TerminalErrorPayload {
-                    terminal: attachment.id.clone(),
+                    terminal_id: attachment.id.clone(),
                     message,
                 },
             );
@@ -684,7 +737,7 @@ fn emit_terminal_error_with_app(app: &AppHandle, attachment: &Attachment, messag
             EventTarget::webview_window(window_label),
             TERMINAL_ERROR_EVENT,
             TerminalErrorPayload {
-                terminal: attachment.id.clone(),
+                terminal_id: attachment.id.clone(),
                 message,
             },
         );
@@ -752,7 +805,7 @@ async fn attach_existing_terminal(
     }
 
     Ok(TerminalAttachResult {
-        terminal: existing.id.clone(),
+        terminal_id: existing.id.clone(),
         session: resolve_attached_session(lookup, name).await?,
         scrollback_vt,
         scrollback_truncated,
@@ -794,37 +847,20 @@ fn write_attachment_input(attachment: &Attachment, data: &[u8]) -> Result<(), St
 
 async fn list_terminals_in_workspace(
     lookup: &WorkspaceLookup,
-) -> Result<Vec<TerminalSessionSummary>, String> {
-    let result = run_remote_command(lookup, &run_terminal_user_command("zmx list")).await?;
-    if !result.success {
-        let stderr = result.stderr.trim();
-        if stderr.contains("not found") || stderr.contains("command not found") {
-            return Ok(Vec::new());
-        }
-
-        return Err(remote_command_error(
-            "failed to list terminal sessions",
-            &result.stderr,
-        ));
-    }
-
-    if is_empty_terminal_list_output(&result.stdout) {
-        return Ok(Vec::new());
-    }
-
-    let mut sessions = parse_terminal_sessions(&result.stdout)?;
-    sort_terminal_sessions_oldest_to_newest(&mut sessions);
+) -> Result<Vec<WorkspaceSession>, String> {
+    let mut sessions = lookup.workspace.sessions().to_vec();
+    sort_workspace_sessions_oldest_to_newest(&mut sessions);
     Ok(sessions)
 }
 
 async fn find_terminal_session(
     lookup: &WorkspaceLookup,
-    name: &str,
-) -> Result<Option<TerminalSessionSummary>, String> {
+    attachment_id: &str,
+) -> Result<Option<WorkspaceSession>, String> {
     Ok(list_terminals_in_workspace(lookup)
         .await?
         .into_iter()
-        .find(|session| session.name == name))
+        .find(|session| session.attachment_id == attachment_id))
 }
 
 async fn load_scrollback(lookup: &WorkspaceLookup, name: &str) -> Result<(String, bool), String> {
@@ -849,17 +885,17 @@ async fn load_scrollback(lookup: &WorkspaceLookup, name: &str) -> Result<(String
 
 async fn resolve_attached_session(
     lookup: &WorkspaceLookup,
-    name: &str,
-) -> Result<TerminalSessionSummary, String> {
+    attachment_id: &str,
+) -> Result<WorkspaceSession, String> {
     for _ in 0..5 {
-        if let Some(session) = find_terminal_session(lookup, name).await? {
+        if let Some(session) = find_terminal_session(lookup, attachment_id).await? {
             return Ok(session);
         }
 
         std::thread::sleep(Duration::from_millis(150));
     }
 
-    Ok(pending_terminal_session(name))
+    Ok(pending_terminal_session(attachment_id))
 }
 
 async fn bootstrap_workspace(lookup: &WorkspaceLookup) -> Result<(), String> {
@@ -2242,20 +2278,13 @@ fn is_missing_terminal_session_error(stderr: &str) -> bool {
         || lower.contains("unknown session")
 }
 
-fn is_empty_terminal_list_output(stdout: &str) -> bool {
-    stdout
-        .trim()
-        .to_ascii_lowercase()
-        .starts_with("no sessions found")
-}
-
-fn pending_terminal_session(name: &str) -> TerminalSessionSummary {
-    TerminalSessionSummary {
-        name: name.to_string(),
-        pid: None,
-        clients: 0,
-        started_in: None,
-        created_at: None,
+fn pending_terminal_session(attachment_id: &str) -> WorkspaceSession {
+    WorkspaceSession {
+        kind: "terminal".to_string(),
+        name: "shell".to_string(),
+        attachment_id: attachment_id.to_string(),
+        working: None,
+        unread: None,
     }
 }
 
@@ -2277,11 +2306,11 @@ fn current_unix_timestamp_millis() -> u128 {
         .unwrap_or(0)
 }
 
-fn sort_terminal_sessions_oldest_to_newest(sessions: &mut [TerminalSessionSummary]) {
+fn sort_workspace_sessions_oldest_to_newest(sessions: &mut [WorkspaceSession]) {
     sessions.sort_by(|left, right| {
-        terminal_name_timestamp(&left.name)
-            .cmp(&terminal_name_timestamp(&right.name))
-            .then_with(|| left.name.cmp(&right.name))
+        terminal_name_timestamp(&left.attachment_id)
+            .cmp(&terminal_name_timestamp(&right.attachment_id))
+            .then_with(|| left.attachment_id.cmp(&right.attachment_id))
     });
 }
 
@@ -2303,58 +2332,132 @@ fn truncate_scrollback(mut scrollback: String, max_bytes: usize) -> (String, boo
     (scrollback, true)
 }
 
-fn parse_terminal_sessions(stdout: &str) -> Result<Vec<TerminalSessionSummary>, String> {
-    let mut sessions = Vec::new();
-    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
-        sessions.push(parse_terminal_session(line)?);
-    }
-
-    Ok(sessions)
+enum SessionMutation<'a> {
+    Upsert(WorkspaceSession),
+    Remove(&'a str),
+    MarkRead(&'a str),
 }
 
-fn parse_terminal_session(line: &str) -> Result<TerminalSessionSummary, String> {
-    let mut name = None;
-    let mut pid = None;
-    let mut clients = 0u32;
-    let mut started_in = None;
-    let mut created_at = None;
+struct WorkspaceTerminalMetadata {
+    sessions: Vec<WorkspaceSession>,
+    unread: bool,
+    working: Option<bool>,
+    last_active: String,
+}
 
-    for field in line.split('\t') {
-        let Some((key, value)) = field.split_once('=') else {
-            continue;
-        };
-
-        match key {
-            "session_name" => name = Some(value.to_string()),
-            "pid" => {
-                pid = value.parse::<u32>().ok();
+fn mutate_sessions(
+    current_sessions: &[WorkspaceSession],
+    mutation: SessionMutation<'_>,
+) -> WorkspaceTerminalMetadata {
+    let mut sessions = current_sessions.to_vec();
+    match mutation {
+        SessionMutation::Upsert(session) => {
+            if let Some(existing) = sessions
+                .iter_mut()
+                .find(|existing| existing.attachment_id == session.attachment_id)
+            {
+                *existing = session;
+            } else {
+                sessions.push(session);
             }
-            "clients" => {
-                clients = value.parse::<u32>().unwrap_or(0);
+        }
+        SessionMutation::Remove(attachment_id) => {
+            sessions.retain(|session| session.attachment_id != attachment_id);
+        }
+        SessionMutation::MarkRead(attachment_id) => {
+            if let Some(session) = sessions
+                .iter_mut()
+                .find(|session| session.attachment_id == attachment_id)
+            {
+                if session.unread.is_some() {
+                    session.unread = Some(false);
+                }
             }
-            "started_in" => started_in = non_empty(value),
-            "created" | "created_at" => created_at = non_empty(value),
-            _ => {}
         }
     }
-
-    let name = name.ok_or_else(|| format!("invalid zmx list row missing session name: {line}"))?;
-    Ok(TerminalSessionSummary {
-        name,
-        pid,
-        clients,
-        started_in,
-        created_at,
-    })
+    sort_workspace_sessions_oldest_to_newest(&mut sessions);
+    WorkspaceTerminalMetadata {
+        unread: sessions.iter().any(|session| session.unread == Some(true)),
+        working: sessions
+            .iter()
+            .any(|session| session.working == Some(true))
+            .then_some(true),
+        sessions,
+        last_active: current_rfc3339_timestamp(),
+    }
 }
 
-fn non_empty(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
+async fn write_workspace_terminal_metadata(
+    workspace: &str,
+    lookup: &WorkspaceLookup,
+    metadata: WorkspaceTerminalMetadata,
+) -> Result<(), String> {
+    let sessions_json =
+        serde_json::to_string(&metadata.sessions).map_err(|error| error.to_string())?;
+    let unread = if metadata.unread { "true" } else { "false" };
+    let working = if metadata.working.unwrap_or(false) {
+        "true"
     } else {
-        Some(trimmed.to_string())
+        "false"
+    };
+    let last_active = metadata.last_active.as_str();
+    workspaces::set_workspace_metadata_entries(
+        workspace,
+        &[
+            ("sessions", sessions_json.as_str()),
+            ("unread", unread),
+            ("working", working),
+            ("last_active", last_active),
+        ],
+    )
+    .await?;
+
+    log::trace!(
+        "updated terminal metadata for workspace {} sessions={} unread={} working={}",
+        lookup.workspace.name(),
+        metadata.sessions.len(),
+        unread,
+        working
+    );
+    Ok(())
+}
+
+fn session_for_command(attachment_id: &str, command: &str) -> WorkspaceSession {
+    let name = sanitize_session_display_name(command);
+    let assistant_capable = assistant_capable_command(&name);
+    WorkspaceSession {
+        kind: "terminal".to_string(),
+        name,
+        attachment_id: attachment_id.to_string(),
+        working: assistant_capable.then_some(false),
+        unread: assistant_capable.then_some(false),
     }
+}
+
+fn sanitize_session_display_name(command: &str) -> String {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return "shell".to_string();
+    }
+    trimmed.chars().take(200).collect()
+}
+
+fn assistant_capable_command(command: &str) -> bool {
+    let token = command
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(token.as_str(), "codex" | "claude" | "cc")
+}
+
+fn current_rfc3339_timestamp() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
 fn terminal_command_bytes(command: &str) -> Vec<u8> {
@@ -2670,73 +2773,89 @@ mod tests {
     }
 
     #[test]
-    fn sort_terminal_sessions_orders_oldest_to_newest_by_timestamp_name() {
+    fn sort_workspace_sessions_orders_oldest_to_newest_by_attachment_id() {
         let mut sessions = vec![
-            TerminalSessionSummary {
-                name: "terminal-1741812345680".to_string(),
-                pid: None,
-                clients: 0,
-                started_in: None,
-                created_at: None,
+            WorkspaceSession {
+                kind: "terminal".to_string(),
+                name: "shell".to_string(),
+                attachment_id: "terminal-1741812345680".to_string(),
+                working: None,
+                unread: None,
             },
-            TerminalSessionSummary {
-                name: "terminal-1741812345678".to_string(),
-                pid: None,
-                clients: 0,
-                started_in: None,
-                created_at: None,
+            WorkspaceSession {
+                kind: "terminal".to_string(),
+                name: "shell".to_string(),
+                attachment_id: "terminal-1741812345678".to_string(),
+                working: None,
+                unread: None,
             },
-            TerminalSessionSummary {
-                name: "terminal-1741812345679".to_string(),
-                pid: None,
-                clients: 0,
-                started_in: None,
-                created_at: None,
+            WorkspaceSession {
+                kind: "terminal".to_string(),
+                name: "shell".to_string(),
+                attachment_id: "terminal-1741812345679".to_string(),
+                working: None,
+                unread: None,
             },
         ];
 
-        sort_terminal_sessions_oldest_to_newest(&mut sessions);
+        sort_workspace_sessions_oldest_to_newest(&mut sessions);
 
-        assert_eq!(sessions[0].name, "terminal-1741812345678");
-        assert_eq!(sessions[1].name, "terminal-1741812345679");
-        assert_eq!(sessions[2].name, "terminal-1741812345680");
+        assert_eq!(sessions[0].attachment_id, "terminal-1741812345678");
+        assert_eq!(sessions[1].attachment_id, "terminal-1741812345679");
+        assert_eq!(sessions[2].attachment_id, "terminal-1741812345680");
     }
 
     #[test]
-    fn empty_terminal_list_output_is_recognized() {
-        assert!(is_empty_terminal_list_output(
-            "no sessions found in /run/user/1001/zmx"
-        ));
-        assert!(!is_empty_terminal_list_output(
-            "session_name=terminal-1741812345678\tpid=1\tclients=0"
-        ));
+    fn session_for_command_maps_assistant_state() {
+        let session = session_for_command("terminal-1", "codex");
+        assert_eq!(session.kind, "terminal");
+        assert_eq!(session.name, "codex");
+        assert_eq!(session.attachment_id, "terminal-1");
+        assert_eq!(session.working, Some(false));
+        assert_eq!(session.unread, Some(false));
     }
 
     #[test]
-    fn parse_terminal_session_reads_known_fields() {
-        let session = parse_terminal_session(
-            "session_name=dev\tpid=42\tclients=2\tcreated=2025-01-01T00:00:00Z\tstarted_in=/tmp",
-        )
-        .expect("session should parse");
-        assert_eq!(
-            session,
-            TerminalSessionSummary {
-                name: "dev".to_string(),
-                pid: Some(42),
-                clients: 2,
-                started_in: Some("/tmp".to_string()),
-                created_at: Some("2025-01-01T00:00:00Z".to_string()),
-            }
+    fn session_for_command_defaults_shell_for_empty_input() {
+        let session = session_for_command("terminal-1", "   ");
+        assert_eq!(session.name, "shell");
+        assert_eq!(session.working, None);
+        assert_eq!(session.unread, None);
+    }
+
+    #[test]
+    fn mutate_sessions_mark_read_recomputes_workspace_unread() {
+        let metadata = mutate_sessions(
+            &[WorkspaceSession {
+                kind: "terminal".to_string(),
+                name: "codex".to_string(),
+                attachment_id: "terminal-1".to_string(),
+                working: Some(false),
+                unread: Some(true),
+            }],
+            SessionMutation::MarkRead("terminal-1"),
         );
+
+        assert!(!metadata.unread);
+        assert_eq!(metadata.working, None);
+        assert_eq!(metadata.sessions[0].unread, Some(false));
     }
 
     #[test]
-    fn parse_terminal_sessions_ignores_empty_lines() {
-        let sessions =
-            parse_terminal_sessions("\nsession_name=dev\tpid=42\tclients=0\tstarted_in=/tmp\n\n")
-                .expect("sessions should parse");
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].name, "dev");
+    fn mutate_sessions_remove_drops_session_and_working_flag() {
+        let metadata = mutate_sessions(
+            &[WorkspaceSession {
+                kind: "terminal".to_string(),
+                name: "codex".to_string(),
+                attachment_id: "terminal-1".to_string(),
+                working: Some(true),
+                unread: Some(false),
+            }],
+            SessionMutation::Remove("terminal-1"),
+        );
+
+        assert!(metadata.sessions.is_empty());
+        assert_eq!(metadata.working, None);
     }
 
     #[test]

@@ -94,7 +94,7 @@ export interface PullRequestStatus {
 }
 
 export interface GitTerminalResult {
-	terminal: string;
+	attachment_id: string;
 }
 
 export function gitDiff(workspace: string): Promise<Diff> {

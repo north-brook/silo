@@ -8,6 +8,7 @@ import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 import "@xterm/xterm/css/xterm.css";
 import { invoke } from "../../../lib/invoke";
+import type { WorkspaceSession } from "../../../lib/workspaces";
 import { Loader } from "../../../components/loader";
 import { attachTerminalBindings } from "./bindings";
 
@@ -33,26 +34,20 @@ function normalizeTerminalOutput(data: ArrayBuffer): Uint8Array {
 }
 
 interface TerminalAttachResult {
-	terminal: string;
-	session: {
-		name: string;
-		pid: number | null;
-		clients: number;
-		started_in: string | null;
-		created_at: string | null;
-	};
+	terminal_id: string;
+	session: WorkspaceSession;
 	scrollback_vt: string;
 	scrollback_truncated: boolean;
 }
 
 interface TerminalExitPayload {
-	terminal: string;
+	terminal_id: string;
 	exit_code: number;
 	signal: string | null;
 }
 
 interface TerminalErrorPayload {
-	terminal: string;
+	terminal_id: string;
 	message: string;
 }
 
@@ -91,21 +86,23 @@ export default function TerminalPage() {
 function TerminalView() {
 	const searchParams = useSearchParams();
 	const workspace = searchParams.get("workspace") ?? "";
-	const terminal = searchParams.get("terminal") ?? "";
+	const attachmentId = searchParams.get("attachment_id") ?? "";
 
-	if (!workspace || !terminal) {
+	if (!workspace || !attachmentId) {
 		return null;
 	}
 
-	return <WorkspaceTerminal workspace={workspace} terminal={terminal} />;
+	return (
+		<WorkspaceTerminal workspace={workspace} attachmentId={attachmentId} />
+	);
 }
 
 function WorkspaceTerminal({
 	workspace,
-	terminal,
+	attachmentId,
 }: {
 	workspace: string;
-	terminal: string;
+	attachmentId: string;
 }) {
 	const containerRef = useRef<HTMLDivElement>(null);
 	const terminalRef = useRef<Terminal | null>(null);
@@ -167,7 +164,7 @@ function WorkspaceTerminal({
 
 		void getCurrentWebviewWindow()
 			.listen<TerminalExitPayload>("terminal://exit", ({ payload }) => {
-				if (!disposed && payload.terminal === terminalIdRef.current) {
+				if (!disposed && payload.terminal_id === terminalIdRef.current) {
 					const reason = payload.signal
 						? `signal=${payload.signal}`
 						: `exit=${payload.exit_code}`;
@@ -184,7 +181,7 @@ function WorkspaceTerminal({
 
 		void getCurrentWebviewWindow()
 			.listen<TerminalErrorPayload>("terminal://error", ({ payload }) => {
-				if (!disposed && payload.terminal === terminalIdRef.current) {
+				if (!disposed && payload.terminal_id === terminalIdRef.current) {
 					term.writeln(`\r\n[terminal error] ${payload.message}`);
 				}
 			})
@@ -202,14 +199,14 @@ function WorkspaceTerminal({
 					"terminal_attach_terminal",
 					{
 						workspace,
-						name: terminal,
+						attachment_id: attachmentId,
 						output,
 					},
 				);
 				if (disposed) return;
 
-				attachedTerminal = result.terminal;
-				terminalIdRef.current = result.terminal;
+				attachedTerminal = result.terminal_id;
+				terminalIdRef.current = result.terminal_id;
 				setLoading(false);
 
 				if (result.scrollback_vt) {
@@ -217,7 +214,7 @@ function WorkspaceTerminal({
 				}
 
 				await invoke("terminal_resize_terminal", {
-					terminal: result.terminal,
+					terminal: result.terminal_id,
 					cols: term.cols,
 					rows: term.rows,
 				});
@@ -273,7 +270,7 @@ function WorkspaceTerminal({
 				pendingDetachRef.current = setTimeout(() => {
 					void invoke("terminal_detach_terminal", {
 						workspace,
-						name: terminal,
+						attachment_id: attachmentId,
 					});
 					if (terminalIdRef.current === attachedTerminal) {
 						terminalIdRef.current = null;
@@ -282,7 +279,7 @@ function WorkspaceTerminal({
 				}, 250);
 			}
 		};
-	}, [workspace, terminal]);
+	}, [workspace, attachmentId]);
 
 	return (
 		<div className="flex-1 min-h-0 bg-surface relative">

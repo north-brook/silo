@@ -5,18 +5,10 @@ import { Plus, Terminal, X } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 import { invoke } from "../../lib/invoke";
-import type { Workspace } from "../../lib/workspaces";
+import type { Workspace, WorkspaceSession } from "../../lib/workspaces";
 import { Loader } from "../../components/loader";
 import { toast } from "../../components/toaster";
 import { TopBar } from "../../components/top-bar";
-
-interface TerminalSessionSummary {
-	name: string;
-	pid: number | null;
-	clients: number;
-	started_in: string | null;
-	created_at: string | null;
-}
 
 export default function WorkspaceLayout({
 	children,
@@ -70,7 +62,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 	const terminals = useQuery({
 		queryKey: ["terminal_list_terminals", workspaceName],
 		queryFn: () =>
-			invoke<TerminalSessionSummary[]>(
+			invoke<WorkspaceSession[]>(
 				"terminal_list_terminals",
 				{ workspace: workspaceName },
 				{
@@ -84,7 +76,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 
 	const createTerminal = useMutation({
 		mutationFn: () =>
-			invoke<{ terminal: string }>("terminal_create_terminal", {
+			invoke<{ attachment_id: string }>("terminal_create_terminal", {
 				workspace: workspaceName,
 			}),
 		onSuccess: (result) => {
@@ -92,7 +84,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 				queryKey: ["terminal_list_terminals", workspaceName],
 			});
 			router.push(
-				`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspaceName)}&terminal=${encodeURIComponent(result.terminal)}`,
+				`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspaceName)}&attachment_id=${encodeURIComponent(result.attachment_id)}`,
 			);
 		},
 		onError: (error) => {
@@ -104,35 +96,37 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 		},
 	});
 
-	const activeTerminal = searchParams.get("terminal");
+	const activeTerminal = searchParams.get("attachment_id");
 	const project = searchParams.get("project") ?? workspace.data?.project ?? "";
 	const terminalList = terminals.data ?? [];
 
 	const [killingTerminal, setKillingTerminal] = useState<string | null>(null);
 
 	const killTerminal = useMutation({
-		mutationFn: (name: string) =>
+		mutationFn: (attachment_id: string) =>
 			invoke("terminal_kill_terminal", {
 				workspace: workspaceName,
-				name,
+				attachment_id,
 			}),
-		onMutate: (name) => {
-			setKillingTerminal(name);
+		onMutate: (attachment_id) => {
+			setKillingTerminal(attachment_id);
 		},
 		onSettled: () => {
 			setKillingTerminal(null);
 		},
-		onSuccess: (_result, name) => {
+		onSuccess: (_result, attachment_id) => {
 			queryClient.invalidateQueries({
 				queryKey: ["terminal_list_terminals", workspaceName],
 			});
-			const index = terminalList.findIndex((s) => s.name === name);
+			const index = terminalList.findIndex(
+				(session) => session.attachment_id === attachment_id,
+			);
 			const leftNeighbor = index > 0 ? terminalList[index - 1] : null;
-			if (activeTerminal === name && leftNeighbor) {
+			if (activeTerminal === attachment_id && leftNeighbor) {
 				router.push(
-					`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspaceName)}&terminal=${encodeURIComponent(leftNeighbor.name)}`,
+					`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspaceName)}&attachment_id=${encodeURIComponent(leftNeighbor.attachment_id)}`,
 				);
-			} else if (activeTerminal === name) {
+			} else if (activeTerminal === attachment_id) {
 				router.push(`/workspace?name=${encodeURIComponent(workspaceName)}`);
 			}
 		},
@@ -145,7 +139,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 
 		void invoke("terminal_read_terminal", {
 			workspace: workspaceName,
-			name: activeTerminal,
+			attachment_id: activeTerminal,
 		})
 			.then(() =>
 				queryClient.invalidateQueries({
@@ -171,21 +165,21 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 			{terminalList.length > 0 && (
 				<div className="w-full bg-bg shrink-0 flex items-end overflow-x-auto">
 					{terminalList.map((session) => {
-						const isActive = activeTerminal === session.name;
+						const isActive = activeTerminal === session.attachment_id;
 						return (
 							// biome-ignore lint/a11y/noStaticElementInteractions: can't use <button> because it contains interactive children
 							<div
-								key={session.name}
+								key={session.attachment_id}
 								onClick={() =>
 									router.push(
-										`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspaceName)}&terminal=${encodeURIComponent(session.name)}`,
+										`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspaceName)}&attachment_id=${encodeURIComponent(session.attachment_id)}`,
 									)
 								}
 								onKeyDown={(e) => {
 									if (e.key === "Enter" || e.key === " ") {
 										e.preventDefault();
 										router.push(
-											`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspaceName)}&terminal=${encodeURIComponent(session.name)}`,
+											`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspaceName)}&attachment_id=${encodeURIComponent(session.attachment_id)}`,
 										);
 									}
 								}}
@@ -196,8 +190,8 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 								}`}
 							>
 								<Terminal size={12} />
-								Terminal
-								{killingTerminal === session.name ? (
+								<span className="max-w-48 truncate">{session.name}</span>
+								{killingTerminal === session.attachment_id ? (
 									<span className="p-0.5">
 										<Loader />
 									</span>
@@ -206,7 +200,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 										type="button"
 										onClick={(e) => {
 											e.stopPropagation();
-											killTerminal.mutate(session.name);
+											killTerminal.mutate(session.attachment_id);
 										}}
 										className={`p-0.5 rounded transition-colors hover:bg-border-light ${
 											isActive

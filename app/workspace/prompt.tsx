@@ -79,7 +79,7 @@ export function PromptWorkspace({
 
 	const createTerminal = useMutation({
 		mutationFn: () =>
-			invoke<{ terminal: string }>("terminal_create_terminal", {
+			invoke<{ attachment_id: string }>("terminal_create_terminal", {
 				workspace,
 			}),
 		onSuccess: (result) => {
@@ -87,7 +87,7 @@ export function PromptWorkspace({
 				queryKey: ["terminal_list_terminals", workspace],
 			});
 			router.push(
-				`/workspace/terminal?project=${encodeURIComponent(project ?? "")}&workspace=${encodeURIComponent(workspace)}&terminal=${encodeURIComponent(result.terminal)}`,
+				`/workspace/terminal?project=${encodeURIComponent(project ?? "")}&workspace=${encodeURIComponent(workspace)}&attachment_id=${encodeURIComponent(result.attachment_id)}`,
 			);
 		},
 		onError: (error) => {
@@ -101,7 +101,7 @@ export function PromptWorkspace({
 
 	return (
 		<div className="flex-1 flex flex-col items-center justify-center p-6">
-			<div className="w-full max-w-lg">
+			<div className="w-full max-w-xl">
 				<div className="flex justify-center mb-6">
 					<SiloIcon height={32} />
 				</div>

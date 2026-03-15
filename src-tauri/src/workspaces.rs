@@ -57,11 +57,11 @@ struct WorkspaceBase {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceSession {
     #[serde(rename = "type")]
-    kind: String,
-    name: String,
-    attachment_id: String,
-    working: Option<bool>,
-    unread: Option<bool>,
+    pub(crate) kind: String,
+    pub(crate) name: String,
+    pub(crate) attachment_id: String,
+    pub(crate) working: Option<bool>,
+    pub(crate) unread: Option<bool>,
 }
 
 impl Workspace {
@@ -129,6 +129,13 @@ impl Workspace {
         match self {
             Self::Branch(workspace) => Some(workspace.target_branch.as_str()),
             Self::Template(_) => None,
+        }
+    }
+
+    pub(crate) fn sessions(&self) -> &[WorkspaceSession] {
+        match self {
+            Self::Branch(workspace) => &workspace.sessions,
+            Self::Template(_) => &[],
         }
     }
 }
@@ -392,6 +399,14 @@ pub(crate) async fn set_workspace_metadata(
     update_workspace_metadata_in_lookup(lookup, key, value).await
 }
 
+pub(crate) async fn set_workspace_metadata_entries(
+    workspace: &str,
+    entries: &[(&str, &str)],
+) -> Result<(), String> {
+    let lookup = find_workspace(workspace).await?;
+    update_workspace_metadata_entries_in_lookup(lookup, entries).await
+}
+
 pub(crate) async fn find_workspace(name: &str) -> Result<WorkspaceLookup, String> {
     let config = ConfigStore::new()
         .and_then(|store| store.load())
@@ -460,18 +475,24 @@ async fn update_workspace_metadata_in_lookup(
     key: &str,
     value: &str,
 ) -> Result<(), String> {
+    update_workspace_metadata_entries_in_lookup(lookup, &[(key, value)]).await
+}
+
+async fn update_workspace_metadata_entries_in_lookup(
+    lookup: WorkspaceLookup,
+    entries: &[(&str, &str)],
+) -> Result<(), String> {
     let result = run_gcloud(
         &lookup.account,
         &lookup.gcloud_project,
-        update_workspace_metadata_args(&lookup.workspace, key, value)?,
+        update_workspace_metadata_args(&lookup.workspace, entries)?,
     )
     .await?;
 
     if !result.success {
         return Err(gcloud_error(
             &format!(
-                "failed to update {} metadata for workspace {}",
-                key,
+                "failed to update metadata for workspace {}",
                 lookup.workspace.name()
             ),
             &result.stderr,
@@ -479,8 +500,12 @@ async fn update_workspace_metadata_in_lookup(
     }
 
     log::info!(
-        "updated {} metadata for workspace {}",
-        key,
+        "updated metadata keys [{}] for workspace {}",
+        entries
+            .iter()
+            .map(|(key, _)| *key)
+            .collect::<Vec<_>>()
+            .join(", "),
         lookup.workspace.name()
     );
     Ok(())
@@ -905,10 +930,13 @@ fn update_workspace_label_args(workspace: &Workspace, label: &str, value: &str) 
 
 fn update_workspace_metadata_args(
     workspace: &Workspace,
-    key: &str,
-    value: &str,
+    entries: &[(&str, &str)],
 ) -> Result<Vec<String>, String> {
-    if value.trim().is_empty() {
+    if entries.is_empty() {
+        return Err("workspace metadata update did not include any values".to_string());
+    }
+    if entries.len() == 1 && entries[0].1.trim().is_empty() {
+        let key = entries[0].0;
         Ok(vec![
             "compute".to_string(),
             "instances".to_string(),
@@ -924,7 +952,7 @@ fn update_workspace_metadata_args(
             "add-metadata".to_string(),
             workspace.name().to_string(),
             format!("--zone={}", workspace.zone()),
-            workspace_metadata_arg(&[(key, value)])?,
+            workspace_metadata_arg(entries)?,
         ])
     }
 }
@@ -2174,8 +2202,7 @@ mod tests {
     fn update_workspace_metadata_args_adds_metadata_when_value_present() {
         let args = update_workspace_metadata_args(
             &test_branch_workspace("ws-demo-123", None),
-            "target_branch",
-            "Feature/Inbox",
+            &[("target_branch", "Feature/Inbox")],
         )
         .expect("metadata args should build");
 
@@ -2196,8 +2223,7 @@ mod tests {
     fn update_workspace_metadata_args_removes_metadata_when_value_empty() {
         let args = update_workspace_metadata_args(
             &test_branch_workspace("ws-demo-123", None),
-            "branch",
-            "",
+            &[("branch", "")],
         )
         .expect("metadata args should build");
 
