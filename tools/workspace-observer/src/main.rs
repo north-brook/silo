@@ -131,6 +131,9 @@ fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
         .iter()
         .position(|arg| arg == "--")
         .ok_or_else(|| "assistant-proxy requires `--` before the wrapped command".to_string())?;
+    let initial_prompt_argv = args[..command_start]
+        .iter()
+        .any(|arg| arg == "--initial-prompt-argv");
     let command = args[command_start + 1..].to_vec();
     if command.is_empty() {
         return Err("assistant-proxy requires a wrapped command".to_string());
@@ -178,6 +181,11 @@ fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
         .map_err(|error| format!("failed to open pty writer: {error}"))?;
 
     let tracker = AssistantTracker::new(session.clone(), provider, runtime.fifo);
+    if initial_prompt_argv {
+        if let Some(prompt) = initial_prompt_from_command(provider, &command) {
+            tracker.record_initial_prompt(&prompt);
+        }
+    }
     let reader_tracker = Arc::clone(&tracker);
     let reader_done = Arc::new(AtomicBool::new(false));
     let reader_done_signal = Arc::clone(&reader_done);
@@ -1051,10 +1059,6 @@ impl AssistantTracker {
         let prompts = {
             let mut state = self.state.lock().expect("tracker lock should not poison");
             let prompts = collect_submitted_assistant_prompts(&mut state.input_buffer, input);
-            if !prompts.is_empty() {
-                state.awaiting_turn = true;
-                state.deadline = None;
-            }
             prompts
         };
 
@@ -1062,14 +1066,15 @@ impl AssistantTracker {
             return;
         }
 
-        let _ = send_event(
-            &self.fifo,
-            &ObserverEvent::AssistantPromptSubmitted {
-                session: self.session.clone(),
-                provider: self.provider,
-            },
-        );
-        self.wake.notify_all();
+        self.record_prompt_submission();
+    }
+
+    fn record_initial_prompt(&self, prompt: &str) {
+        if prompt.trim().is_empty() {
+            return;
+        }
+
+        self.record_prompt_submission();
     }
 
     fn record_output(&self, count: usize) {
@@ -1082,6 +1087,23 @@ impl AssistantTracker {
             return;
         }
         state.deadline = Some(Instant::now() + COMPLETION_DEBOUNCE);
+        self.wake.notify_all();
+    }
+
+    fn record_prompt_submission(&self) {
+        {
+            let mut state = self.state.lock().expect("tracker lock should not poison");
+            state.awaiting_turn = true;
+            state.deadline = None;
+        }
+
+        let _ = send_event(
+            &self.fifo,
+            &ObserverEvent::AssistantPromptSubmitted {
+                session: self.session.clone(),
+                provider: self.provider,
+            },
+        );
         self.wake.notify_all();
     }
 
@@ -1291,13 +1313,42 @@ fn collect_submitted_assistant_prompts(buffer: &mut String, input: &str) -> Vec<
     prompts
 }
 
+fn initial_prompt_from_command(
+    provider: AssistantProvider,
+    command: &[String],
+) -> Option<String> {
+    let (program, args) = command.split_first()?;
+    let program = program
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    match provider {
+        AssistantProvider::Codex if program == "codex" => {
+            let prompt = (args.len() == 1).then_some(args[0].trim())?;
+            (!prompt.is_empty()).then_some(prompt.to_string())
+        }
+        AssistantProvider::Claude if program == "claude" => {
+            let args = args
+                .iter()
+                .filter(|arg| arg.as_str() != "--dangerously-skip-permissions")
+                .collect::<Vec<_>>();
+            let prompt = (args.len() == 1).then_some(args[0].trim())?;
+            (!prompt.is_empty()).then_some(prompt.to_string())
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         bool_metadata_value, collect_submitted_assistant_prompts, effective_activity_at,
-        flat_metadata_items, normalize_assistant_input, parse_timestamp, parse_zmx_session,
-        resolve_assistant_provider, should_suspend_for_inactivity_at, update_metadata_item,
-        AssistantProvider, ObserverEvent, ObserverState, PublishedSession, PublishedState,
+        flat_metadata_items, initial_prompt_from_command, normalize_assistant_input,
+        parse_timestamp, parse_zmx_session, resolve_assistant_provider,
+        should_suspend_for_inactivity_at, update_metadata_item, AssistantProvider,
+        ObserverEvent, ObserverState, PublishedSession, PublishedState,
     };
     use std::collections::BTreeMap;
     use time::Duration as TimeDuration;
@@ -1318,6 +1369,54 @@ mod tests {
             vec!["hello world".to_string()]
         );
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn initial_prompt_from_command_reads_codex_prompt_arg() {
+        assert_eq!(
+            initial_prompt_from_command(
+                AssistantProvider::Codex,
+                &["codex".to_string(), "ship it".to_string()],
+            ),
+            Some("ship it".to_string())
+        );
+    }
+
+    #[test]
+    fn initial_prompt_from_command_reads_claude_prompt_arg() {
+        assert_eq!(
+            initial_prompt_from_command(
+                AssistantProvider::Claude,
+                &[
+                    "claude".to_string(),
+                    "--dangerously-skip-permissions".to_string(),
+                    "ship it".to_string(),
+                ],
+            ),
+            Some("ship it".to_string())
+        );
+    }
+
+    #[test]
+    fn initial_prompt_from_command_ignores_non_prompt_subcommands() {
+        assert_eq!(
+            initial_prompt_from_command(
+                AssistantProvider::Codex,
+                &["codex".to_string(), "login".to_string(), "--help".to_string()],
+            ),
+            None
+        );
+        assert_eq!(
+            initial_prompt_from_command(
+                AssistantProvider::Claude,
+                &[
+                    "claude".to_string(),
+                    "install".to_string(),
+                    "stable".to_string(),
+                ],
+            ),
+            None
+        );
     }
 
     #[test]

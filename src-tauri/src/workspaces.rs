@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use tauri::State;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use uuid::Uuid;
 
@@ -379,6 +380,27 @@ pub async fn workspaces_get_workspace(workspace: String) -> Result<Workspace, St
 }
 
 #[tauri::command]
+pub async fn workspaces_submit_prompt(
+    state: State<'_, terminal::TerminalManager>,
+    workspace: String,
+    prompt: String,
+    model: String,
+) -> Result<terminal::TerminalCreateResult, String> {
+    log::info!("submitting {model} prompt for workspace {workspace}");
+    let lookup = find_workspace(&workspace).await?;
+    if !lookup.workspace.ready() {
+        return Err(format!("workspace {workspace} is not ready"));
+    }
+
+    let prompt = trim_prompt_input(&prompt)?;
+    let command = prompt_command_for_model(&model, &prompt)?;
+    let attachment_id =
+        terminal::start_terminal_command(state.inner(), &workspace, &command).await?;
+
+    Ok(terminal::TerminalCreateResult { attachment_id })
+}
+
+#[tauri::command]
 pub async fn workspaces_delete_workspace(workspace: String) -> Result<(), String> {
     log::info!("deleting workspace {workspace}");
     let lookup = find_workspace(&workspace).await?;
@@ -418,6 +440,22 @@ pub(crate) async fn set_workspace_metadata_entries(
 ) -> Result<(), String> {
     let lookup = find_workspace(workspace).await?;
     update_workspace_metadata_entries_in_lookup(lookup, entries).await
+}
+
+fn trim_prompt_input(prompt: &str) -> Result<String, String> {
+    if prompt.trim().is_empty() {
+        return Err("prompt must not be empty".to_string());
+    }
+
+    Ok(prompt.to_string())
+}
+
+fn prompt_command_for_model(model: &str, prompt: &str) -> Result<String, String> {
+    match model.trim() {
+        "codex" => Ok(terminal::codex_prompt_command(prompt)),
+        "claude" => Ok(terminal::claude_prompt_command(prompt)),
+        other => Err(format!("unsupported prompt model: {other}")),
+    }
 }
 
 pub(crate) async fn find_workspace(name: &str) -> Result<WorkspaceLookup, String> {
@@ -2675,5 +2713,30 @@ mod tests {
         assert!(name
             .chars()
             .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-'));
+    }
+
+    #[test]
+    fn trim_prompt_input_rejects_blank_values() {
+        assert_eq!(
+            trim_prompt_input("   ").expect_err("blank prompt should fail"),
+            "prompt must not be empty"
+        );
+    }
+
+    #[test]
+    fn prompt_command_for_model_rejects_unknown_model() {
+        assert_eq!(
+            prompt_command_for_model("gpt", "ship it").expect_err("unknown model should fail"),
+            "unsupported prompt model: gpt"
+        );
+    }
+
+    #[test]
+    fn prompt_command_for_model_uses_claude_command_builder() {
+        let command = prompt_command_for_model("claude", "ship it")
+            .expect("claude model should build a command");
+
+        assert!(command.starts_with("cc "));
+        assert!(command.contains("base64 --decode"));
     }
 }
