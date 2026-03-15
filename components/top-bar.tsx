@@ -307,7 +307,7 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 								setBranchDraft(branchWorkspace.branch);
 								setEditingBranch(true);
 							}}
-							className={`transition-colors ${hasPr ? "text-text-muted cursor-default" : "text-text hover:text-text-bright"}`}
+							className={`transition-colors ${hasPr ? "text-text cursor-default" : "text-text hover:text-text-bright"}`}
 						>
 							{branchDraft || "branch"}
 						</button>
@@ -318,7 +318,7 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 							<button
 								type="button"
 								disabled={hasPr}
-								className={`flex items-center gap-1 transition-colors ${hasPr ? "text-text-muted cursor-default" : "text-text hover:text-text-bright"}`}
+								className={`flex items-center gap-1 transition-colors ${hasPr ? "text-text cursor-default" : "text-text hover:text-text-bright"}`}
 							>
 								{targetBranch || "target branch"}
 								{!hasPr && <ChevronsUpDown size={10} className="text-text-placeholder" />}

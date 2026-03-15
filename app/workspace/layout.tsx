@@ -39,6 +39,7 @@ function LayoutSkeleton({ children }: { children: React.ReactNode }) {
 
 function terminalTabPresentation(name: string) {
 	const trimmed = name.trim();
+	const lower = trimmed.toLowerCase();
 	const [token, ...rest] = trimmed.split(/\s+/);
 	const normalizedToken = token?.toLowerCase() ?? "";
 	if (normalizedToken === "cc" || normalizedToken === "claude") {
@@ -51,10 +52,10 @@ function terminalTabPresentation(name: string) {
 			label,
 		};
 	}
-	if (normalizedToken === "codex") {
+	if (normalizedToken === "codex" || lower.startsWith("command codex")) {
 		return {
 			icon: <CodexIcon height={12} />,
-			label: trimmed || "codex",
+			label: "codex",
 		};
 	}
 	return {

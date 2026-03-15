@@ -23,7 +23,7 @@ function useSavingSteps(status: string, deleted: boolean): Step[] {
 	const [wasStopping, setWasStopping] = useState(false);
 	const [wasStopped, setWasStopped] = useState(false);
 
-	const isStopping = status === "STOPPING" || status === "SUSPENDING";
+	const isStopping = status === "STOPPING";
 	const isStopped = status === "TERMINATED" || status === "STOPPED";
 
 	useEffect(() => {
