@@ -3,14 +3,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Terminal, X } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useState } from "react";
 import { ClaudeIcon } from "../../components/icons/claude";
 import { CodexIcon } from "../../components/icons/codex";
-import { invoke } from "../../lib/invoke";
-import type { Workspace, WorkspaceSession } from "../../lib/workspaces";
 import { Loader } from "../../components/loader";
 import { toast } from "../../components/toaster";
 import { TopBar } from "../../components/top-bar";
+import { invoke } from "../../lib/invoke";
+import type { Workspace, WorkspaceSession } from "../../lib/workspaces";
 
 export default function WorkspaceLayout({
 	children,
@@ -43,13 +43,9 @@ function terminalTabPresentation(name: string) {
 	const [token, ...rest] = trimmed.split(/\s+/);
 	const normalizedToken = token?.toLowerCase() ?? "";
 	if (normalizedToken === "cc" || normalizedToken === "claude") {
-		const label =
-			normalizedToken === "cc"
-				? ["claude", ...rest].join(" ").trim()
-				: trimmed || "claude";
 		return {
 			icon: <ClaudeIcon height={12} />,
-			label,
+			label: "claude",
 		};
 	}
 	if (normalizedToken === "codex" || lower.startsWith("command codex")) {
@@ -161,23 +157,6 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 		},
 	});
 
-	useEffect(() => {
-		if (!workspaceName || !activeTerminal) {
-			return;
-		}
-
-		void invoke("terminal_read_terminal", {
-			workspace: workspaceName,
-			attachmentId: activeTerminal,
-		})
-			.then(() =>
-				queryClient.invalidateQueries({
-					queryKey: ["workspaces_get_workspace", workspaceName],
-				}),
-			)
-			.catch(() => {});
-	}, [activeTerminal, queryClient, workspaceName]);
-
 	return (
 		<>
 			{workspace.data ? (
@@ -220,9 +199,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 								}`}
 							>
 								{icon}
-								<span className="max-w-48 truncate">
-									{label}
-								</span>
+								<span className="max-w-48 truncate">{label}</span>
 								{killingTerminal === session.attachment_id ? (
 									<span className="p-0.5">
 										<Loader />
