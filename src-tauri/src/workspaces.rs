@@ -2736,7 +2736,7 @@ mod tests {
         let command = prompt_command_for_model("claude", "ship it")
             .expect("claude model should build a command");
 
-        assert!(command.starts_with("cc "));
+        assert!(command.starts_with("silo claude "));
         assert!(command.contains("base64 --decode"));
     }
 }
