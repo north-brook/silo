@@ -54,27 +54,8 @@ struct WorkspaceBase {
     ready: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceSession {
-    #[serde(rename = "type")]
-    kind: String,
-    name: String,
-    attachment_id: String,
-    working: Option<bool>,
-    unread: Option<bool>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct WorkspaceObserverState {
-    branch: Option<String>,
-    working: Option<bool>,
-    unread: Option<bool>,
-    #[serde(default)]
-    sessions: Vec<WorkspaceObserverSession>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-struct WorkspaceObserverSession {
     #[serde(rename = "type")]
     kind: String,
     name: String,
@@ -798,6 +779,8 @@ fn create_workspace_args(
         ("branch", branch_label),
         ("target_branch", target_branch),
         ("unread", "false"),
+        ("working", "false"),
+        ("sessions", "[]"),
     ])
     .expect("workspace metadata values must fit supported gcloud metadata delimiters");
 
@@ -1394,7 +1377,6 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         .cloned()
         .unwrap_or_default();
     let metadata = parse_instance_metadata(value.get("metadata"));
-    let observer_state = parse_workspace_observer_state(metadata.get("silo_state"));
     let template = labels
         .get("template")
         .and_then(Value::as_str)
@@ -1406,12 +1388,7 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         .get("project")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let last_active = metadata.get("last_active").cloned().or_else(|| {
-        labels
-            .get("last_active")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-    });
+    let last_active = metadata.get("last_active").cloned();
     let ready = labels
         .get("ready")
         .and_then(Value::as_str)
@@ -1435,58 +1412,18 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
             template: true,
         }))
     } else {
-        let branch = observer_state
-            .as_ref()
-            .and_then(|state| state.branch.clone())
-            .or_else(|| metadata.get("branch").cloned())
-            .or_else(|| {
-                labels
-                    .get("branch")
-                    .and_then(Value::as_str)
-                    .map(parse_branch_label)
-            })
-            .unwrap_or_default();
-        let target_branch = metadata
-            .get("target_branch")
-            .cloned()
-            .or_else(|| {
-                labels
-                    .get("target_branch")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .unwrap_or_default();
+        let branch = metadata.get("branch").cloned().unwrap_or_default();
+        let target_branch = metadata.get("target_branch").cloned().unwrap_or_default();
         let unread = metadata
             .get("unread")
             .map(|value| parse_bool_value("unread", value))
-            .or_else(|| {
-                observer_state
-                    .as_ref()
-                    .and_then(|state| state.unread.map(Ok))
-            })
-            .or_else(|| {
-                labels
-                    .get("unread")
-                    .and_then(Value::as_str)
-                    .map(|value| parse_bool_value("unread", value))
-            })
             .transpose()?
             .unwrap_or(false);
         let working = metadata
             .get("working")
             .map(|value| parse_bool_value("working", value))
-            .or_else(|| {
-                observer_state
-                    .as_ref()
-                    .and_then(|state| state.working.map(Ok))
-            })
-            .or_else(|| {
-                labels
-                    .get("working")
-                    .and_then(Value::as_str)
-                    .map(|value| parse_bool_value("working", value))
-            })
             .transpose()?;
+        let sessions = parse_workspace_sessions(metadata.get("sessions"));
 
         Ok(Workspace::branch(
             base,
@@ -1494,26 +1431,7 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
             target_branch,
             unread,
             working,
-            observer_state
-                .map(|state| {
-                    state
-                        .sessions
-                        .into_iter()
-                        .filter(|session| {
-                            !session.kind.trim().is_empty()
-                                && !session.name.trim().is_empty()
-                                && !session.attachment_id.trim().is_empty()
-                        })
-                        .map(|session| WorkspaceSession {
-                            kind: session.kind,
-                            name: session.name,
-                            attachment_id: session.attachment_id,
-                            working: session.working,
-                            unread: session.unread,
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default(),
+            sessions,
         ))
     }
 }
@@ -1571,17 +1489,6 @@ fn parse_instance_state(stdout: &str) -> Result<InstanceState, String> {
     Ok(InstanceState { status, boot_disk })
 }
 
-fn parse_branch_label(value: &str) -> String {
-    let trimmed = value.trim();
-    if let Some(river) = trimmed.strip_prefix("silo-") {
-        if DEFAULT_RIVER_NAMES.contains(&river) {
-            return format!("silo/{river}");
-        }
-    }
-
-    trimmed.to_string()
-}
-
 fn required_string_field(value: &Value, field: &str) -> Result<String, String> {
     value
         .get(field)
@@ -1633,13 +1540,23 @@ fn parse_instance_metadata(metadata: Option<&Value>) -> HashMap<String, String> 
     entries
 }
 
-fn parse_workspace_observer_state(value: Option<&String>) -> Option<WorkspaceObserverState> {
-    let value = value?.trim();
+fn parse_workspace_sessions(value: Option<&String>) -> Vec<WorkspaceSession> {
+    let Some(value) = value.map(|value| value.trim()) else {
+        return Vec::new();
+    };
     if value.is_empty() {
-        return None;
+        return Vec::new();
     }
 
-    serde_json::from_str(value).ok()
+    serde_json::from_str::<Vec<WorkspaceSession>>(value)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|session| {
+            !session.kind.trim().is_empty()
+                && !session.name.trim().is_empty()
+                && !session.attachment_id.trim().is_empty()
+        })
+        .collect()
 }
 
 fn parse_bool_value(label: &str, value: &str) -> Result<bool, String> {
@@ -2097,7 +2014,7 @@ mod tests {
         assert!(args.contains(&"--async".to_string()));
         assert!(args.contains(&"--labels=project=demo-project,ready=false".to_string()));
         assert!(args.contains(
-            &"--metadata=^|^branch=Aare|target_branch=Feature/Inbox|unread=false".to_string()
+            &"--metadata=^|^branch=Aare|target_branch=Feature/Inbox|unread=false|working=false|sessions=[]".to_string()
         ));
         assert!(args.contains(
             &"--service-account=silo-workspaces@proj.iam.gserviceaccount.com".to_string()
@@ -2133,7 +2050,9 @@ mod tests {
         assert!(!args.iter().any(|arg| arg.starts_with("--image-family=")));
         assert!(!args.iter().any(|arg| arg.starts_with("--image-project=")));
         assert!(args.contains(&"--labels=project=demo-project,ready=false".to_string()));
-        assert!(args.contains(&"--metadata=^|^branch=Aare|unread=false".to_string()));
+        assert!(args.contains(
+            &"--metadata=^|^branch=Aare|unread=false|working=false|sessions=[]".to_string()
+        ));
     }
 
     #[test]
@@ -2164,7 +2083,9 @@ mod tests {
         assert!(args.contains(&"--no-service-account".to_string()));
         assert!(args.contains(&"--no-scopes".to_string()));
         assert!(args.contains(&"--labels=project=demo-project,ready=false".to_string()));
-        assert!(args.contains(&"--metadata=^|^branch=Aare|unread=false".to_string()));
+        assert!(args.contains(
+            &"--metadata=^|^branch=Aare|unread=false|working=false|sessions=[]".to_string()
+        ));
     }
 
     #[test]
@@ -2379,7 +2300,8 @@ mod tests {
                     { "key": "target_branch", "value": "main" },
                     { "key": "unread", "value": "true" },
                     { "key": "working", "value": "true" },
-                    { "key": "last_active", "value": "2026-03-11T13:05:00Z" }
+                    { "key": "last_active", "value": "2026-03-11T13:05:00Z" },
+                    { "key": "sessions", "value": "[{\"type\":\"terminal\",\"name\":\"codex\",\"attachment_id\":\"terminal-1\",\"working\":true,\"unread\":false}]" }
                 ]
             }
         }))
@@ -2401,10 +2323,15 @@ mod tests {
         );
         assert_eq!(workspace.base.created_at, "2026-03-11T13:00:00.000-04:00");
         assert_eq!(workspace.base.zone, "us-east1-b");
+        assert_eq!(workspace.sessions.len(), 1);
+        assert_eq!(workspace.sessions[0].name, "codex");
+        assert_eq!(workspace.sessions[0].attachment_id, "terminal-1");
+        assert_eq!(workspace.sessions[0].working, Some(true));
+        assert_eq!(workspace.sessions[0].unread, Some(false));
     }
 
     #[test]
-    fn parse_workspace_reads_observer_state_metadata() {
+    fn parse_workspace_reads_flat_session_metadata() {
         let workspace = parse_workspace(&json!({
             "name": "ws-demo-123",
             "zone": "us-east1-b",
@@ -2415,8 +2342,11 @@ mod tests {
             },
             "metadata": {
                 "items": [
+                    { "key": "branch", "value": "feature/inbox" },
                     { "key": "target_branch", "value": "main" },
-                    { "key": "silo_state", "value": "{\"branch\":\"feature/inbox\",\"working\":true,\"unread\":true,\"sessions\":[{\"type\":\"terminal\",\"name\":\"codex\",\"attachment_id\":\"terminal-1\",\"working\":true,\"unread\":false}]}" }
+                    { "key": "working", "value": "true" },
+                    { "key": "unread", "value": "true" },
+                    { "key": "sessions", "value": "[{\"type\":\"terminal\",\"name\":\"codex\",\"attachment_id\":\"terminal-1\",\"working\":true,\"unread\":false}]" }
                 ]
             }
         }))
@@ -2461,19 +2391,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_workspace_falls_back_to_legacy_labels_for_branch_state() {
+    fn parse_workspace_ignores_invalid_session_rows() {
         let workspace = parse_workspace(&json!({
             "name": "ws-demo-123",
             "zone": "us-east1-b",
             "status": "RUNNING",
             "creationTimestamp": "2026-03-11T13:00:00.000-04:00",
-            "labels": {
-                "project": "demo",
-                "branch": "silo-aare",
-                "target_branch": "main",
-                "unread": "true",
-                "working": "false",
-                "last_active": "2026-03-11T13:05:00Z"
+            "metadata": {
+                "items": [
+                    { "key": "branch", "value": "silo/aare" },
+                    { "key": "target_branch", "value": "main" },
+                    { "key": "sessions", "value": "[{\"type\":\"terminal\",\"name\":\"good\",\"attachment_id\":\"terminal-1\"},{\"type\":\"terminal\",\"name\":\"\",\"attachment_id\":\"terminal-2\"}]" }
+                ]
             }
         }))
         .expect("workspace should parse");
@@ -2484,12 +2413,8 @@ mod tests {
 
         assert_eq!(workspace.branch, "silo/aare");
         assert_eq!(workspace.target_branch, "main");
-        assert!(workspace.unread);
-        assert_eq!(workspace.working, Some(false));
-        assert_eq!(
-            workspace.base.last_active.as_deref(),
-            Some("2026-03-11T13:05:00Z")
-        );
+        assert_eq!(workspace.sessions.len(), 1);
+        assert_eq!(workspace.sessions[0].name, "good");
     }
 
     #[test]
