@@ -1,5 +1,6 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import { Channel } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { FitAddon } from "@xterm/addon-fit";
@@ -7,9 +8,9 @@ import { Terminal } from "@xterm/xterm";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useRef, useState } from "react";
 import "@xterm/xterm/css/xterm.css";
+import { Loader } from "../../../components/loader";
 import { invoke } from "../../../lib/invoke";
 import type { WorkspaceSession } from "../../../lib/workspaces";
-import { Loader } from "../../../components/loader";
 import { attachTerminalBindings } from "./bindings";
 
 const DELETE_BYTE = 0x7f;
@@ -119,6 +120,7 @@ function WorkspaceTerminal({
 	cleanUrl: string;
 }) {
 	const router = useRouter();
+	const queryClient = useQueryClient();
 	const containerRef = useRef<HTMLDivElement>(null);
 	const terminalRef = useRef<Terminal | null>(null);
 	const terminalIdRef = useRef<string | null>(null);
@@ -238,6 +240,21 @@ function WorkspaceTerminal({
 				if (initialSkipScrollbackRef.current) {
 					router.replace(cleanUrl);
 				}
+				void invoke("terminal_read_terminal", {
+					workspace,
+					attachmentId,
+				})
+					.then(() =>
+						Promise.all([
+							queryClient.invalidateQueries({
+								queryKey: ["terminal_list_terminals", workspace],
+							}),
+							queryClient.invalidateQueries({
+								queryKey: ["workspaces_get_workspace", workspace],
+							}),
+						]),
+					)
+					.catch(() => {});
 				term.focus();
 			} catch (error) {
 				setLoading(false);
@@ -299,7 +316,7 @@ function WorkspaceTerminal({
 				}, 250);
 			}
 		};
-	}, [workspace, attachmentId, cleanUrl, router]);
+	}, [workspace, attachmentId, cleanUrl, queryClient, router]);
 
 	return (
 		<div className="flex-1 min-h-0 bg-surface relative">
