@@ -40,6 +40,10 @@ Prepare this branch for review and create an excellent pull request.
 Review:
 - Inspect git status, staged changes, unstaged changes, and the diff against the target branch.
 
+Branch naming:
+- If the current branch name is generic (e.g. "silo/nile", "silo/aabach" — a "silo/" prefix followed by a single placeholder word), rename it to something descriptive using `git branch -m silo/<descriptive-slug>`. The slug should be short, lowercase, hyphenated, and describe what the changes accomplish (e.g. "silo/superadmin-invites", "silo/fix-auth-redirect"). Do this before pushing.
+- If the branch already has a descriptive name, skip renaming.
+
 Committing:
 - If there are uncommitted changes, organize them into commits where each commit represents one logical unit of work — a single bug fix, a single feature addition, a single refactor.
 - Write commit messages in imperative mood ("Add search endpoint", not "Added search endpoint"). The subject line should complete the sentence "This commit will ___".

@@ -17,7 +17,7 @@ import { gitUpdateBranch, gitUpdateTargetBranch } from "../lib/git";
 import { invoke } from "../lib/invoke";
 import type { ListedProject } from "../lib/projects";
 import { isTemplateWorkspace, type Workspace } from "../lib/workspaces";
-import { GitToggle } from "./git-bar";
+import { GitToggle, useGitBar } from "./git-bar";
 import { Loader } from "./loader";
 import { Popover, PopoverContent, PopoverTrigger } from "./popover";
 import { useProjectsBar } from "./projects-bar";
@@ -148,7 +148,9 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 
 function BranchTopBar({ workspace }: { workspace: Workspace }) {
 	const { isOpen: projectsBarOpen } = useProjectsBar();
+	const { prStatus } = useGitBar();
 	const queryClient = useQueryClient();
+	const hasPr = prStatus?.status === "open";
 	const branchWorkspace = isTemplateWorkspace(workspace) ? null : workspace;
 
 	const [editingBranch, setEditingBranch] = useState(false);
@@ -156,6 +158,9 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 	const inputRef = useRef<HTMLInputElement>(null);
 
 	const [targetOpen, setTargetOpen] = useState(false);
+	const [optimisticTarget, setOptimisticTarget] = useState(
+		branchWorkspace?.target_branch ?? "",
+	);
 
 	const projects = useQuery({
 		queryKey: ["projects_list_projects"],
@@ -184,6 +189,7 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 			});
 		},
 		onError: (error) => {
+			setBranchDraft(branchWorkspace?.branch ?? "");
 			toast({
 				variant: "error",
 				title: "Failed to rename branch",
@@ -204,6 +210,7 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 			});
 		},
 		onError: (error) => {
+			setOptimisticTarget(branchWorkspace?.target_branch ?? "");
 			toast({
 				variant: "error",
 				title: "Failed to update target branch",
@@ -222,6 +229,10 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 	useEffect(() => {
 		setBranchDraft(branchWorkspace?.branch ?? "");
 	}, [branchWorkspace?.branch]);
+
+	useEffect(() => {
+		setOptimisticTarget(branchWorkspace?.target_branch ?? "");
+	}, [branchWorkspace?.target_branch]);
 
 	const PRIORITY_BRANCHES = ["main", "master", "staging", "dev"];
 
@@ -251,7 +262,7 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 
 	if (!branchWorkspace) return null;
 
-	const targetBranch = branchWorkspace.target_branch;
+	const targetBranch = optimisticTarget;
 
 	return (
 		<header className="h-9 w-full border-b border-border-light shrink-0 flex items-center relative">
@@ -273,7 +284,7 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 					)}
 					<ChevronRight size={10} className="shrink-0 text-text-placeholder" />
 					<GitBranch size={12} className="shrink-0 text-text-placeholder" />
-					{editingBranch ? (
+					{editingBranch && !hasPr ? (
 						<input
 							ref={inputRef}
 							value={branchDraft}
@@ -291,24 +302,26 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 					) : (
 						<button
 							type="button"
+							disabled={hasPr}
 							onClick={() => {
 								setBranchDraft(branchWorkspace.branch);
 								setEditingBranch(true);
 							}}
-							className="text-text hover:text-text-bright transition-colors"
+							className={`transition-colors ${hasPr ? "text-text-muted cursor-default" : "text-text hover:text-text-bright"}`}
 						>
-							{branchWorkspace.branch || "branch"}
+							{branchDraft || "branch"}
 						</button>
 					)}
 					<ChevronRight size={10} className="shrink-0 text-text-placeholder" />
-					<Popover open={targetOpen} onOpenChange={setTargetOpen}>
+					<Popover open={hasPr ? false : targetOpen} onOpenChange={hasPr ? undefined : setTargetOpen}>
 						<PopoverTrigger asChild>
 							<button
 								type="button"
-								className="flex items-center gap-1 text-text hover:text-text-bright transition-colors"
+								disabled={hasPr}
+								className={`flex items-center gap-1 transition-colors ${hasPr ? "text-text-muted cursor-default" : "text-text hover:text-text-bright"}`}
 							>
 								{targetBranch || "target branch"}
-								<ChevronsUpDown size={10} className="text-text-placeholder" />
+								{!hasPr && <ChevronsUpDown size={10} className="text-text-placeholder" />}
 							</button>
 						</PopoverTrigger>
 						<PopoverContent
@@ -326,6 +339,7 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 									key={b}
 									type="button"
 									onClick={() => {
+										setOptimisticTarget(b);
 										updateTargetBranch.mutate(b);
 										setTargetOpen(false);
 									}}
