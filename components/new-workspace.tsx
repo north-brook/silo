@@ -149,7 +149,8 @@ function NewWorkspaceDialog({
 								<div className="w-4 h-4 rounded bg-border-light shrink-0" />
 							)}
 							<span className="truncate flex-1 text-left">{project.name}</span>
-							{createWorkspace.isPending && createWorkspace.variables === project.name ? (
+							{createWorkspace.isPending &&
+							createWorkspace.variables === project.name ? (
 								<Loader className="text-text-muted" />
 							) : (
 								<kbd className="shrink-0 text-[10px] text-text-placeholder border border-border-light rounded px-1.5 py-0.5">
