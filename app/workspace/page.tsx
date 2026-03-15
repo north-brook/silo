@@ -39,7 +39,7 @@ function WorkspaceView() {
 	if (!workspace.data) {
 		return (
 			<div className="flex-1 flex flex-col items-center justify-center p-6">
-				<div className="w-full max-w-xl">
+				<div className="w-full max-w-2xl">
 					<div className="flex justify-center mb-6">
 						<SiloIcon height={32} />
 					</div>
