@@ -18,6 +18,10 @@ export interface WorkspaceSession {
 	unread: boolean | null;
 }
 
+export interface WorkspacePromptResult {
+	attachment_id: string;
+}
+
 export interface BranchWorkspace extends WorkspaceBase {
 	branch: string;
 	target_branch: string;
@@ -48,4 +52,16 @@ export function workspaceLabel(workspace: Workspace): string {
 
 export function createWorkspace(project: string): Promise<Workspace> {
 	return invoke<Workspace>("workspaces_create_workspace", { project });
+}
+
+export function submitWorkspacePrompt(
+	workspace: string,
+	prompt: string,
+	model: "codex" | "claude",
+): Promise<WorkspacePromptResult> {
+	return invoke<WorkspacePromptResult>("workspaces_submit_prompt", {
+		workspace,
+		prompt,
+		model,
+	});
 }
