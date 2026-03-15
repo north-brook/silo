@@ -15,13 +15,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const COMPLETION_DEBOUNCE: Duration = Duration::from_millis(1500);
 const FIFO_MODE: u32 = 0o622;
-const METADATA_KEY: &str = "silo_state";
+const LEGACY_METADATA_KEY: &str = "silo_state";
 
 fn main() {
     if let Err(error) = run() {
@@ -80,7 +81,7 @@ fn run_daemon(args: &[String]) -> Result<(), String> {
             serde_json::to_string(&published).map_err(|error| error.to_string())?;
 
         if last_published.as_deref() != Some(published_json.as_str()) {
-            if let Err(error) = metadata.publish(&published_json, published.branch.as_deref()) {
+            if let Err(error) = metadata.publish(&published) {
                 eprintln!("workspace-observer: failed to publish metadata: {error}");
             } else {
                 last_published = Some(published_json);
@@ -140,7 +141,8 @@ fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
     if command.len() > 1 {
         builder.args(&command[1..]);
     }
-    let cwd = env::current_dir().map_err(|error| format!("failed to read current directory: {error}"))?;
+    let cwd =
+        env::current_dir().map_err(|error| format!("failed to read current directory: {error}"))?;
     builder.cwd(&cwd);
     builder.env("PWD", &cwd);
     builder.env("ZMX_SESSION", &session);
@@ -301,10 +303,12 @@ struct ObserverState {
     #[serde(default)]
     branch: Option<String>,
     #[serde(default)]
+    last_active: Option<String>,
+    #[serde(default)]
     sessions: BTreeMap<String, SessionState>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 struct SessionState {
     #[serde(default)]
     active_command: Option<String>,
@@ -322,6 +326,8 @@ struct PublishedState {
     branch: Option<String>,
     working: bool,
     unread: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_active: Option<String>,
     sessions: Vec<PublishedSession>,
 }
 
@@ -391,6 +397,7 @@ struct ZmxSession {
 }
 
 fn apply_event(state: &mut ObserverState, event: ObserverEvent) {
+    touch_last_active(state);
     match event {
         ObserverEvent::ShellCommandStarted { session, command } => {
             let session_state = state.sessions.entry(session).or_default();
@@ -432,6 +439,7 @@ fn reconcile_sessions(state: &mut ObserverState, live_sessions: &[ZmxSession]) {
         .iter()
         .map(|session| session.name.as_str())
         .collect::<Vec<_>>();
+    let before = state.sessions.clone();
 
     state
         .sessions
@@ -446,6 +454,10 @@ fn reconcile_sessions(state: &mut ObserverState, live_sessions: &[ZmxSession]) {
                 session_state.assistant_provider = resolve_assistant_provider(command);
             }
         }
+    }
+
+    if state.sessions != before {
+        touch_last_active(state);
     }
 }
 
@@ -486,8 +498,19 @@ fn build_published_state(state: &ObserverState, live_sessions: &[ZmxSession]) ->
         branch: state.branch.clone(),
         working,
         unread,
+        last_active: state.last_active.clone(),
         sessions,
     }
+}
+
+fn touch_last_active(state: &mut ObserverState) {
+    state.last_active = Some(current_timestamp());
+}
+
+fn current_timestamp() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
 fn load_state(path: &Path) -> Result<ObserverState, String> {
@@ -748,13 +771,10 @@ impl ComputeMetadataClient {
         }
     }
 
-    fn publish(&self, state_json: &str, branch: Option<&str>) -> Result<(), String> {
+    fn publish(&self, published: &PublishedState) -> Result<(), String> {
         let token = self.fetch_access_token()?;
-        let (fingerprint, mut items) = self.fetch_instance_metadata(&token)?;
-        items.insert(METADATA_KEY.to_string(), state_json.to_string());
-        if let Some(branch) = branch {
-            items.insert("branch".to_string(), branch.to_string());
-        }
+        let (fingerprint, items) = self.fetch_instance_metadata(&token)?;
+        let items = flat_metadata_items(items, published)?;
 
         let items = items
             .into_iter()
@@ -860,6 +880,48 @@ impl ComputeMetadataClient {
         }
 
         Ok((fingerprint, map))
+    }
+}
+
+fn flat_metadata_items(
+    mut items: BTreeMap<String, String>,
+    published: &PublishedState,
+) -> Result<BTreeMap<String, String>, String> {
+    items.remove(LEGACY_METADATA_KEY);
+    update_metadata_item(&mut items, "branch", published.branch.as_deref());
+    update_metadata_item(
+        &mut items,
+        "unread",
+        Some(bool_metadata_value(published.unread)),
+    );
+    update_metadata_item(
+        &mut items,
+        "working",
+        Some(bool_metadata_value(published.working)),
+    );
+    update_metadata_item(&mut items, "last_active", published.last_active.as_deref());
+    let sessions = serde_json::to_string(&published.sessions)
+        .map_err(|error| format!("failed to serialize session metadata: {error}"))?;
+    update_metadata_item(&mut items, "sessions", Some(&sessions));
+    Ok(items)
+}
+
+fn update_metadata_item(items: &mut BTreeMap<String, String>, key: &str, value: Option<&str>) {
+    match value.map(str::trim) {
+        Some(value) if !value.is_empty() => {
+            items.insert(key.to_string(), value.to_string());
+        }
+        _ => {
+            items.remove(key);
+        }
+    }
+}
+
+fn bool_metadata_value(value: bool) -> &'static str {
+    if value {
+        "true"
+    } else {
+        "false"
     }
 }
 
@@ -1142,9 +1204,11 @@ fn collect_submitted_assistant_prompts(buffer: &mut String, input: &str) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_submitted_assistant_prompts, normalize_assistant_input, parse_zmx_session,
-        resolve_assistant_provider, AssistantProvider,
+        bool_metadata_value, collect_submitted_assistant_prompts, flat_metadata_items,
+        normalize_assistant_input, parse_zmx_session, resolve_assistant_provider,
+        update_metadata_item, AssistantProvider, PublishedSession, PublishedState,
     };
+    use std::collections::BTreeMap;
 
     #[test]
     fn assistant_input_strips_escape_sequences() {
@@ -1183,5 +1247,66 @@ mod tests {
             Some(AssistantProvider::Codex)
         );
         assert_eq!(resolve_assistant_provider("bun run dev"), None);
+    }
+
+    #[test]
+    fn flat_metadata_items_replaces_legacy_observer_state() {
+        let mut items = BTreeMap::new();
+        items.insert("target_branch".to_string(), "main".to_string());
+        items.insert("silo_state".to_string(), "{\"old\":true}".to_string());
+        let published = PublishedState {
+            branch: Some("feature/inbox".to_string()),
+            working: false,
+            unread: true,
+            last_active: Some("2026-03-14T00:00:00Z".to_string()),
+            sessions: vec![PublishedSession {
+                kind: "terminal",
+                name: "codex".to_string(),
+                attachment_id: "terminal-1".to_string(),
+                working: Some(false),
+                unread: Some(true),
+            }],
+        };
+
+        let items = flat_metadata_items(items, &published).expect("metadata items should build");
+
+        assert_eq!(
+            items.get("branch").map(String::as_str),
+            Some("feature/inbox")
+        );
+        assert_eq!(items.get("unread").map(String::as_str), Some("true"));
+        assert_eq!(items.get("working").map(String::as_str), Some("false"));
+        assert_eq!(
+            items.get("last_active").map(String::as_str),
+            Some("2026-03-14T00:00:00Z")
+        );
+        assert_eq!(items.get("target_branch").map(String::as_str), Some("main"));
+        assert_eq!(
+            items.get("sessions").map(String::as_str),
+            Some(
+                "[{\"type\":\"terminal\",\"name\":\"codex\",\"attachment_id\":\"terminal-1\",\"working\":false,\"unread\":true}]"
+            )
+        );
+        assert!(!items.contains_key("silo_state"));
+    }
+
+    #[test]
+    fn update_metadata_item_removes_empty_values() {
+        let mut items = BTreeMap::new();
+        items.insert(
+            "last_active".to_string(),
+            "2026-03-14T00:00:00Z".to_string(),
+        );
+
+        update_metadata_item(&mut items, "last_active", Some("   "));
+        update_metadata_item(&mut items, "branch", Some("feature/inbox"));
+
+        assert!(!items.contains_key("last_active"));
+        assert_eq!(
+            items.get("branch").map(String::as_str),
+            Some("feature/inbox")
+        );
+        assert_eq!(bool_metadata_value(true), "true");
+        assert_eq!(bool_metadata_value(false), "false");
     }
 }
