@@ -42,13 +42,17 @@ function terminalTabPresentation(name: string) {
 	const lower = trimmed.toLowerCase();
 	const [token, ...rest] = trimmed.split(/\s+/);
 	const normalizedToken = token?.toLowerCase() ?? "";
-	if (normalizedToken === "cc" || normalizedToken === "claude") {
+	const normalizedAssistant =
+		normalizedToken === "silo"
+			? (rest[0]?.toLowerCase() ?? "")
+			: normalizedToken;
+	if (normalizedAssistant === "cc" || normalizedAssistant === "claude") {
 		return {
 			icon: <ClaudeIcon height={12} />,
 			label: "claude",
 		};
 	}
-	if (normalizedToken === "codex" || lower.startsWith("command codex")) {
+	if (normalizedAssistant === "codex" || lower.startsWith("command codex")) {
 		return {
 			icon: <CodexIcon height={12} />,
 			label: "codex",
