@@ -460,11 +460,11 @@ pub(crate) async fn start_terminal_command(
 }
 
 pub(crate) fn codex_prompt_command(prompt: &str) -> String {
-    assistant_prompt_command("codex", prompt)
+    assistant_prompt_command("silo codex", prompt)
 }
 
 pub(crate) fn claude_prompt_command(prompt: &str) -> String {
-    assistant_prompt_command("cc", prompt)
+    assistant_prompt_command("silo claude", prompt)
 }
 
 #[tauri::command]
@@ -1192,6 +1192,24 @@ pub(crate) async fn wait_for_template_chrome_sync(workspace: &str) -> Result<(),
     ))
 }
 
+pub(crate) async fn clear_template_runtime_state(workspace: &str) -> Result<(), String> {
+    let lookup = workspaces::find_workspace(workspace).await?;
+    if !lookup.workspace.is_template() {
+        return Err(format!("workspace {workspace} is not a template workspace"));
+    }
+
+    let command = clear_template_runtime_state_command();
+    let result = run_remote_command(&lookup, &run_terminal_user_command(&command)).await?;
+    if !result.success {
+        return Err(remote_command_error(
+            "failed to clear template runtime state",
+            &result.stderr,
+        ));
+    }
+
+    Ok(())
+}
+
 fn should_retry_template_bootstrap(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     [
@@ -1873,18 +1891,9 @@ _silo_observer_emit() {{\n\
 }}\n\
 _silo_observer_wrap_assistant() {{\n\
   local provider=\"$1\"\n\
-  local initial_prompt_argv=0\n\
   shift\n\
-  if [ \"${{1:-}}\" = \"--silo-argv-prompt\" ]; then\n\
-    initial_prompt_argv=1\n\
-    shift\n\
-  fi\n\
   if [ -z \"${{ZMX_SESSION:-}}\" ] || [ ! -x \"${{SILO_WORKSPACE_OBSERVER_BIN:-}}\" ]; then\n\
     command \"$@\"\n\
-    return\n\
-  fi\n\
-  if [ \"$initial_prompt_argv\" = \"1\" ]; then\n\
-    command \"$SILO_WORKSPACE_OBSERVER_BIN\" assistant-proxy --provider \"$provider\" --initial-prompt-argv -- \"$@\"\n\
     return\n\
   fi\n\
   command \"$SILO_WORKSPACE_OBSERVER_BIN\" assistant-proxy --provider \"$provider\" -- \"$@\"\n\
@@ -1898,10 +1907,38 @@ claude() {{\n\
 cc() {{\n\
   claude \"$@\"\n\
 }}\n\
+silo() {{\n\
+  local provider=\"${{1:-}}\"\n\
+  shift || true\n\
+  case \"$provider\" in\n\
+    codex)\n\
+      if [ -z \"${{ZMX_SESSION:-}}\" ] || [ ! -x \"${{SILO_WORKSPACE_OBSERVER_BIN:-}}\" ]; then\n\
+        command codex \"$@\"\n\
+        return\n\
+      fi\n\
+      command \"$SILO_WORKSPACE_OBSERVER_BIN\" assistant-proxy --provider codex --initial-prompt-argv -- codex \"$@\"\n\
+      ;;\n\
+    claude)\n\
+      if [ -z \"${{ZMX_SESSION:-}}\" ] || [ ! -x \"${{SILO_WORKSPACE_OBSERVER_BIN:-}}\" ]; then\n\
+        IS_SANDBOX=1 command claude --dangerously-skip-permissions \"$@\"\n\
+        return\n\
+      fi\n\
+      IS_SANDBOX=1 command \"$SILO_WORKSPACE_OBSERVER_BIN\" assistant-proxy --provider claude --initial-prompt-argv -- claude --dangerously-skip-permissions \"$@\"\n\
+      ;;\n\
+    *)\n\
+      printf 'unsupported silo assistant: %s\\n' \"$provider\" >&2\n\
+      return 1\n\
+      ;;\n\
+  esac\n\
+}}\n\
 case $- in\n\
   *i*) ;;\n\
   *) return 0 2>/dev/null || exit 0 ;;\n\
 esac\n\
+if [ -n \"${{ZMX_SESSION:-}}\" ] && [ -z \"${{SILO_OBSERVER_SESSION_REGISTERED:-}}\" ]; then\n\
+  export SILO_OBSERVER_SESSION_REGISTERED=1\n\
+  _silo_observer_emit --kind shell_session_started --session \"$ZMX_SESSION\"\n\
+fi\n\
 if [ -n \"${{ZSH_VERSION:-}}\" ]; then\n\
   autoload -Uz add-zsh-hook\n\
   typeset -g SILO_OBSERVER_LAST_COMMAND=\"${{SILO_OBSERVER_LAST_COMMAND:-}}\"\n\
@@ -1921,6 +1958,11 @@ if [ -n \"${{ZSH_VERSION:-}}\" ]; then\n\
     fi\n\
     return $exit_code\n\
   }}\n\
+  _silo_observer_zshexit() {{\n\
+    [ -n \"${{ZMX_SESSION:-}}\" ] || return 0\n\
+    [ -n \"${{SILO_OBSERVER_SESSION_REGISTERED:-}}\" ] || return 0\n\
+    _silo_observer_emit --kind shell_session_exited --session \"$ZMX_SESSION\"\n\
+  }}\n\
   case \" ${{preexec_functions[*]:-}} \" in\n\
     *\" _silo_observer_preexec \"*) ;;\n\
     *) add-zsh-hook preexec _silo_observer_preexec ;;\n\
@@ -1929,6 +1971,17 @@ if [ -n \"${{ZSH_VERSION:-}}\" ]; then\n\
     *\" _silo_observer_precmd \"*) ;;\n\
     *) add-zsh-hook precmd _silo_observer_precmd ;;\n\
   esac\n\
+  case \" ${{zshexit_functions[*]:-}} \" in\n\
+    *\" _silo_observer_zshexit \"*) ;;\n\
+    *) add-zsh-hook zshexit _silo_observer_zshexit ;;\n\
+  esac\n\
+elif [ -n \"${{BASH_VERSION:-}}\" ]; then\n\
+  _silo_observer_bash_exit() {{\n\
+    [ -n \"${{ZMX_SESSION:-}}\" ] || return 0\n\
+    [ -n \"${{SILO_OBSERVER_SESSION_REGISTERED:-}}\" ] || return 0\n\
+    _silo_observer_emit --kind shell_session_exited --session \"$ZMX_SESSION\"\n\
+  }}\n\
+  trap _silo_observer_bash_exit EXIT\n\
 fi\n",
         observer_bin = shell_quote(REMOTE_WORKSPACE_OBSERVER_BIN),
     )
@@ -2023,7 +2076,7 @@ fn terminal_run_remote_command(name: &str, command: &str) -> String {
 fn assistant_prompt_command(prefix: &str, prompt: &str) -> String {
     let encoded_prompt = BASE64_STANDARD.encode(prompt);
     format!(
-        "{prefix} --silo-argv-prompt \"$(printf %s {} | base64 --decode)\"",
+        "{prefix} \"$(printf %s {} | base64 --decode)\"",
         shell_quote(&encoded_prompt)
     )
 }
@@ -2100,6 +2153,10 @@ fn persist_workspace_bootstrap_state_command(signature: &str) -> String {
     format!(
         "mkdir -p \"$HOME/.silo\" && BOOT_ID=\"$(cat /proc/sys/kernel/random/boot_id)\" && {{ printf '%s\\n' \"$BOOT_ID\"; printf %s {signature_base64} | base64 --decode; printf '\\n'; }} > {state_path} && chmod 600 {state_path}",
     )
+}
+
+fn clear_template_runtime_state_command() -> String {
+    "rm -rf \"$HOME/.silo\"".to_string()
 }
 
 fn spawn_template_chrome_profile_sync(lookup: WorkspaceLookup, bootstrap: WorkspaceBootstrap) {
@@ -2574,12 +2631,11 @@ fn sanitize_session_display_name(command: &str) -> String {
     if trimmed.is_empty() {
         return "shell".to_string();
     }
-    if trimmed.starts_with("codex --silo-argv-prompt \"$(printf %s ")
-        && trimmed.ends_with("| base64 --decode)\"")
+    if trimmed.starts_with("silo codex \"$(printf %s ") && trimmed.ends_with("| base64 --decode)\"")
     {
         return "codex".to_string();
     }
-    if trimmed.starts_with("cc --silo-argv-prompt \"$(printf %s ")
+    if trimmed.starts_with("silo claude \"$(printf %s ")
         && trimmed.ends_with("| base64 --decode)\"")
     {
         return "claude".to_string();
@@ -2675,11 +2731,11 @@ mod tests {
         let prompt = "what is this project?\ninclude 'quotes' too";
         let command = codex_prompt_command(prompt);
 
-        assert!(command.starts_with("codex --silo-argv-prompt \"$(printf %s '"));
+        assert!(command.starts_with("silo codex \"$(printf %s '"));
         assert!(command.ends_with("| base64 --decode)\""));
 
         let encoded = command
-            .strip_prefix("codex --silo-argv-prompt \"$(printf %s '")
+            .strip_prefix("silo codex \"$(printf %s '")
             .and_then(|value| value.strip_suffix("' | base64 --decode)\""))
             .expect("command should embed a base64 prompt");
         let decoded = String::from_utf8(
@@ -2696,11 +2752,11 @@ mod tests {
         let prompt = "ship the change\ninclude 'quotes' too";
         let command = claude_prompt_command(prompt);
 
-        assert!(command.starts_with("cc --silo-argv-prompt \"$(printf %s '"));
+        assert!(command.starts_with("silo claude \"$(printf %s '"));
         assert!(command.ends_with("| base64 --decode)\""));
 
         let encoded = command
-            .strip_prefix("cc --silo-argv-prompt \"$(printf %s '")
+            .strip_prefix("silo claude \"$(printf %s '")
             .and_then(|value| value.strip_suffix("' | base64 --decode)\""))
             .expect("command should embed a base64 prompt");
         let decoded = String::from_utf8(
@@ -2710,6 +2766,16 @@ mod tests {
         )
         .expect("embedded prompt should be utf8");
         assert_eq!(decoded, prompt);
+    }
+
+    #[test]
+    fn workspace_observer_shell_script_emits_shell_session_lifecycle_events() {
+        let script = workspace_observer_shell_script();
+
+        assert!(script.contains("--kind shell_session_started"));
+        assert!(script.contains("--kind shell_session_exited"));
+        assert!(script.contains("SILO_OBSERVER_SESSION_REGISTERED"));
+        assert!(script.contains("add-zsh-hook zshexit _silo_observer_zshexit"));
     }
 
     #[test]
@@ -2766,6 +2832,14 @@ mod tests {
         assert!(command.contains("base64 --decode"));
         assert!(command.contains("/home/silo/.silo/workspace-bootstrap-state"));
         assert!(!command.contains("workspace=demo"));
+    }
+
+    #[test]
+    fn clear_template_runtime_state_command_removes_remote_silo_dir() {
+        assert_eq!(
+            clear_template_runtime_state_command(),
+            "rm -rf \"$HOME/.silo\""
+        );
     }
 
     #[test]
@@ -3031,7 +3105,7 @@ mod tests {
     fn session_for_command_normalizes_generated_claude_prompt_name() {
         let session = session_for_command(
             "terminal-1",
-            "cc --silo-argv-prompt \"$(printf %s 'c2hpcCBpdA==' | base64 --decode)\"",
+            "silo claude \"$(printf %s 'c2hpcCBpdA==' | base64 --decode)\"",
         );
         assert_eq!(session.name, "claude");
         assert_eq!(session.working, Some(false));
