@@ -1,14 +1,14 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { FolderOpen, Plus } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { invoke } from "../../lib/invoke";
-import type { ListedProject } from "../../lib/projects";
+import { FolderOpen, Plus } from "lucide-react";
+import { SiloIcon } from "../../components/icons/silo";
 import { useNewWorkspace } from "../../components/new-workspace";
 import { useOpenProject } from "../../components/open-project";
 import { StatusIcons } from "../../components/status-icons";
-import { SiloIcon } from "../../components/icons/silo";
+import { invoke } from "../../lib/invoke";
+import type { ListedProject } from "../../lib/projects";
 
 function Kbd({ children }: { children: React.ReactNode }) {
 	return (

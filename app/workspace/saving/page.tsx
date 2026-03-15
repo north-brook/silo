@@ -4,12 +4,12 @@ import { useQuery } from "@tanstack/react-query";
 import { Check, HardDrive } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { type ReactNode, Suspense, useEffect, useRef, useState } from "react";
-import { invoke } from "../../../lib/invoke";
-import type { Workspace } from "../../../lib/workspaces";
-import { Loader } from "../../../components/loader";
 import { ChromeIcon } from "../../../components/icons/chrome";
 import { GCloudIcon } from "../../../components/icons/gcloud";
 import { SiloIcon } from "../../../components/icons/silo";
+import { Loader } from "../../../components/loader";
+import { invoke } from "../../../lib/invoke";
+import type { Workspace } from "../../../lib/workspaces";
 
 interface Step {
 	label: string;

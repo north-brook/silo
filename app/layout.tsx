@@ -3,13 +3,13 @@
 import "./globals.css";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { initializeFrontendLogging } from "../lib/invoke";
 import { GitBar, GitBarProvider } from "../components/git-bar";
 import { NewWorkspaceProvider } from "../components/new-workspace";
 import { OpenProjectProvider } from "../components/open-project";
 import { ProjectsBar, ProjectsBarProvider } from "../components/projects-bar";
 import { Toaster } from "../components/toaster";
 import { TooltipProvider } from "../components/tooltip";
+import { initializeFrontendLogging } from "../lib/invoke";
 
 export default function RootLayout({
 	children,

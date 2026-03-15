@@ -3,11 +3,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { useSearchParams } from "next/navigation";
 import { Suspense } from "react";
+import { SiloIcon } from "../../components/icons/silo";
 import { invoke } from "../../lib/invoke";
 import { isTemplateWorkspace, type Workspace } from "../../lib/workspaces";
-import { SiloIcon } from "../../components/icons/silo";
-import { TemplatingWorkspace } from "./templating";
 import { PromptWorkspace } from "./prompt";
+import { TemplatingWorkspace } from "./templating";
 
 export default function WorkspacePage() {
 	return (

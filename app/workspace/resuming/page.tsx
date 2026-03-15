@@ -4,11 +4,11 @@ import { useQuery } from "@tanstack/react-query";
 import { Check } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { type ReactNode, Suspense, useEffect, useRef } from "react";
-import { invoke } from "../../../lib/invoke";
-import type { Workspace } from "../../../lib/workspaces";
-import { Loader } from "../../../components/loader";
 import { GCloudIcon } from "../../../components/icons/gcloud";
 import { SiloIcon } from "../../../components/icons/silo";
+import { Loader } from "../../../components/loader";
+import { invoke } from "../../../lib/invoke";
+import type { Workspace } from "../../../lib/workspaces";
 
 interface Step {
 	label: string;
