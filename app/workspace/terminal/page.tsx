@@ -1,6 +1,6 @@
 "use client";
 
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Channel } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { FitAddon } from "@xterm/addon-fit";
@@ -50,6 +50,36 @@ interface TerminalExitPayload {
 interface TerminalErrorPayload {
 	terminal_id: string;
 	message: string;
+}
+
+function usePageIsForeground() {
+	const [isForeground, setIsForeground] = useState(() => {
+		if (typeof document === "undefined") {
+			return true;
+		}
+		return document.visibilityState === "visible" && document.hasFocus();
+	});
+
+	useEffect(() => {
+		const updateForeground = () => {
+			setIsForeground(
+				document.visibilityState === "visible" && document.hasFocus(),
+			);
+		};
+
+		updateForeground();
+		window.addEventListener("focus", updateForeground);
+		window.addEventListener("blur", updateForeground);
+		document.addEventListener("visibilitychange", updateForeground);
+
+		return () => {
+			window.removeEventListener("focus", updateForeground);
+			window.removeEventListener("blur", updateForeground);
+			document.removeEventListener("visibilitychange", updateForeground);
+		};
+	}, []);
+
+	return isForeground;
 }
 
 const THEME = {
@@ -126,7 +156,67 @@ function WorkspaceTerminal({
 	const terminalIdRef = useRef<string | null>(null);
 	const pendingDetachRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const initialSkipScrollbackRef = useRef(skipScrollback);
+	const pendingMarkReadRef = useRef<string | null>(null);
 	const [loading, setLoading] = useState(true);
+	const isPageForeground = usePageIsForeground();
+
+	const terminals = useQuery({
+		queryKey: ["terminal_list_terminals", workspace],
+		queryFn: () =>
+			invoke<WorkspaceSession[]>(
+				"terminal_list_terminals",
+				{ workspace },
+				{
+					log: "state_changes_only",
+					key: `poll:terminal_list_terminals:${workspace}`,
+				},
+			),
+		enabled: !!workspace,
+		refetchInterval: 2000,
+	});
+	const activeSession =
+		terminals.data?.find((session) => session.attachment_id === attachmentId) ??
+		null;
+
+	useEffect(() => {
+		if (activeSession?.unread !== true) {
+			if (pendingMarkReadRef.current === attachmentId) {
+				pendingMarkReadRef.current = null;
+			}
+			return;
+		}
+
+		if (!isPageForeground || pendingMarkReadRef.current === attachmentId) {
+			return;
+		}
+
+		pendingMarkReadRef.current = attachmentId;
+		void invoke("terminal_read_terminal", {
+			workspace,
+			attachmentId,
+		})
+			.then(() =>
+				Promise.all([
+					queryClient.invalidateQueries({
+						queryKey: ["terminal_list_terminals", workspace],
+					}),
+					queryClient.invalidateQueries({
+						queryKey: ["workspaces_get_workspace", workspace],
+					}),
+				]),
+			)
+			.catch(() => {
+				if (pendingMarkReadRef.current === attachmentId) {
+					pendingMarkReadRef.current = null;
+				}
+			});
+	}, [
+		activeSession?.unread,
+		attachmentId,
+		isPageForeground,
+		queryClient,
+		workspace,
+	]);
 
 	useEffect(() => {
 		setLoading(true);
