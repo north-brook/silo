@@ -19,6 +19,7 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "../../components/tooltip";
+import { cloudSessionHref } from "../../lib/cloud";
 import { invoke } from "../../lib/invoke";
 import { submitWorkspacePrompt } from "../../lib/workspaces";
 
@@ -92,7 +93,13 @@ export function PromptWorkspace({
 				queryKey: ["terminal_list_terminals", workspace],
 			});
 			router.push(
-				`/workspace/terminal?project=${encodeURIComponent(project ?? "")}&workspace=${encodeURIComponent(workspace)}&attachment_id=${encodeURIComponent(result.attachment_id)}&fresh=1`,
+				cloudSessionHref({
+					project: project ?? "",
+					workspace,
+					kind: "terminal",
+					attachmentId: result.attachment_id,
+					fresh: true,
+				}),
 			);
 		},
 		onError: (error) => {
@@ -110,7 +117,13 @@ export function PromptWorkspace({
 				queryKey: ["terminal_list_terminals", workspace],
 			});
 			router.push(
-				`/workspace/terminal?project=${encodeURIComponent(project ?? "")}&workspace=${encodeURIComponent(workspace)}&attachment_id=${encodeURIComponent(result.attachment_id)}&fresh=1`,
+				cloudSessionHref({
+					project: project ?? "",
+					workspace,
+					kind: "terminal",
+					attachmentId: result.attachment_id,
+					fresh: true,
+				}),
 			);
 		},
 		onError: (error) => {
