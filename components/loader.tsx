@@ -14,7 +14,7 @@ export function Loader({ className }: { className?: string }) {
 
 	return (
 		<span
-			className={`shrink-0 leading-none inline-flex items-center justify-center aspect-square ${className ?? "text-text-muted"}`}
+			className={`shrink-0 leading-none inline-flex items-center justify-center text-center aspect-square w-[1em] ${className ?? "text-text-muted"}`}
 		>
 			{FRAMES[frame]}
 		</span>
