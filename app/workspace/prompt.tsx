@@ -6,6 +6,10 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { ClaudeIcon } from "../../components/icons/claude";
 import { CodexIcon } from "../../components/icons/codex";
+import {
+	type PromptProviderId,
+	usePromptDraft,
+} from "../../components/prompt-context";
 import { SiloIcon } from "../../components/icons/silo";
 import { Loader } from "../../components/loader";
 import {
@@ -75,13 +79,15 @@ export function PromptWorkspace({
 	const router = useRouter();
 	const queryClient = useQueryClient();
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
-	const [prompt, setPrompt] = useState("");
 
 	useEffect(() => {
 		textareaRef.current?.focus();
 	}, []);
-	const [provider, setProvider] = useState(PROVIDERS[0]);
 	const [providerOpen, setProviderOpen] = useState(false);
+	const { clearDraft, prompt, providerId, setPrompt, setProviderId } =
+		usePromptDraft(workspace);
+	const provider =
+		PROVIDERS.find((candidate) => candidate.id === providerId) ?? PROVIDERS[0];
 
 	const createTerminal = useMutation({
 		mutationFn: () =>
@@ -113,6 +119,7 @@ export function PromptWorkspace({
 	const submitPrompt = useMutation({
 		mutationFn: () => submitWorkspacePrompt(workspace, prompt, provider.id),
 		onSuccess: (result) => {
+			clearDraft();
 			queryClient.invalidateQueries({
 				queryKey: ["terminal_list_terminals", workspace],
 			});
@@ -155,10 +162,10 @@ export function PromptWorkspace({
 						onKeyDown={(e) => {
 							if (e.key === "Tab" && e.shiftKey) {
 								e.preventDefault();
-								setProvider((prev) => {
-									const idx = PROVIDERS.findIndex((p) => p.id === prev.id);
-									return PROVIDERS[(idx + 1) % PROVIDERS.length];
-								});
+								const idx = PROVIDERS.findIndex((p) => p.id === provider.id);
+								const nextProvider =
+									PROVIDERS[(idx + 1) % PROVIDERS.length]?.id ?? "codex";
+								setProviderId(nextProvider as PromptProviderId);
 							}
 							if (e.key === "Enter" && !e.shiftKey && canSubmit) {
 								e.preventDefault();
@@ -197,7 +204,7 @@ export function PromptWorkspace({
 													key={p.id}
 													type="button"
 													onClick={() => {
-														setProvider(p);
+														setProviderId(p.id);
 														setProviderOpen(false);
 													}}
 													className={`flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded transition-colors ${
