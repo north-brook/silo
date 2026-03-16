@@ -18,6 +18,8 @@ mod workspaces;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    use tauri::{Emitter, Manager};
+
     let (logging_plugin, session_log) = logging::build_plugin();
 
     tauri::Builder::default()
@@ -28,7 +30,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .setup(move |_app| {
+        .setup(move |app| {
             if let Err(error) = config::initialize_on_start() {
                 log::error!("failed to initialize silo config: {error}");
             }
@@ -41,6 +43,79 @@ pub fn run() {
             } else {
                 log::warn!("session file logging is unavailable; using stdout only");
             }
+
+            // Custom menu: replace default Cmd+W (Close Window) with Close Tab
+            {
+                use tauri::menu::*;
+                let handle = app.handle();
+
+                let close_tab = MenuItem::with_id(
+                    handle,
+                    "close_tab",
+                    "Close Tab",
+                    true,
+                    Some("CmdOrCtrl+W"),
+                )?;
+
+                let close_window_item = MenuItem::with_id(
+                    handle,
+                    "close_window",
+                    "Close Window",
+                    true,
+                    None::<&str>,
+                )?;
+
+                let app_submenu = SubmenuBuilder::new(handle, "Silo")
+                    .about(None)
+                    .separator()
+                    .services()
+                    .separator()
+                    .hide()
+                    .hide_others()
+                    .show_all()
+                    .separator()
+                    .quit()
+                    .build()?;
+
+                let file_submenu = SubmenuBuilder::new(handle, "File")
+                    .item(&close_tab)
+                    .build()?;
+
+                let edit_submenu = SubmenuBuilder::new(handle, "Edit")
+                    .undo()
+                    .redo()
+                    .separator()
+                    .cut()
+                    .copy()
+                    .paste()
+                    .select_all()
+                    .build()?;
+
+                let window_submenu = SubmenuBuilder::new(handle, "Window")
+                    .minimize()
+                    .separator()
+                    .item(&close_window_item)
+                    .build()?;
+
+                let menu = MenuBuilder::new(handle)
+                    .item(&app_submenu)
+                    .item(&file_submenu)
+                    .item(&edit_submenu)
+                    .item(&window_submenu)
+                    .build()?;
+
+                app.set_menu(menu)?;
+            }
+
+            app.on_menu_event(|app_handle, event| {
+                if event.id() == "close_tab" {
+                    let _ = app_handle.emit("silo://close-tab", ());
+                } else if event.id() == "close_window" {
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.close();
+                    }
+                }
+            });
 
             log::info!("silo backend startup complete");
             Ok(())

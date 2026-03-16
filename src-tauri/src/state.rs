@@ -1,4 +1,4 @@
-use crate::workspaces::{self, WorkspaceLookup};
+use crate::workspaces::{self, Workspace, WorkspaceLookup, WorkspaceSession};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -18,7 +18,8 @@ struct PendingWorkspaceMetadata {
 
 #[derive(Clone, Default)]
 pub struct WorkspaceMetadataManager {
-    inner: Arc<Mutex<HashMap<String, PendingWorkspaceMetadata>>>,
+    metadata: Arc<Mutex<HashMap<String, PendingWorkspaceMetadata>>>,
+    sessions: Arc<Mutex<HashMap<String, HashMap<String, Option<WorkspaceSession>>>>>,
 }
 
 const WORKSPACE_METADATA_FLUSH_DELAY: Duration = Duration::from_millis(40);
@@ -36,6 +37,26 @@ pub(crate) fn browser_session_metadata_key(attachment_id: &str) -> String {
     format!("{BROWSER_SESSION_METADATA_PREFIX}{attachment_id}")
 }
 
+fn workspace_session_key(kind: &str, attachment_id: &str) -> String {
+    format!("{kind}:{attachment_id}")
+}
+
+fn should_drop_pending_session(
+    pending: &WorkspaceSession,
+    metadata: Option<&WorkspaceSession>,
+) -> bool {
+    match metadata {
+        Some(metadata_session) if metadata_session == pending => true,
+        Some(_) => {
+            pending.kind == "terminal"
+                && pending.name == "shell"
+                && pending.working.is_none()
+                && pending.unread.is_none()
+        }
+        None => false,
+    }
+}
+
 impl WorkspaceMetadataManager {
     pub(crate) fn enqueue(
         &self,
@@ -49,7 +70,7 @@ impl WorkspaceMetadataManager {
 
         let workspace_name = workspace.to_string();
         let mut should_spawn = false;
-        if let Ok(mut pending) = self.inner.lock() {
+        if let Ok(mut pending) = self.metadata.lock() {
             let state =
                 pending
                     .entry(workspace_name.clone())
@@ -85,7 +106,7 @@ impl WorkspaceMetadataManager {
             sleep_for(WORKSPACE_METADATA_FLUSH_DELAY).await;
 
             let (lookup, entries) = {
-                let mut pending = match self.inner.lock() {
+                let mut pending = match self.metadata.lock() {
                     Ok(pending) => pending,
                     Err(_) => return,
                 };
@@ -151,12 +172,105 @@ impl WorkspaceMetadataManager {
                         .join(", "),
                     error
                 );
-            } else if let Ok(mut pending) = self.inner.lock() {
+            } else if let Ok(mut pending) = self.metadata.lock() {
                 if let Some(state) = pending.get_mut(&workspace) {
                     state.lookup = Some(current_lookup);
                 }
             }
         }
+    }
+
+    pub(crate) fn upsert_workspace_session(&self, workspace: &str, session: WorkspaceSession) {
+        let Ok(mut sessions) = self.sessions.lock() else {
+            return;
+        };
+        sessions
+            .entry(workspace.to_string())
+            .or_default()
+            .insert(
+                workspace_session_key(&session.kind, &session.attachment_id),
+                Some(session),
+            );
+    }
+
+    pub(crate) fn mark_workspace_session_read(
+        &self,
+        workspace: &str,
+        attachment_id: &str,
+        session: Option<WorkspaceSession>,
+    ) {
+        let Ok(mut sessions) = self.sessions.lock() else {
+            return;
+        };
+        let entries = sessions.entry(workspace.to_string()).or_default();
+        let key = workspace_session_key("terminal", attachment_id);
+        let next = entries
+            .get(&key)
+            .and_then(|existing| existing.clone())
+            .or(session)
+            .map(|mut session| {
+                session.unread = Some(false);
+                session
+            });
+        if let Some(session) = next {
+            entries.insert(key, Some(session));
+        }
+    }
+
+    pub(crate) fn remove_workspace_session(
+        &self,
+        workspace: &str,
+        kind: &str,
+        attachment_id: &str,
+    ) {
+        let Ok(mut sessions) = self.sessions.lock() else {
+            return;
+        };
+        sessions
+            .entry(workspace.to_string())
+            .or_default()
+            .insert(workspace_session_key(kind, attachment_id), None);
+    }
+
+    pub(crate) fn apply_workspace_state(&self, workspace: Workspace) -> Workspace {
+        let workspace_name = workspace.name().to_string();
+        let metadata_sessions = workspace
+            .sessions()
+            .into_iter()
+            .map(|session| {
+                (
+                    workspace_session_key(&session.kind, &session.attachment_id),
+                    session,
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        let overlay = {
+            let Ok(mut sessions) = self.sessions.lock() else {
+                return workspace;
+            };
+            let Some(entries) = sessions.get_mut(&workspace_name) else {
+                return workspace;
+            };
+            entries.retain(|key, pending| match pending {
+                Some(session) => !should_drop_pending_session(session, metadata_sessions.get(key)),
+                None => metadata_sessions.contains_key(key),
+            });
+            if entries.is_empty() {
+                sessions.remove(&workspace_name);
+                return workspace;
+            }
+            entries.clone()
+        };
+
+        workspaces::overlay_workspace_sessions(workspace, &overlay)
+    }
+
+    pub(crate) fn apply_workspace_states(&self, workspaces: Vec<Workspace>) -> Vec<Workspace> {
+        workspaces
+            .into_iter()
+            .map(|workspace| self.apply_workspace_state(workspace))
+            .collect()
     }
 }
 

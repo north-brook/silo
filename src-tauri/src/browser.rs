@@ -939,6 +939,7 @@ fn enqueue_browser_metadata_update(
             return;
         }
     };
+    metadata.upsert_workspace_session(workspace, session.clone());
     metadata.enqueue(
         workspace,
         lookup,
@@ -961,6 +962,7 @@ fn enqueue_browser_metadata_remove(
     lookup: Option<WorkspaceLookup>,
     attachment_id: &str,
 ) {
+    metadata.remove_workspace_session(workspace, "browser", attachment_id);
     metadata.enqueue(
         workspace,
         lookup,

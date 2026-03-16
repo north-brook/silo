@@ -526,12 +526,13 @@ fn reconcile_sessions(state: &mut ObserverState, live_sessions: &[ZmxSession]) {
     for live_session in live_sessions {
         let session_state = state.sessions.entry(live_session.name.clone()).or_default();
         session_state.poll_misses = 0;
-        if session_state.active_command.is_none() {
-            session_state.active_command =
-                live_session.command.as_deref().map(sanitize_command_name);
-            if let Some(command) = &session_state.active_command {
-                session_state.assistant_provider = resolve_assistant_provider(command);
-            }
+        let live_command = live_session.command.as_deref().map(sanitize_command_name);
+        if let Some(command) = live_command {
+            session_state.active_command = Some(command.clone());
+            session_state.assistant_provider = resolve_assistant_provider(&command);
+        } else if !session_state.working && !session_state.unread {
+            session_state.active_command = None;
+            session_state.assistant_provider = None;
         }
     }
 
@@ -1681,6 +1682,34 @@ mod tests {
                 .map(|session| session.poll_misses),
             Some(1)
         );
+    }
+
+    #[test]
+    fn reconcile_sessions_clears_finished_assistant_back_to_shell() {
+        let mut state = ObserverState::default();
+        state.sessions.insert(
+            "terminal-1".to_string(),
+            super::SessionState {
+                active_command: Some("claude".to_string()),
+                assistant_provider: Some(AssistantProvider::Claude),
+                working: false,
+                unread: false,
+                lifecycle_managed: true,
+                poll_misses: 0,
+            },
+        );
+
+        super::reconcile_sessions(
+            &mut state,
+            &[super::ZmxSession {
+                name: "terminal-1".to_string(),
+                command: None,
+            }],
+        );
+
+        let session = state.sessions.get("terminal-1").expect("session should remain");
+        assert_eq!(session.active_command, None);
+        assert_eq!(session.assistant_provider, None);
     }
 
     #[test]

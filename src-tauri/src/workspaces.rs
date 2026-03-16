@@ -90,6 +90,10 @@ pub struct WorkspaceSession {
     pub(crate) unread: Option<bool>,
 }
 
+fn workspace_session_key(kind: &str, attachment_id: &str) -> String {
+    format!("{kind}:{attachment_id}")
+}
+
 impl Workspace {
     fn branch(
         base: WorkspaceBase,
@@ -182,6 +186,74 @@ impl Workspace {
     }
 }
 
+pub(crate) fn overlay_workspace_sessions(
+    workspace: Workspace,
+    overlay: &HashMap<String, Option<WorkspaceSession>>,
+) -> Workspace {
+    if overlay.is_empty() {
+        return workspace;
+    }
+
+    let mut sessions = workspace
+        .sessions()
+        .into_iter()
+        .map(|session| {
+            (
+                workspace_session_key(&session.kind, &session.attachment_id),
+                session,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    for (key, value) in overlay {
+        match value {
+            Some(session) => {
+                sessions.insert(key.clone(), session.clone());
+            }
+            None => {
+                sessions.remove(key);
+            }
+        }
+    }
+
+    let mut terminals = Vec::new();
+    let mut browsers = Vec::new();
+    for session in sessions.into_values() {
+        if session.kind == "browser" {
+            browsers.push(session);
+        } else {
+            terminals.push(session);
+        }
+    }
+    terminal::sort_workspace_sessions_oldest_to_newest(&mut terminals);
+    terminal::sort_workspace_sessions_oldest_to_newest(&mut browsers);
+    let assistant_present = terminals
+        .iter()
+        .any(|session| session.working.is_some() || session.unread.is_some());
+    let working = assistant_present.then_some(
+        terminals
+            .iter()
+            .any(|session| session.working == Some(true)),
+    );
+    let unread = terminals.iter().any(|session| session.unread == Some(true));
+
+    match workspace {
+        Workspace::Branch(mut workspace) => {
+            workspace.unread = unread;
+            workspace.working = working;
+            workspace.terminals = terminals;
+            workspace.browsers = browsers;
+            Workspace::Branch(workspace)
+        }
+        Workspace::Template(mut workspace) => {
+            workspace.unread = unread;
+            workspace.working = working;
+            workspace.terminals = terminals;
+            workspace.browsers = browsers;
+            Workspace::Template(workspace)
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedGcloudConfig {
     pub(crate) account: String,
@@ -239,7 +311,9 @@ const TEMPLATE_SNAPSHOT_POLL_ATTEMPTS: usize = 60;
 const TEMPLATE_SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[tauri::command]
-pub async fn workspaces_list_workspaces() -> Result<Vec<Workspace>, String> {
+pub async fn workspaces_list_workspaces(
+    state: State<'_, crate::state::WorkspaceMetadataManager>,
+) -> Result<Vec<Workspace>, String> {
     let config = ConfigStore::new()
         .and_then(|store| store.load())
         .map_err(|error| error.to_string())?;
@@ -255,7 +329,7 @@ pub async fn workspaces_list_workspaces() -> Result<Vec<Workspace>, String> {
     }
     workspaces.sort_by(compare_workspaces_by_last_active_desc);
 
-    Ok(workspaces)
+    Ok(state.apply_workspace_states(workspaces))
 }
 
 #[tauri::command]
@@ -410,14 +484,18 @@ pub async fn workspaces_suspend_workspace(workspace: String) -> Result<(), Strin
 }
 
 #[tauri::command]
-pub async fn workspaces_get_workspace(workspace: String) -> Result<Workspace, String> {
+pub async fn workspaces_get_workspace(
+    state: State<'_, crate::state::WorkspaceMetadataManager>,
+    workspace: String,
+) -> Result<Workspace, String> {
     log::trace!("getting workspace {workspace}");
-    Ok(find_workspace(&workspace).await?.workspace)
+    Ok(state.apply_workspace_state(find_workspace(&workspace).await?.workspace))
 }
 
 #[tauri::command]
 pub async fn workspaces_submit_prompt(
     state: State<'_, terminal::TerminalManager>,
+    workspace_state: State<'_, crate::state::WorkspaceMetadataManager>,
     workspace: String,
     prompt: String,
     model: String,
@@ -432,6 +510,10 @@ pub async fn workspaces_submit_prompt(
     let command = prompt_command_for_model(&model, &prompt)?;
     let attachment_id =
         terminal::start_terminal_command(state.inner(), &workspace, &command).await?;
+    workspace_state.upsert_workspace_session(
+        &workspace,
+        terminal::session_for_command(&attachment_id, &command),
+    );
 
     Ok(terminal::TerminalCreateResult { attachment_id })
 }

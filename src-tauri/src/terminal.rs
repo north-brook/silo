@@ -1,4 +1,5 @@
 use crate::config::ConfigStore;
+use crate::state::WorkspaceMetadataManager;
 use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -235,21 +236,20 @@ struct BootstrapEnvFile {
 }
 
 #[tauri::command]
-pub async fn terminal_create_terminal(workspace: String) -> Result<TerminalCreateResult, String> {
+pub async fn terminal_create_terminal(
+    workspace_state: State<'_, WorkspaceMetadataManager>,
+    workspace: String,
+) -> Result<TerminalCreateResult, String> {
     log::trace!("creating terminal attachment id for workspace {workspace}");
-    let lookup = workspaces::find_workspace(&workspace).await?;
-    let existing_names = list_terminals_in_workspace(&lookup)
-        .await?
-        .into_iter()
-        .map(|session| session.attachment_id)
-        .collect::<HashSet<_>>();
-    let attachment_id = generate_terminal_attachment_id(&existing_names);
+    let attachment_id = create_terminal_attachment_id(&workspace).await?;
+    workspace_state.upsert_workspace_session(&workspace, pending_terminal_session(&attachment_id));
     Ok(TerminalCreateResult { attachment_id })
 }
 
 #[tauri::command]
 pub async fn terminal_create_assistant(
     state: State<'_, TerminalManager>,
+    workspace_state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
     model: String,
 ) -> Result<TerminalCreateResult, String> {
@@ -259,6 +259,7 @@ pub async fn terminal_create_assistant(
         other => return Err(format!("unsupported assistant model: {other}")),
     };
     let attachment_id = start_terminal_command(state.inner(), &workspace, command).await?;
+    workspace_state.upsert_workspace_session(&workspace, session_for_command(&attachment_id, command));
     Ok(TerminalCreateResult { attachment_id })
 }
 
@@ -353,6 +354,7 @@ pub async fn terminal_attach_terminal(
 
 #[tauri::command]
 pub async fn terminal_run_terminal(
+    workspace_state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
     attachment_id: String,
     command: String,
@@ -377,6 +379,7 @@ pub async fn terminal_run_terminal(
         ));
     }
 
+    workspace_state.upsert_workspace_session(&workspace, session.clone());
     Ok(TerminalRunResult { session, created })
 }
 
@@ -385,9 +388,7 @@ pub(crate) async fn start_terminal_command(
     workspace: &str,
     command: &str,
 ) -> Result<String, String> {
-    let attachment_id = terminal_create_terminal(workspace.to_string())
-        .await?
-        .attachment_id;
+    let attachment_id = create_terminal_attachment_id(workspace).await?;
     manager.set_startup_command(
         AttachmentKey {
             workspace: workspace.to_string(),
@@ -427,6 +428,7 @@ pub fn terminal_detach_terminal(
 #[tauri::command]
 pub async fn terminal_kill_terminal(
     state: State<'_, TerminalManager>,
+    workspace_state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
     attachment_id: String,
 ) -> Result<TerminalKillResult, String> {
@@ -442,6 +444,7 @@ pub async fn terminal_kill_terminal(
             &result.stderr,
         ));
     }
+    workspace_state.remove_workspace_session(&workspace, "terminal", &attachment_id);
 
     let key = AttachmentKey {
         workspace,
@@ -456,6 +459,7 @@ pub async fn terminal_kill_terminal(
 
 #[tauri::command]
 pub async fn terminal_read_terminal(
+    workspace_state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
     attachment_id: String,
 ) -> Result<TerminalReadResult, String> {
@@ -472,6 +476,13 @@ pub async fn terminal_read_terminal(
             &result.stderr,
         ));
     }
+    let session = lookup
+        .workspace
+        .terminals()
+        .iter()
+        .find(|session| session.attachment_id == attachment_id)
+        .cloned();
+    workspace_state.mark_workspace_session_read(&workspace, &attachment_id, session);
 
     Ok(TerminalReadResult { updated: true })
 }
@@ -2039,7 +2050,17 @@ fn is_missing_terminal_session_error(stderr: &str) -> bool {
         || lower.contains("unknown session")
 }
 
-fn pending_terminal_session(attachment_id: &str) -> WorkspaceSession {
+async fn create_terminal_attachment_id(workspace: &str) -> Result<String, String> {
+    let lookup = workspaces::find_workspace(workspace).await?;
+    let existing_names = list_terminals_in_workspace(&lookup)
+        .await?
+        .into_iter()
+        .map(|session| session.attachment_id)
+        .collect::<HashSet<_>>();
+    Ok(generate_terminal_attachment_id(&existing_names))
+}
+
+pub(crate) fn pending_terminal_session(attachment_id: &str) -> WorkspaceSession {
     WorkspaceSession {
         kind: "terminal".to_string(),
         name: "shell".to_string(),
@@ -2106,7 +2127,7 @@ fn truncate_scrollback(mut scrollback: String, max_bytes: usize) -> (String, boo
     (scrollback, true)
 }
 
-fn session_for_command(attachment_id: &str, command: &str) -> WorkspaceSession {
+pub(crate) fn session_for_command(attachment_id: &str, command: &str) -> WorkspaceSession {
     let name = sanitize_session_display_name(command);
     let assistant_capable = assistant_capable_command(&name);
     WorkspaceSession {
