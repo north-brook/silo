@@ -3,11 +3,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Terminal, X } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { CloudDeck, useCloud } from "../../components/cloud";
 import { ClaudeIcon } from "../../components/icons/claude";
 import { CodexIcon } from "../../components/icons/codex";
 import { Loader } from "../../components/loader";
 import { toast } from "../../components/toaster";
+import {
+	cloudSessionHref,
+	normalizeTerminalSession,
+} from "../../lib/cloud";
 import { TopBar } from "../../components/top-bar";
 import { invoke } from "../../lib/invoke";
 import type { Workspace, WorkspaceSession } from "../../lib/workspaces";
@@ -68,6 +73,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 	const searchParams = useSearchParams();
 	const router = useRouter();
 	const queryClient = useQueryClient();
+	const { ensureWorkspaceSessions, removeSession } = useCloud();
 	const workspaceName =
 		searchParams.get("name") ?? searchParams.get("workspace") ?? "";
 
@@ -113,7 +119,13 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 				queryKey: ["terminal_list_terminals", workspaceName],
 			});
 			router.push(
-				`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspaceName)}&attachment_id=${encodeURIComponent(result.attachment_id)}&fresh=1`,
+				cloudSessionHref({
+					project,
+					workspace: workspaceName,
+					kind: "terminal",
+					attachmentId: result.attachment_id,
+					fresh: true,
+				}),
 			);
 		},
 		onError: (error) => {
@@ -125,11 +137,43 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 		},
 	});
 
-	const activeTerminal = searchParams.get("attachment_id");
 	const project = searchParams.get("project") ?? workspace.data?.project ?? "";
-	const terminalList = terminals.data ?? [];
+	const activeKind = searchParams.get("kind");
+	const activeAttachmentId = searchParams.get("attachment_id");
+	const fresh = searchParams.get("fresh") === "1";
+	const terminalData = terminals.data;
+	const terminalList = terminalData ?? [];
+	const cloudSessions = useMemo(
+		() =>
+			(terminalData ?? []).map((session) =>
+				normalizeTerminalSession(workspaceName, session),
+			),
+		[terminalData, workspaceName],
+	);
+	const activeSession =
+		workspaceName && activeKind === "terminal" && activeAttachmentId
+			? (cloudSessions.find(
+					(session) => session.attachmentId === activeAttachmentId,
+				) ?? {
+					workspace: workspaceName,
+					kind: "terminal",
+					attachmentId: activeAttachmentId,
+					name: activeAttachmentId,
+					working: null,
+					unread: null,
+				})
+			: null;
+	const showCloudDeck = activeSession?.kind === "terminal";
 
 	const [killingTerminal, setKillingTerminal] = useState<string | null>(null);
+
+	useEffect(() => {
+		if (!workspaceName || !isWorkspaceReady) {
+			return;
+		}
+
+		ensureWorkspaceSessions(workspaceName, cloudSessions);
+	}, [cloudSessions, ensureWorkspaceSessions, isWorkspaceReady, workspaceName]);
 
 	const killTerminal = useMutation({
 		mutationFn: (attachment_id: string) =>
@@ -147,15 +191,28 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 			queryClient.invalidateQueries({
 				queryKey: ["terminal_list_terminals", workspaceName],
 			});
+			removeSession(workspaceName, "terminal", attachment_id);
 			const index = terminalList.findIndex(
 				(session) => session.attachment_id === attachment_id,
 			);
 			const leftNeighbor = index > 0 ? terminalList[index - 1] : null;
-			if (activeTerminal === attachment_id && leftNeighbor) {
+			if (
+				activeKind === "terminal" &&
+				activeAttachmentId === attachment_id &&
+				leftNeighbor
+			) {
 				router.push(
-					`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspaceName)}&attachment_id=${encodeURIComponent(leftNeighbor.attachment_id)}`,
+					cloudSessionHref({
+						project,
+						workspace: workspaceName,
+						kind: "terminal",
+						attachmentId: leftNeighbor.attachment_id,
+					}),
 				);
-			} else if (activeTerminal === attachment_id) {
+			} else if (
+				activeKind === "terminal" &&
+				activeAttachmentId === attachment_id
+			) {
 				router.push(`/workspace?name=${encodeURIComponent(workspaceName)}`);
 			}
 		},
@@ -177,7 +234,9 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 			{terminalList.length > 0 && (
 				<div className="w-full bg-bg shrink-0 flex items-end overflow-x-auto">
 					{terminalList.map((session) => {
-						const isActive = activeTerminal === session.attachment_id;
+						const isActive =
+							activeKind === "terminal" &&
+							activeAttachmentId === session.attachment_id;
 						const { icon, label } = terminalTabPresentation(session.name);
 						return (
 							// biome-ignore lint/a11y/noStaticElementInteractions: can't use <button> because it contains interactive children
@@ -185,14 +244,24 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 								key={session.attachment_id}
 								onClick={() =>
 									router.push(
-										`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspaceName)}&attachment_id=${encodeURIComponent(session.attachment_id)}`,
+										cloudSessionHref({
+											project,
+											workspace: workspaceName,
+											kind: "terminal",
+											attachmentId: session.attachment_id,
+										}),
 									)
 								}
 								onKeyDown={(e) => {
 									if (e.key === "Enter" || e.key === " ") {
 										e.preventDefault();
 										router.push(
-											`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspaceName)}&attachment_id=${encodeURIComponent(session.attachment_id)}`,
+											cloudSessionHref({
+												project,
+												workspace: workspaceName,
+												kind: "terminal",
+												attachmentId: session.attachment_id,
+											}),
 										);
 									}
 								}}
@@ -256,7 +325,15 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 					<div className="flex-1 h-9 border-b border-border-light" />
 				</div>
 			)}
-			{children}
+			{showCloudDeck ? (
+				<CloudDeck
+					workspace={workspaceName}
+					activeSession={activeSession}
+					skipInitialScrollback={fresh}
+				/>
+			) : (
+				children
+			)}
 		</>
 	);
 }
