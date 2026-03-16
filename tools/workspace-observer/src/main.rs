@@ -20,7 +20,7 @@ use time::{format_description::well_known::Rfc3339, Duration as TimeDuration, Of
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
-const TURN_OUTPUT_IDLE_TIMEOUT: Duration = Duration::from_secs(4);
+const TURN_OUTPUT_IDLE_TIMEOUT: Duration = Duration::from_secs(6);
 const INITIAL_PROMPT_STARTUP_GRACE: Duration = Duration::from_secs(6);
 const FIFO_MODE: u32 = 0o622;
 const LEGACY_METADATA_KEY: &str = "silo_state";
