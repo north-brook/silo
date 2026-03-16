@@ -39,6 +39,7 @@ import {
 	gitPush,
 	gitTreeDirty,
 } from "../lib/git";
+import { cloudSessionHref } from "../lib/cloud";
 import { invoke } from "../lib/invoke";
 import { isTemplateWorkspace, type Workspace } from "../lib/workspaces";
 import { Loader } from "./loader";
@@ -274,7 +275,13 @@ function GitBarHeader() {
 				queryKey: ["terminal_list_terminals", workspace],
 			});
 			router.push(
-				`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspace)}&attachment_id=${encodeURIComponent(result.attachment_id)}&fresh=1`,
+				cloudSessionHref({
+					project,
+					workspace,
+					kind: "terminal",
+					attachmentId: result.attachment_id,
+					fresh: true,
+				}),
 			);
 		},
 		onError: (error) => {
@@ -302,7 +309,13 @@ function GitBarHeader() {
 				queryKey: ["terminal_list_terminals", workspace],
 			});
 			router.push(
-				`/workspace/terminal?project=${encodeURIComponent(project)}&workspace=${encodeURIComponent(workspace)}&attachment_id=${encodeURIComponent(result.attachment_id)}&fresh=1`,
+				cloudSessionHref({
+					project,
+					workspace,
+					kind: "terminal",
+					attachmentId: result.attachment_id,
+					fresh: true,
+				}),
 			);
 		},
 		onError: (error) => {
