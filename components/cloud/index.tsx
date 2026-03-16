@@ -338,26 +338,26 @@ export function CloudProvider({
 	}, []);
 
 	const contextValue = useMemo<CloudContextValue>(
-		() => ({
-			activeSessionKey,
-			activeWorkspace,
-			ensureSession,
-			ensureWorkspaceSessions,
-			getHost,
-			registerWorkspaceOutlet,
-			removeSession,
-			setActiveSession,
-		}),
+			() => ({
+				activeSessionKey,
+				activeWorkspace,
+				ensureSession,
+				ensureWorkspaceSessions,
+				getHost,
+				registerWorkspaceOutlet,
+				removeSession,
+				setActiveSession,
+			}),
 		[
 			activeSessionKey,
 			activeWorkspace,
-			ensureSession,
-			ensureWorkspaceSessions,
-			getHost,
-			registerWorkspaceOutlet,
-			removeSession,
-			setActiveSession,
-		],
+				ensureSession,
+				ensureWorkspaceSessions,
+				getHost,
+				registerWorkspaceOutlet,
+				removeSession,
+				setActiveSession,
+			],
 	);
 
 	return (
