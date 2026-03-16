@@ -13,6 +13,7 @@ import {
 	Minus,
 	OctagonAlert,
 	PanelRight,
+	RotateCw,
 	SkipForward,
 	X,
 } from "lucide-react";
@@ -31,12 +32,15 @@ import {
 	type Diff,
 	type DiffFile,
 	type DiffSection,
+	type PullRequestObservation,
+	type PullRequestStatus,
 	gitCreatePr,
 	gitDiff,
 	gitMergePr,
 	gitPrObserve,
 	gitPrStatus,
 	gitPush,
+	gitRerunFailedChecks,
 	gitTreeDirty,
 } from "../lib/git";
 import { cloudSessionHref } from "../lib/cloud";
@@ -58,9 +62,9 @@ interface GitBarContextValue {
 	workspace: string;
 	project: string;
 	isInBranchWorkspace: boolean;
-	prStatus: import("../lib/git").PullRequestStatus | null;
+	prStatus: PullRequestStatus | null;
 	prStatusLoading: boolean;
-	observation: import("../lib/git").PullRequestObservation | null;
+	observation: PullRequestObservation | null;
 	observationLoading: boolean;
 }
 
@@ -251,6 +255,7 @@ function GitBarHeader() {
 		toggle,
 		prStatus: pr,
 		prStatusLoading,
+		observation,
 	} = useGitBar();
 	const router = useRouter();
 	const queryClient = useQueryClient();
@@ -353,6 +358,31 @@ function GitBarHeader() {
 	const showCreatePr = !isLoading && !pr;
 	const showMerge = !isLoading && pr?.status === "open" && !dirty;
 	const showPush = !isLoading && pr?.status === "open" && dirty;
+
+	const checks = observation?.checks ?? [];
+	const pendingCheckStates: CheckState[] = [
+		"in_progress",
+		"pending",
+		"queued",
+		"waiting",
+		"requested",
+	];
+	const failCheckStates: CheckState[] = [
+		"failure",
+		"startup_failure",
+		"timed_out",
+	];
+	const checksRunning = checks.some((c) =>
+		pendingCheckStates.includes(c.state),
+	);
+	const checksFailing = checks.some((c) =>
+		failCheckStates.includes(c.state),
+	);
+	const mergeColor = checksRunning
+		? "bg-btn text-text hover:bg-btn-hover"
+		: checksFailing
+			? "bg-yellow-600 text-white hover:bg-yellow-500"
+			: "bg-green-600 text-white hover:bg-green-500";
 
 	useEffect(() => {
 		const handler = (e: KeyboardEvent) => {
@@ -459,10 +489,10 @@ function GitBarHeader() {
 								type="button"
 								disabled={merge.isPending}
 								onClick={() => merge.mutate()}
-								className="flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium bg-green-600 text-white hover:bg-green-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+								className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium ${mergeColor} transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
 							>
 								{merge.isPending ? (
-									<Loader className="text-white" />
+									<Loader className={checksRunning ? "" : "text-white"} />
 								) : (
 									<GitMerge size={10} />
 								)}
@@ -654,9 +684,21 @@ function ChecksTab({
 	observation,
 	isLoading,
 }: {
-	observation: import("../lib/git").PullRequestObservation | null;
+	observation: PullRequestObservation | null;
 	isLoading: boolean;
 }) {
+	const { workspace } = useGitBar();
+	const queryClient = useQueryClient();
+
+	const rerunFailed = useMutation({
+		mutationFn: () => gitRerunFailedChecks(workspace),
+		onSuccess: () => {
+			queryClient.invalidateQueries({
+				queryKey: ["git_pr_observe", workspace],
+			});
+		},
+	});
+
 	if (isLoading || !observation) {
 		return (
 			<div className="flex items-center justify-center py-8">
@@ -666,6 +708,23 @@ function ChecksTab({
 	}
 
 	const data = observation;
+
+	const pendingStates: CheckState[] = [
+		"in_progress",
+		"pending",
+		"queued",
+		"waiting",
+		"requested",
+	];
+	const failStates: CheckState[] = [
+		"failure",
+		"startup_failure",
+		"timed_out",
+	];
+	const allResolved =
+		data.checks.length > 0 &&
+		!data.checks.some((c) => pendingStates.includes(c.state));
+	const hasFailed = data.checks.some((c) => failStates.includes(c.state));
 
 	return (
 		<div className="flex flex-col gap-3 p-3">
@@ -723,9 +782,30 @@ function ChecksTab({
 			{/* Checks */}
 			{data.checks.length > 0 && (
 				<div className="flex flex-col gap-1">
-					<span className="text-[10px] text-text-muted font-medium uppercase tracking-wide">
-						Checks
-					</span>
+					<div className="flex items-center justify-between">
+						<span className="text-[10px] text-text-muted font-medium uppercase tracking-wide">
+							Checks
+						</span>
+						{allResolved && hasFailed && (
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<button
+										type="button"
+										disabled={rerunFailed.isPending}
+										onClick={() => rerunFailed.mutate()}
+										className="flex items-center text-text-muted hover:text-text transition-colors disabled:opacity-50"
+									>
+										{rerunFailed.isPending ? (
+											<Loader />
+										) : (
+											<RotateCw size={9} />
+										)}
+									</button>
+								</TooltipTrigger>
+								<TooltipContent side="left">Rerun failed</TooltipContent>
+							</Tooltip>
+						)}
+					</div>
 					{[...data.checks].sort((a, b) => a.name.localeCompare(b.name)).map((c) => (
 						<button
 							key={c.id}
