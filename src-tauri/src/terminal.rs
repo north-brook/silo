@@ -26,6 +26,10 @@ const MAX_SCROLLBACK_BYTES: usize = 512 * 1024;
 const ATTACH_COMMAND_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const ATTACH_RESERVATION_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const ATTACH_RESERVATION_WAIT_INTERVAL: Duration = Duration::from_millis(50);
+const WORKSPACE_METADATA_RESERVATION_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+const WORKSPACE_METADATA_RESERVATION_WAIT_INTERVAL: Duration = Duration::from_millis(50);
+const WORKSPACE_METADATA_WRITE_RETRY_ATTEMPTS: usize = 4;
+const WORKSPACE_METADATA_WRITE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const TERMINAL_USER: &str = "silo";
 pub(crate) const TERMINAL_WORKSPACE_DIR: &str = "/home/silo/workspace";
 const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
@@ -77,6 +81,8 @@ static TEMPLATE_CHROME_SYNC_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
 static TEMPLATE_BOOTSTRAP_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 static WORKSPACE_SSH_READY_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+static WORKSPACE_METADATA_WRITES_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -163,6 +169,10 @@ struct AttachmentReservation {
     key: AttachmentKey,
 }
 
+struct WorkspaceMetadataReservation {
+    workspace: String,
+}
+
 enum AttachmentSlot {
     Existing(Arc<Attachment>),
     Reserved(AttachmentReservation),
@@ -171,6 +181,14 @@ enum AttachmentSlot {
 impl Drop for AttachmentReservation {
     fn drop(&mut self) {
         self.manager.release_reservation(&self.key);
+    }
+}
+
+impl Drop for WorkspaceMetadataReservation {
+    fn drop(&mut self) {
+        if let Ok(mut writes) = WORKSPACE_METADATA_WRITES_IN_FLIGHT.lock() {
+            writes.remove(&self.workspace);
+        }
     }
 }
 
@@ -286,16 +304,7 @@ pub async fn terminal_create_terminal(workspace: String) -> Result<TerminalCreat
         working: None,
         unread: None,
     };
-    write_workspace_terminal_metadata(
-        &workspace,
-        &lookup,
-        mutate_sessions(
-            lookup.workspace.sessions(),
-            lookup.workspace.last_working(),
-            SessionMutation::Upsert(session.clone()),
-        ),
-    )
-    .await?;
+    write_workspace_terminal_metadata(&workspace, SessionMutation::Upsert(session.clone())).await?;
 
     Ok(TerminalCreateResult { attachment_id })
 }
@@ -337,16 +346,7 @@ pub async fn terminal_attach_terminal(
     let startup_command = command.or_else(|| state.take_startup_command(&key));
     if let Some(command) = startup_command.as_deref() {
         let session = session_for_command(&attachment_id, command);
-        write_workspace_terminal_metadata(
-            &workspace,
-            &lookup,
-            mutate_sessions(
-                lookup.workspace.sessions(),
-                lookup.workspace.last_working(),
-                SessionMutation::Upsert(session),
-            ),
-        )
-        .await?;
+        write_workspace_terminal_metadata(&workspace, SessionMutation::Upsert(session)).await?;
     }
 
     let _reservation = match wait_for_attachment_slot(state.inner(), &key, &attachment_id).await? {
@@ -416,16 +416,7 @@ pub async fn terminal_run_terminal(
     let created = find_terminal_session(&lookup, &attachment_id)
         .await?
         .is_none();
-    write_workspace_terminal_metadata(
-        &workspace,
-        &lookup,
-        mutate_sessions(
-            lookup.workspace.sessions(),
-            lookup.workspace.last_working(),
-            SessionMutation::Upsert(session.clone()),
-        ),
-    )
-    .await?;
+    write_workspace_terminal_metadata(&workspace, SessionMutation::Upsert(session.clone())).await?;
     let result = run_remote_command(
         &lookup,
         &terminal_run_remote_command(&attachment_id, &command),
@@ -504,16 +495,8 @@ pub async fn terminal_kill_terminal(
         ));
     }
 
-    write_workspace_terminal_metadata(
-        &workspace,
-        &lookup,
-        mutate_sessions(
-            lookup.workspace.sessions(),
-            lookup.workspace.last_working(),
-            SessionMutation::Remove(&attachment_id),
-        ),
-    )
-    .await?;
+    write_workspace_terminal_metadata(&workspace, SessionMutation::Remove(attachment_id.clone()))
+        .await?;
 
     let key = AttachmentKey {
         workspace,
@@ -532,16 +515,8 @@ pub async fn terminal_read_terminal(
     attachment_id: String,
 ) -> Result<TerminalReadResult, String> {
     let lookup = workspaces::find_workspace(&workspace).await?;
-    write_workspace_terminal_metadata(
-        &workspace,
-        &lookup,
-        mutate_sessions(
-            lookup.workspace.sessions(),
-            lookup.workspace.last_working(),
-            SessionMutation::MarkRead(&attachment_id),
-        ),
-    )
-    .await?;
+    write_workspace_terminal_metadata(&workspace, SessionMutation::MarkRead(attachment_id.clone()))
+        .await?;
     let command = run_terminal_user_command(&format!(
         "if [ -x {observer_bin} ]; then {observer_bin} mark-read --session {attachment_id}; fi",
         observer_bin = shell_quote(REMOTE_WORKSPACE_OBSERVER_BIN),
@@ -2489,6 +2464,10 @@ fn current_unix_timestamp_millis() -> u128 {
         .unwrap_or(0)
 }
 
+async fn sleep_for(duration: Duration) {
+    let _ = tauri::async_runtime::spawn_blocking(move || std::thread::sleep(duration)).await;
+}
+
 fn sort_workspace_sessions_oldest_to_newest(sessions: &mut [WorkspaceSession]) {
     sessions.sort_by(|left, right| {
         terminal_name_timestamp(&left.attachment_id)
@@ -2515,10 +2494,11 @@ fn truncate_scrollback(mut scrollback: String, max_bytes: usize) -> (String, boo
     (scrollback, true)
 }
 
-enum SessionMutation<'a> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionMutation {
     Upsert(WorkspaceSession),
-    Remove(&'a str),
-    MarkRead(&'a str),
+    Remove(String),
+    MarkRead(String),
 }
 
 struct WorkspaceTerminalMetadata {
@@ -2532,7 +2512,7 @@ struct WorkspaceTerminalMetadata {
 fn mutate_sessions(
     current_sessions: &[WorkspaceSession],
     current_last_working: Option<&str>,
-    mutation: SessionMutation<'_>,
+    mutation: SessionMutation,
 ) -> WorkspaceTerminalMetadata {
     let mut sessions = current_sessions.to_vec();
     match mutation {
@@ -2579,39 +2559,110 @@ fn mutate_sessions(
     }
 }
 
-async fn write_workspace_terminal_metadata(
-    workspace: &str,
-    lookup: &WorkspaceLookup,
-    metadata: WorkspaceTerminalMetadata,
-) -> Result<(), String> {
+fn workspace_terminal_metadata_entries(
+    metadata: &WorkspaceTerminalMetadata,
+) -> Result<Vec<(String, String)>, String> {
     let sessions_json =
         serde_json::to_string(&metadata.sessions).map_err(|error| error.to_string())?;
-    let unread = if metadata.unread { "true" } else { "false" };
-    let working = if metadata.working.unwrap_or(false) {
-        "true"
-    } else {
-        "false"
-    };
-    let last_active = metadata.last_active.as_str();
     let mut entries = vec![
-        ("sessions", sessions_json.as_str()),
-        ("unread", unread),
-        ("working", working),
-        ("last_active", last_active),
+        ("sessions".to_string(), sessions_json),
+        (
+            "unread".to_string(),
+            if metadata.unread { "true" } else { "false" }.to_string(),
+        ),
+        (
+            "working".to_string(),
+            if metadata.working.unwrap_or(false) {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
+        ),
+        ("last_active".to_string(), metadata.last_active.clone()),
     ];
     if let Some(last_working) = metadata.last_working.as_deref() {
-        entries.push(("last_working", last_working));
+        entries.push(("last_working".to_string(), last_working.to_string()));
     }
-    workspaces::set_workspace_metadata_entries(workspace, &entries).await?;
+    Ok(entries)
+}
 
-    log::trace!(
-        "updated terminal metadata for workspace {} sessions={} unread={} working={}",
-        lookup.workspace.name(),
-        metadata.sessions.len(),
-        unread,
-        working
-    );
-    Ok(())
+fn is_workspace_metadata_fingerprint_conflict(error: &str) -> bool {
+    error.contains("Supplied fingerprint does not match current metadata fingerprint")
+}
+
+async fn wait_for_workspace_metadata_slot(
+    workspace: &str,
+) -> Result<WorkspaceMetadataReservation, String> {
+    let started = Instant::now();
+    loop {
+        if let Ok(mut writes) = WORKSPACE_METADATA_WRITES_IN_FLIGHT.lock() {
+            if !writes.contains(workspace) {
+                writes.insert(workspace.to_string());
+                return Ok(WorkspaceMetadataReservation {
+                    workspace: workspace.to_string(),
+                });
+            }
+        }
+        if started.elapsed() >= WORKSPACE_METADATA_RESERVATION_WAIT_TIMEOUT {
+            return Err(format!(
+                "workspace metadata update already in progress: {workspace}"
+            ));
+        }
+        sleep_for(WORKSPACE_METADATA_RESERVATION_WAIT_INTERVAL).await;
+    }
+}
+
+async fn write_workspace_terminal_metadata(
+    workspace: &str,
+    mutation: SessionMutation,
+) -> Result<(), String> {
+    let _reservation = wait_for_workspace_metadata_slot(workspace).await?;
+
+    for attempt in 0..WORKSPACE_METADATA_WRITE_RETRY_ATTEMPTS {
+        let lookup = workspaces::find_workspace(workspace).await?;
+        let metadata = mutate_sessions(
+            lookup.workspace.sessions(),
+            lookup.workspace.last_working(),
+            mutation.clone(),
+        );
+        let entries = workspace_terminal_metadata_entries(&metadata)?;
+        let borrowed_entries = entries
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+
+        match workspaces::set_workspace_metadata_entries(workspace, &borrowed_entries).await {
+            Ok(()) => {
+                log::trace!(
+                    "updated terminal metadata for workspace {} sessions={} unread={} working={}",
+                    lookup.workspace.name(),
+                    metadata.sessions.len(),
+                    metadata.unread,
+                    metadata.working.unwrap_or(false)
+                );
+                return Ok(());
+            }
+            Err(error)
+                if is_workspace_metadata_fingerprint_conflict(&error)
+                    && attempt + 1 < WORKSPACE_METADATA_WRITE_RETRY_ATTEMPTS =>
+            {
+                log::warn!(
+                    "workspace metadata fingerprint conflict for {} on attempt {} of {}; retrying",
+                    workspace,
+                    attempt + 1,
+                    WORKSPACE_METADATA_WRITE_RETRY_ATTEMPTS
+                );
+                sleep_for(WORKSPACE_METADATA_WRITE_RETRY_INTERVAL).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(format!(
+        "failed to update metadata for workspace {} after {} attempts",
+        workspace, WORKSPACE_METADATA_WRITE_RETRY_ATTEMPTS
+    ))
 }
 
 fn session_for_command(attachment_id: &str, command: &str) -> WorkspaceSession {
@@ -3123,7 +3174,7 @@ mod tests {
                 unread: Some(true),
             }],
             Some("2026-03-14T00:00:00Z"),
-            SessionMutation::MarkRead("terminal-1"),
+            SessionMutation::MarkRead("terminal-1".to_string()),
         );
 
         assert!(!metadata.unread);
@@ -3146,7 +3197,7 @@ mod tests {
                 unread: Some(false),
             }],
             Some("2026-03-14T00:00:00Z"),
-            SessionMutation::Remove("terminal-1"),
+            SessionMutation::Remove("terminal-1".to_string()),
         );
 
         assert!(metadata.sessions.is_empty());
@@ -3183,6 +3234,16 @@ mod tests {
             metadata.last_working.as_deref(),
             Some("2026-03-14T00:00:00Z")
         );
+    }
+
+    #[test]
+    fn fingerprint_conflict_detection_matches_gcloud_error() {
+        assert!(is_workspace_metadata_fingerprint_conflict(
+            "failed to update metadata: Supplied fingerprint does not match current metadata fingerprint"
+        ));
+        assert!(!is_workspace_metadata_fingerprint_conflict(
+            "failed to update metadata: instance not found"
+        ));
     }
 
     #[test]
