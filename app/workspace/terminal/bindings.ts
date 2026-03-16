@@ -2,7 +2,7 @@ import type { Terminal } from "@xterm/xterm";
 
 const COMMAND_LEFT = "\u0001";
 const COMMAND_RIGHT = "\u0005";
-const COMMAND_BACKSPACE = "\u001b[1337;1u";
+const COMMAND_BACKSPACE = "\u0015";
 const ALT_LEFT = "\u001bb";
 const ALT_RIGHT = "\u001bf";
 const SHIFT_ENTER = "\n";

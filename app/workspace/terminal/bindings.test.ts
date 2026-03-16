@@ -23,7 +23,7 @@ describe("sequenceForEvent", () => {
 		).toBe("\n");
 	});
 
-	test("maps command-backspace to a private sequence", () => {
+	test("maps command-backspace to kill to start of line", () => {
 		expect(
 			sequenceForEvent(
 				event({
@@ -31,7 +31,7 @@ describe("sequenceForEvent", () => {
 					metaKey: true,
 				}),
 			),
-		).toBe("\u001b[1337;1u");
+		).toBe("\u0015");
 	});
 
 	test("maps command-backspace from the physical backspace key when key is layout-specific", () => {
@@ -43,7 +43,7 @@ describe("sequenceForEvent", () => {
 					metaKey: true,
 				}),
 			),
-		).toBe("\u001b[1337;1u");
+		).toBe("\u0015");
 	});
 
 	test("maps command-left and command-right to line navigation", () => {
