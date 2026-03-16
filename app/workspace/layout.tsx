@@ -3,7 +3,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Globe, Plus, Terminal, X } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { useCloud } from "../../components/cloud";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../../components/dialog";
 import { ClaudeIcon } from "../../components/icons/claude";
@@ -99,7 +100,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 	const searchParams = useSearchParams();
 	const router = useRouter();
 	const queryClient = useQueryClient();
-	const { ensureWorkspaceSessions } = useCloud();
+	const { ensureWorkspaceSessions, removeSession } = useCloud();
 	const [newTabOpen, setNewTabOpen] = useState(false);
 	const workspaceName =
 		searchParams.get("name") ?? searchParams.get("workspace") ?? "";
@@ -243,16 +244,120 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 
 	const isPending = createTerminal.isPending || createAssistant.isPending || createBrowser.isPending;
 
+	const navigateToPreviousTab = useCallback(() => {
+		if (sessions.length === 0) return;
+		const activeIndex = sessions.findIndex(
+			(s) => s.type === activeKind && s.attachment_id === activeAttachmentId,
+		);
+		if (activeIndex === -1) return;
+		const prevIndex = activeIndex === 0 ? sessions.length - 1 : activeIndex - 1;
+		const prev = sessions[prevIndex];
+		router.push(
+			cloudSessionHref({
+				project,
+				workspace: workspaceName,
+				kind: prev.type,
+				attachmentId: prev.attachment_id,
+			}),
+		);
+	}, [sessions, activeKind, activeAttachmentId, router, project, workspaceName]);
+
+	const navigateToNextTab = useCallback(() => {
+		if (sessions.length === 0) return;
+		const activeIndex = sessions.findIndex(
+			(s) => s.type === activeKind && s.attachment_id === activeAttachmentId,
+		);
+		if (activeIndex === -1) return;
+		const nextIndex = activeIndex === sessions.length - 1 ? 0 : activeIndex + 1;
+		const next = sessions[nextIndex];
+		router.push(
+			cloudSessionHref({
+				project,
+				workspace: workspaceName,
+				kind: next.type,
+				attachmentId: next.attachment_id,
+			}),
+		);
+	}, [sessions, activeKind, activeAttachmentId, router, project, workspaceName]);
+
+	const closeActiveTab = useCallback(() => {
+		if (sessions.length === 0 || !activeKind || !activeAttachmentId) return;
+		const activeIndex = sessions.findIndex(
+			(s) => s.type === activeKind && s.attachment_id === activeAttachmentId,
+		);
+		if (activeIndex === -1) return;
+		const session = sessions[activeIndex];
+
+		if (sessions.length === 1) {
+			router.replace(workspaceHref);
+		} else if (activeIndex > 0) {
+			const prev = sessions[activeIndex - 1];
+			router.replace(
+				cloudSessionHref({
+					project,
+					workspace: workspaceName,
+					kind: prev.type,
+					attachmentId: prev.attachment_id,
+				}),
+			);
+		} else {
+			const next = sessions[activeIndex + 1];
+			router.replace(
+				cloudSessionHref({
+					project,
+					workspace: workspaceName,
+					kind: next.type,
+					attachmentId: next.attachment_id,
+				}),
+			);
+		}
+
+		const killCommand =
+			session.type === "browser"
+				? invoke("browser_kill_tab", {
+						workspace: workspaceName,
+						attachmentId: session.attachment_id,
+					})
+				: invoke("terminal_kill_terminal", {
+						workspace: workspaceName,
+						attachmentId: session.attachment_id,
+					});
+
+		killCommand.then(() => {
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_get_workspace", workspaceName],
+			});
+			removeSession(workspaceName, session.type, session.attachment_id);
+		});
+	}, [sessions, activeKind, activeAttachmentId, router, workspaceHref, project, workspaceName, queryClient, removeSession]);
+
 	useEffect(() => {
 		const handler = (e: KeyboardEvent) => {
 			if (e.metaKey && e.key === "t") {
 				e.preventDefault();
 				setNewTabOpen(true);
 			}
+			if (e.metaKey && e.shiftKey && e.code === "BracketLeft") {
+				e.preventDefault();
+				navigateToPreviousTab();
+			}
+			if (e.metaKey && e.shiftKey && e.code === "BracketRight") {
+				e.preventDefault();
+				navigateToNextTab();
+			}
 		};
 		window.addEventListener("keydown", handler);
 		return () => window.removeEventListener("keydown", handler);
-	}, []);
+	}, [navigateToPreviousTab, navigateToNextTab]);
+
+	useEffect(() => {
+		const unlisten = listen("silo://close-tab", () => {
+			closeActiveTab();
+		});
+		return () => {
+			unlisten.then((fn) => fn());
+		};
+	}, [closeActiveTab]);
 
 	const TAB_OPTIONS = [
 		{
@@ -307,21 +412,22 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 					</div>
 				</header>
 			)}
-			{(sessions.length > 0 || isWorkspaceReady) && (
+			{sessions.length > 0 && (
 				<div className="w-full bg-bg shrink-0 flex items-end overflow-x-auto">
-					{sessions.map((session) => (
-						<WorkspaceTab
-							key={session.attachment_id}
-							session={session}
-							isActive={
-								activeKind === session.type &&
-								activeAttachmentId === session.attachment_id
-							}
-							workspaceName={workspaceName}
-							project={project}
-							workspaceHref={workspaceHref}
-						/>
-					))}
+						{sessions.map((session) => (
+							<WorkspaceTab
+								key={session.attachment_id}
+								session={session}
+								sessions={sessions}
+								isActive={
+									activeKind === session.type &&
+									activeAttachmentId === session.attachment_id
+								}
+								workspaceName={workspaceName}
+								project={project}
+								workspaceHref={workspaceHref}
+							/>
+						))}
 					<Tooltip>
 						<TooltipTrigger asChild>
 							<button
@@ -386,12 +492,14 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 
 function WorkspaceTab({
 	session,
+	sessions,
 	isActive,
 	workspaceName,
 	project,
 	workspaceHref,
 }: {
 	session: WorkspaceSession;
+	sessions: WorkspaceSession[];
 	isActive: boolean;
 	workspaceName: string;
 	project: string;
@@ -401,38 +509,63 @@ function WorkspaceTab({
 	const queryClient = useQueryClient();
 	const { removeSession } = useCloud();
 
-	const killSession = useMutation({
-		mutationFn: () =>
-			session.type === "browser"
-				? invoke("browser_kill_tab", {
-						workspace: workspaceName,
-						attachmentId: session.attachment_id,
-					})
-				: invoke("terminal_kill_terminal", {
-						workspace: workspaceName,
-						attachmentId: session.attachment_id,
-					}),
+		const killSession = useMutation({
+			mutationFn: () =>
+				session.type === "browser"
+					? invoke("browser_kill_tab", {
+							workspace: workspaceName,
+							attachmentId: session.attachment_id,
+						})
+					: invoke("terminal_kill_terminal", {
+							workspace: workspaceName,
+							attachmentId: session.attachment_id,
+						}),
 		onSuccess: () => {
 			queryClient.invalidateQueries({
 				queryKey: ["workspaces_get_workspace", workspaceName],
 			});
-			removeSession(workspaceName, session.type, session.attachment_id);
-		},
-		onError: (error) => {
-			toast({
-				variant: "error",
-				title:
-					session.type === "browser"
-						? "Failed to close browser"
-						: "Failed to close terminal",
-				description: error.message,
+				removeSession(workspaceName, session.type, session.attachment_id);
+			},
+			onError: (error) => {
+				toast({
+					variant: "error",
+					title:
+						session.type === "browser"
+							? "Failed to close browser"
+							: "Failed to close terminal",
+					description: error.message,
 			});
 		},
 	});
 
 	const handleClose = () => {
 		if (isActive) {
-			router.replace(workspaceHref);
+			const activeIndex = sessions.findIndex(
+				(s) => s.attachment_id === session.attachment_id,
+			);
+			if (sessions.length === 1) {
+				router.replace(workspaceHref);
+			} else if (activeIndex > 0) {
+				const prev = sessions[activeIndex - 1];
+				router.replace(
+					cloudSessionHref({
+						project,
+						workspace: workspaceName,
+						kind: prev.type,
+						attachmentId: prev.attachment_id,
+					}),
+				);
+			} else {
+				const next = sessions[activeIndex + 1];
+				router.replace(
+					cloudSessionHref({
+						project,
+						workspace: workspaceName,
+						kind: next.type,
+						attachmentId: next.attachment_id,
+					}),
+				);
+			}
 		}
 		killSession.mutate();
 	};
@@ -449,28 +582,28 @@ function WorkspaceTab({
 			tabIndex={0}
 			onClick={() =>
 				router.push(
-					cloudSessionHref({
-						project,
-						workspace: workspaceName,
-						kind: session.type,
-						attachmentId: session.attachment_id,
-					}),
-				)
-			}
+						cloudSessionHref({
+							project,
+							workspace: workspaceName,
+							kind: session.type,
+							attachmentId: session.attachment_id,
+						}),
+					)
+				}
 			onKeyDown={(event) => {
 				if (event.key !== "Enter" && event.key !== " ") {
 					return;
 				}
 				event.preventDefault();
 				router.push(
-					cloudSessionHref({
-						project,
-						workspace: workspaceName,
-						kind: session.type,
-						attachmentId: session.attachment_id,
-					}),
-				);
-			}}
+						cloudSessionHref({
+							project,
+							workspace: workspaceName,
+							kind: session.type,
+							attachmentId: session.attachment_id,
+						}),
+					);
+				}}
 			className={`group/tab h-9 flex items-center gap-1.5 pl-3.5 pr-2.5 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
 				isActive
 					? "bg-surface text-text-bright border-r-border-light border-b-surface"

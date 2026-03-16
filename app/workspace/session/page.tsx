@@ -296,7 +296,7 @@ function BrowserSessionHeader({
 				event.preventDefault();
 				navigate.mutate(address);
 			}}
-			className="h-9 shrink-0 bg-surface border-b border-border-light px-1.5 flex items-center gap-0.5"
+			className="h-9 shrink-0 bg-surface px-1.5 flex items-center gap-0.5"
 		>
 			<button
 				type="button"
@@ -349,4 +349,3 @@ function BrowserSessionHeader({
 		</form>
 	);
 }
-
