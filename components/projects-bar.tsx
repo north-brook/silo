@@ -325,7 +325,10 @@ function ProjectRow({
 	);
 }
 
-function WorkspaceRow({ workspace }: { workspace: Workspace }) {
+function WorkspaceRow({
+	workspace,
+	hotkeyNumber,
+}: { workspace: Workspace; hotkeyNumber?: number }) {
 	const router = useRouter();
 	const searchParams = useSearchParams();
 	const queryClient = useQueryClient();
@@ -536,6 +539,11 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 					{workspaceLabel(workspace)}
 				</span>
 			</span>
+			{hotkeyNumber !== undefined ? (
+				<span className="shrink-0 ml-auto -mr-1 w-5 h-5 flex items-center justify-center text-[10px] font-medium text-text-muted">
+					{hotkeyNumber}
+				</span>
+			) : (
 			<Popover open={menuOpen} onOpenChange={setMenuOpen}>
 				<PopoverTrigger asChild>
 					<button
@@ -685,6 +693,7 @@ function WorkspaceRow({ workspace }: { workspace: Workspace }) {
 					)}
 				</PopoverContent>
 			</Popover>
+			)}
 		</div>
 	);
 }
@@ -737,6 +746,7 @@ export function ProjectsBar() {
 	const pathname = usePathname();
 	const isHome = pathname === "/";
 	const newWorkspace = useNewWorkspace();
+	const queryClient = useQueryClient();
 	const projects = useQuery({
 		queryKey: ["projects_list_projects"],
 		queryFn: () => invoke<ListedProject[]>("projects_list_projects"),
@@ -762,6 +772,7 @@ export function ProjectsBar() {
 		refetchInterval: 15000,
 	});
 	const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+	const [metaKeyHeld, setMetaKeyHeld] = useState(false);
 
 	const prevUnreadRef = useRef<Set<string> | null>(null);
 
@@ -786,12 +797,93 @@ export function ProjectsBar() {
 		prevUnreadRef.current = currentUnread;
 	}, [workspaces.data]);
 
+	useEffect(() => {
+		const handler = (e: KeyboardEvent) => {
+			if (!e.metaKey || e.shiftKey || e.altKey || e.ctrlKey) return;
+			const digit = Number.parseInt(e.key, 10);
+			if (digit < 1 || digit > 9 || Number.isNaN(digit)) return;
+
+			const p = projects.data;
+			const w = workspaces.data;
+			if (!p || !w) return;
+
+			// Build flat workspace list matching sidebar order:
+			// projects in order, workspaces sorted by created_at within each project
+			const flatWorkspaces: Workspace[] = [];
+			for (const project of p) {
+				const projectWorkspaces = w
+					.filter((ws) => ws.project === project.name)
+					.sort((a, b) => a.created_at.localeCompare(b.created_at));
+				flatWorkspaces.push(...projectWorkspaces);
+			}
+
+			const target = flatWorkspaces[digit - 1];
+			if (!target) return;
+
+			e.preventDefault();
+
+			const isSuspended = target.status === "SUSPENDED";
+			const isTemplate = isTemplateWorkspace(target);
+
+			if (isSuspended && !isTemplate) {
+				router.push(
+					`/workspace/resuming?project=${encodeURIComponent(target.project ?? "")}&workspace=${encodeURIComponent(target.name)}`,
+				);
+				invoke("workspaces_resume_workspace", {
+					workspace: target.name,
+				}).then(() => {
+					queryClient.invalidateQueries({
+						queryKey: ["workspaces_list_workspaces"],
+					});
+				});
+			} else {
+				router.push(
+					`/workspace?project=${encodeURIComponent(target.project ?? "")}&name=${encodeURIComponent(target.name)}`,
+				);
+			}
+		};
+
+		window.addEventListener("keydown", handler);
+		return () => window.removeEventListener("keydown", handler);
+	}, [projects.data, workspaces.data, router, queryClient]);
+
+	useEffect(() => {
+		const down = (e: KeyboardEvent) => {
+			if (e.key === "Meta") setMetaKeyHeld(true);
+		};
+		const up = (e: KeyboardEvent) => {
+			if (e.key === "Meta") setMetaKeyHeld(false);
+		};
+		const blur = () => setMetaKeyHeld(false);
+		window.addEventListener("keydown", down);
+		window.addEventListener("keyup", up);
+		window.addEventListener("blur", blur);
+		return () => {
+			window.removeEventListener("keydown", down);
+			window.removeEventListener("keyup", up);
+			window.removeEventListener("blur", blur);
+		};
+	}, []);
+
 	if (!isOpen) return null;
 	if (!projects.data || projects.data.length === 0) return null;
 
 	const isExpanded = (name: string) => expanded[name] !== false;
 	const toggle = (name: string) =>
 		setExpanded((prev) => ({ ...prev, [name]: !isExpanded(name) }));
+
+	// Build workspace name -> hotkey number (1-9) map matching sidebar order
+	const hotkeyMap = new Map<string, number>();
+	let hotkeyIndex = 0;
+	for (const project of projects.data) {
+		const projectWorkspaces = (workspaces.data ?? [])
+			.filter((w) => w.project === project.name)
+			.sort((a, b) => a.created_at.localeCompare(b.created_at));
+		for (const w of projectWorkspaces) {
+			hotkeyIndex++;
+			if (hotkeyIndex <= 9) hotkeyMap.set(w.name, hotkeyIndex);
+		}
+	}
 
 	return (
 		<aside className="w-48 shrink-0 border-r border-border-light bg-bg flex flex-col">
@@ -860,7 +952,13 @@ export function ProjectsBar() {
 							/>
 							{isExpanded(project.name) &&
 								projectWorkspaces.map((w) => (
-									<WorkspaceRow key={w.name} workspace={w} />
+									<WorkspaceRow
+										key={w.name}
+										workspace={w}
+										hotkeyNumber={
+											metaKeyHeld ? hotkeyMap.get(w.name) : undefined
+										}
+									/>
 								))}
 						</div>
 					);
