@@ -3,17 +3,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Terminal, X } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo } from "react";
 import { CloudDeck, useCloud } from "../../components/cloud";
 import { ClaudeIcon } from "../../components/icons/claude";
 import { CodexIcon } from "../../components/icons/codex";
 import { Loader } from "../../components/loader";
 import { toast } from "../../components/toaster";
-import {
-	cloudSessionHref,
-	normalizeTerminalSession,
-} from "../../lib/cloud";
 import { TopBar } from "../../components/top-bar";
+import { cloudSessionHref, normalizeTerminalSession } from "../../lib/cloud";
 import { invoke } from "../../lib/invoke";
 import type { Workspace, WorkspaceSession } from "../../lib/workspaces";
 
@@ -141,6 +138,13 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 	const activeKind = searchParams.get("kind");
 	const activeAttachmentId = searchParams.get("attachment_id");
 	const fresh = searchParams.get("fresh") === "1";
+	const workspaceHref = useMemo(() => {
+		const params = new URLSearchParams({ name: workspaceName });
+		if (project) {
+			params.set("project", project);
+		}
+		return `/workspace?${params.toString()}`;
+	}, [project, workspaceName]);
 	const terminalData = terminals.data;
 	const terminalList = terminalData ?? [];
 	const cloudSessions = useMemo(
@@ -165,8 +169,6 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 			: null;
 	const showCloudDeck = activeSession?.kind === "terminal";
 
-	const [killingTerminal, setKillingTerminal] = useState<string | null>(null);
-
 	useEffect(() => {
 		if (!workspaceName || !isWorkspaceReady) {
 			return;
@@ -174,49 +176,6 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 
 		ensureWorkspaceSessions(workspaceName, cloudSessions);
 	}, [cloudSessions, ensureWorkspaceSessions, isWorkspaceReady, workspaceName]);
-
-	const killTerminal = useMutation({
-		mutationFn: (attachment_id: string) =>
-			invoke("terminal_kill_terminal", {
-				workspace: workspaceName,
-				attachmentId: attachment_id,
-			}),
-		onMutate: (attachment_id) => {
-			setKillingTerminal(attachment_id);
-		},
-		onSettled: () => {
-			setKillingTerminal(null);
-		},
-		onSuccess: (_result, attachment_id) => {
-			queryClient.invalidateQueries({
-				queryKey: ["terminal_list_terminals", workspaceName],
-			});
-			removeSession(workspaceName, "terminal", attachment_id);
-			const index = terminalList.findIndex(
-				(session) => session.attachment_id === attachment_id,
-			);
-			const leftNeighbor = index > 0 ? terminalList[index - 1] : null;
-			if (
-				activeKind === "terminal" &&
-				activeAttachmentId === attachment_id &&
-				leftNeighbor
-			) {
-				router.push(
-					cloudSessionHref({
-						project,
-						workspace: workspaceName,
-						kind: "terminal",
-						attachmentId: leftNeighbor.attachment_id,
-					}),
-				);
-			} else if (
-				activeKind === "terminal" &&
-				activeAttachmentId === attachment_id
-			) {
-				router.push(`/workspace?name=${encodeURIComponent(workspaceName)}`);
-			}
-		},
-	});
 
 	return (
 		<>
@@ -233,87 +192,19 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 			)}
 			{terminalList.length > 0 && (
 				<div className="w-full bg-bg shrink-0 flex items-end overflow-x-auto">
-					{terminalList.map((session) => {
-						const isActive =
-							activeKind === "terminal" &&
-							activeAttachmentId === session.attachment_id;
-						const { icon, label } = terminalTabPresentation(session.name);
-						return (
-							// biome-ignore lint/a11y/noStaticElementInteractions: can't use <button> because it contains interactive children
-							<div
-								key={session.attachment_id}
-								onClick={() =>
-									router.push(
-										cloudSessionHref({
-											project,
-											workspace: workspaceName,
-											kind: "terminal",
-											attachmentId: session.attachment_id,
-										}),
-									)
-								}
-								onKeyDown={(e) => {
-									if (e.key === "Enter" || e.key === " ") {
-										e.preventDefault();
-										router.push(
-											cloudSessionHref({
-												project,
-												workspace: workspaceName,
-												kind: "terminal",
-												attachmentId: session.attachment_id,
-											}),
-										);
-									}
-								}}
-								className={`group/tab h-9 flex items-center gap-1.5 pl-3.5 pr-2.5 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
-									isActive
-										? "bg-surface text-text-bright border-r-border-light border-b-surface"
-										: "text-text border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text-bright"
-								}`}
-							>
-								{icon}
-								<span className="max-w-48 truncate">{label}</span>
-								{killingTerminal === session.attachment_id ? (
-									<span className="p-0.5">
-										<Loader />
-									</span>
-								) : session.working ? (
-									<span className="p-0.5">
-										<Loader className="text-blue-400" />
-									</span>
-								) : session.unread && !isActive ? (
-									<span className="group/unread relative p-0.5 flex items-center justify-center">
-										<span className="shrink-0 w-2 h-2 rounded-full bg-blue-400 group-hover/unread:hidden" />
-										<button
-											type="button"
-											onClick={(e) => {
-												e.stopPropagation();
-												killTerminal.mutate(session.attachment_id);
-											}}
-											className="hidden group-hover/unread:block p-0.5 rounded transition-colors hover:bg-border-light text-text-muted hover:text-text-bright"
-										>
-											<X size={10} />
-										</button>
-									</span>
-								) : (
-									<button
-										type="button"
-										onClick={(e) => {
-											e.stopPropagation();
-											killTerminal.mutate(session.attachment_id);
-										}}
-										className={`p-0.5 rounded transition-colors hover:bg-border-light ${
-											isActive
-												? "text-text-muted hover:text-text-bright"
-												: "opacity-0 group-hover/tab:opacity-100 text-text-muted hover:text-text-bright"
-										}`}
-									>
-										<X size={10} />
-									</button>
-								)}
-							</div>
-						);
-					})}
+					{terminalList.map((session) => (
+						<TerminalTab
+							key={session.attachment_id}
+							session={session}
+							isActive={
+								activeKind === "terminal" &&
+								activeAttachmentId === session.attachment_id
+							}
+							workspaceName={workspaceName}
+							project={project}
+							workspaceHref={workspaceHref}
+						/>
+					))}
 					<button
 						type="button"
 						disabled={createTerminal.isPending}
@@ -335,5 +226,128 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 				children
 			)}
 		</>
+	);
+}
+
+function TerminalTab({
+	session,
+	isActive,
+	workspaceName,
+	project,
+	workspaceHref,
+}: {
+	session: WorkspaceSession;
+	isActive: boolean;
+	workspaceName: string;
+	project: string;
+	workspaceHref: string;
+}) {
+	const router = useRouter();
+	const queryClient = useQueryClient();
+	const { removeSession } = useCloud();
+
+	const killTerminal = useMutation({
+		mutationFn: () =>
+			invoke("terminal_kill_terminal", {
+				workspace: workspaceName,
+				attachmentId: session.attachment_id,
+			}),
+		onSuccess: () => {
+			queryClient.invalidateQueries({
+				queryKey: ["terminal_list_terminals", workspaceName],
+			});
+			removeSession(workspaceName, "terminal", session.attachment_id);
+		},
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to close terminal",
+				description: error.message,
+			});
+		},
+	});
+
+	const handleClose = () => {
+		if (isActive) {
+			router.replace(workspaceHref);
+		}
+		killTerminal.mutate();
+	};
+
+	const { icon, label } = terminalTabPresentation(session.name);
+
+	return (
+		// biome-ignore lint/a11y/noStaticElementInteractions: can't use <button> because it contains interactive children
+		<div
+			onClick={() =>
+				router.push(
+					cloudSessionHref({
+						project,
+						workspace: workspaceName,
+						kind: "terminal",
+						attachmentId: session.attachment_id,
+					}),
+				)
+			}
+			onKeyDown={(e) => {
+				if (e.key === "Enter" || e.key === " ") {
+					e.preventDefault();
+					router.push(
+						cloudSessionHref({
+							project,
+							workspace: workspaceName,
+							kind: "terminal",
+							attachmentId: session.attachment_id,
+						}),
+					);
+				}
+			}}
+			className={`group/tab h-9 flex items-center gap-1.5 pl-3.5 pr-2.5 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
+				isActive
+					? "bg-surface text-text-bright border-r-border-light border-b-surface"
+					: "text-text border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text-bright"
+			}`}
+		>
+			{icon}
+			<span className="max-w-48 truncate">{label}</span>
+			{killTerminal.isPending ? (
+				<span className="p-0.5">
+					<Loader className="text-error" />
+				</span>
+			) : session.working ? (
+				<span className="p-0.5">
+					<Loader className="text-blue-400" />
+				</span>
+			) : session.unread && !isActive ? (
+				<span className="group/unread relative p-0.5 flex items-center justify-center">
+					<span className="shrink-0 w-2 h-2 rounded-full bg-blue-400 group-hover/unread:hidden" />
+					<button
+						type="button"
+						onClick={(e) => {
+							e.stopPropagation();
+							handleClose();
+						}}
+						className="hidden group-hover/unread:block p-0.5 rounded transition-colors hover:bg-border-light text-text-muted hover:text-text-bright"
+					>
+						<X size={10} />
+					</button>
+				</span>
+			) : (
+				<button
+					type="button"
+					onClick={(e) => {
+						e.stopPropagation();
+						handleClose();
+					}}
+					className={`p-0.5 rounded transition-colors hover:bg-border-light ${
+						isActive
+							? "text-text-muted hover:text-text-bright"
+							: "opacity-0 group-hover/tab:opacity-100 text-text-muted hover:text-text-bright"
+					}`}
+				>
+					<X size={10} />
+				</button>
+			)}
+		</div>
 	);
 }
