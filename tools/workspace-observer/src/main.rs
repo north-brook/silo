@@ -26,6 +26,8 @@ const FIFO_MODE: u32 = 0o622;
 const AUTO_SUSPEND_IDLE_THRESHOLD: TimeDuration = TimeDuration::hours(4);
 const POLL_MISS_THRESHOLD_UNMANAGED: u16 = 3;
 const POLL_MISS_THRESHOLD_LIFECYCLE: u16 = 300;
+const METADATA_PUBLISH_ATTEMPTS: usize = 5;
+const METADATA_PUBLISH_RETRY_BASE_DELAY: Duration = Duration::from_millis(100);
 const SOFT_NEWLINE_SENTINEL: char = '\u{e000}';
 const TERMINAL_LAST_ACTIVE_METADATA_KEY: &str = "terminal-last-active";
 const TERMINAL_LAST_WORKING_METADATA_KEY: &str = "terminal-last-working";
@@ -190,6 +192,13 @@ fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
         .map_err(|error| format!("failed to open pty writer: {error}"))?;
 
     let tracker = AssistantTracker::new(session.clone(), provider, runtime.fifo);
+    send_event(
+        &tracker.fifo,
+        &ObserverEvent::AssistantSessionStarted {
+            session: session.clone(),
+            provider,
+        },
+    )?;
     if initial_prompt_argv
         && command
             .iter()
@@ -353,6 +362,8 @@ struct SessionState {
     #[serde(default)]
     assistant_provider: Option<AssistantProvider>,
     #[serde(default)]
+    command_running: bool,
+    #[serde(default)]
     working: bool,
     #[serde(default)]
     unread: bool,
@@ -437,6 +448,10 @@ enum ObserverEvent {
     ShellCommandFinished {
         session: String,
     },
+    AssistantSessionStarted {
+        session: String,
+        provider: AssistantProvider,
+    },
     AssistantPromptSubmitted {
         session: String,
         provider: AssistantProvider,
@@ -472,22 +487,36 @@ fn apply_event(state: &mut ObserverState, event: ObserverEvent) {
             let session_state = state.sessions.entry(session).or_default();
             session_state.active_command = Some(command.clone());
             session_state.assistant_provider = resolve_assistant_provider(&command);
+            session_state.command_running = true;
             session_state.working = false;
+            session_state.unread = false;
             session_state.poll_misses = 0;
         }
         ObserverEvent::ShellCommandFinished { session } => {
             if let Some(session_state) = state.sessions.get_mut(&session) {
                 session_state.active_command = None;
                 session_state.assistant_provider = None;
+                session_state.command_running = false;
                 session_state.working = false;
+                session_state.unread = false;
                 session_state.poll_misses = 0;
             }
+        }
+        ObserverEvent::AssistantSessionStarted { session, provider } => {
+            let session_state = state.sessions.entry(session).or_default();
+            session_state.active_command = Some(provider.command_name().to_string());
+            session_state.assistant_provider = Some(provider);
+            session_state.command_running = true;
+            session_state.working = false;
+            session_state.unread = false;
+            session_state.poll_misses = 0;
         }
         ObserverEvent::AssistantPromptSubmitted { session, provider } => {
             {
                 let session_state = state.sessions.entry(session).or_default();
                 session_state.active_command = Some(provider.command_name().to_string());
                 session_state.assistant_provider = Some(provider);
+                session_state.command_running = true;
                 session_state.working = true;
                 session_state.unread = false;
                 session_state.poll_misses = 0;
@@ -498,6 +527,7 @@ fn apply_event(state: &mut ObserverState, event: ObserverEvent) {
             let session_state = state.sessions.entry(session).or_default();
             session_state.active_command = Some(provider.command_name().to_string());
             session_state.assistant_provider = Some(provider);
+            session_state.command_running = true;
             session_state.working = false;
             session_state.unread = true;
             session_state.poll_misses = 0;
@@ -530,7 +560,8 @@ fn reconcile_sessions(state: &mut ObserverState, live_sessions: &[ZmxSession]) {
         if let Some(command) = live_command {
             session_state.active_command = Some(command.clone());
             session_state.assistant_provider = resolve_assistant_provider(&command);
-        } else if !session_state.working && !session_state.unread {
+            session_state.command_running = true;
+        } else if !session_state.command_running && !session_state.working && !session_state.unread {
             session_state.active_command = None;
             session_state.assistant_provider = None;
         }
@@ -766,6 +797,11 @@ fn parse_emit_event(args: &[String]) -> Result<ObserverEvent, String> {
             command: required_flag_value(args, "--command")?.to_string(),
         }),
         "shell_command_finished" => Ok(ObserverEvent::ShellCommandFinished { session }),
+        "assistant_session_started" => Ok(ObserverEvent::AssistantSessionStarted {
+            session,
+            provider: AssistantProvider::parse(required_flag_value(args, "--provider")?)
+                .ok_or_else(|| "invalid assistant provider".to_string())?,
+        }),
         "assistant_prompt_submitted" => Ok(ObserverEvent::AssistantPromptSubmitted {
             session,
             provider: AssistantProvider::parse(required_flag_value(args, "--provider")?)
@@ -792,7 +828,7 @@ fn required_flag_value<'a>(args: &'a [String], flag: &str) -> Result<&'a str, St
 }
 
 fn session_poll_miss_threshold(session: &SessionState) -> u16 {
-    if session.lifecycle_managed {
+    if session.lifecycle_managed && (session.working || session.active_command.is_some()) {
         POLL_MISS_THRESHOLD_LIFECYCLE
     } else {
         POLL_MISS_THRESHOLD_UNMANAGED
@@ -803,6 +839,9 @@ fn sanitize_command_name(command: &str) -> String {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return "shell".to_string();
+    }
+    if trimmed.eq("cc") || trimmed.starts_with("cc ") {
+        return "claude".to_string();
     }
     if trimmed.eq("silo codex") || trimmed.starts_with("silo codex ") {
         return "codex".to_string();
@@ -929,7 +968,24 @@ impl ComputeMetadataClient {
 
     fn publish(&self, published: &PublishedState) -> Result<(), String> {
         let token = self.fetch_access_token()?;
-        let (fingerprint, items) = self.fetch_instance_metadata(&token)?;
+        let mut last_error = None;
+
+        for attempt in 0..METADATA_PUBLISH_ATTEMPTS {
+            match self.publish_once(&token, published) {
+                Ok(()) => return Ok(()),
+                Err(error) if attempt + 1 < METADATA_PUBLISH_ATTEMPTS && should_retry_publish(&error) => {
+                    last_error = Some(error);
+                    thread::sleep(METADATA_PUBLISH_RETRY_BASE_DELAY * 2u32.pow(attempt as u32));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| "metadata publish failed".to_string()))
+    }
+
+    fn publish_once(&self, token: &str, published: &PublishedState) -> Result<(), String> {
+        let (fingerprint, items) = self.fetch_instance_metadata(token)?;
         let items = flat_metadata_items(items, published)?;
 
         let items = items
@@ -1112,6 +1168,14 @@ fn bool_metadata_value(value: bool) -> &'static str {
     } else {
         "false"
     }
+}
+
+fn should_retry_publish(error: &str) -> bool {
+    error.contains("status 412")
+        || error.contains("conditionNotMet")
+        || error.contains("status 403")
+            && (error.contains("Too many pending operations on a resource.")
+                || error.contains("rateLimitExceeded"))
 }
 
 struct AssistantTracker {
@@ -1665,6 +1729,7 @@ mod tests {
             super::SessionState {
                 active_command: Some("codex".to_string()),
                 assistant_provider: Some(AssistantProvider::Codex),
+                command_running: true,
                 working: true,
                 unread: false,
                 lifecycle_managed: true,
@@ -1692,6 +1757,7 @@ mod tests {
             super::SessionState {
                 active_command: Some("claude".to_string()),
                 assistant_provider: Some(AssistantProvider::Claude),
+                command_running: false,
                 working: false,
                 unread: false,
                 lifecycle_managed: true,
@@ -1713,6 +1779,82 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_sessions_drops_missing_idle_shell_session_quickly() {
+        let mut state = ObserverState::default();
+        state.sessions.insert(
+            "terminal-1".to_string(),
+            super::SessionState {
+                active_command: None,
+                assistant_provider: None,
+                command_running: false,
+                working: false,
+                unread: true,
+                lifecycle_managed: true,
+                poll_misses: 0,
+            },
+        );
+
+        for _ in 0..super::POLL_MISS_THRESHOLD_UNMANAGED {
+            super::reconcile_sessions(&mut state, &[]);
+        }
+
+        assert!(
+            !state.sessions.contains_key("terminal-1"),
+            "missing idle shell session should be evicted after the short threshold"
+        );
+    }
+
+    #[test]
+    fn reconcile_sessions_preserves_running_command_without_live_cmd() {
+        let mut state = ObserverState::default();
+        state.sessions.insert(
+            "terminal-1".to_string(),
+            super::SessionState {
+                active_command: Some("bun run dev".to_string()),
+                assistant_provider: None,
+                command_running: true,
+                working: false,
+                unread: false,
+                lifecycle_managed: true,
+                poll_misses: 0,
+            },
+        );
+
+        super::reconcile_sessions(
+            &mut state,
+            &[super::ZmxSession {
+                name: "terminal-1".to_string(),
+                command: None,
+            }],
+        );
+
+        let session = state.sessions.get("terminal-1").expect("session should remain");
+        assert_eq!(session.active_command.as_deref(), Some("bun run dev"));
+        assert_eq!(session.assistant_provider, None);
+        assert!(session.command_running);
+    }
+
+    #[test]
+    fn assistant_session_started_marks_claude_active_immediately() {
+        let mut state = ObserverState::default();
+
+        super::apply_event(
+            &mut state,
+            ObserverEvent::AssistantSessionStarted {
+                session: "terminal-1".to_string(),
+                provider: AssistantProvider::Claude,
+            },
+        );
+
+        let session = state.sessions.get("terminal-1").expect("session should exist");
+        assert_eq!(session.active_command.as_deref(), Some("claude"));
+        assert_eq!(session.assistant_provider, Some(AssistantProvider::Claude));
+        assert!(session.command_running);
+        assert!(!session.working);
+        assert!(!session.unread);
+    }
+
+    #[test]
     fn build_published_state_uses_observer_state_without_live_poll_data() {
         let mut state = ObserverState::default();
         state.sessions.insert(
@@ -1720,6 +1862,7 @@ mod tests {
             super::SessionState {
                 active_command: Some("codex".to_string()),
                 assistant_provider: Some(AssistantProvider::Codex),
+                command_running: true,
                 working: true,
                 unread: false,
                 lifecycle_managed: true,
