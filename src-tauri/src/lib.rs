@@ -61,6 +61,7 @@ pub fn run() {
             git::git_push,
             git::git_create_pr,
             git::git_merge_pr,
+            git::git_rerun_failed_checks,
             gcloud::gcloud_authenticate,
             gcloud::gcloud_configure,
             gcloud::gcloud_installed,

@@ -173,3 +173,7 @@ export function gitCreatePr(workspace: string): Promise<GitTerminalResult> {
 export function gitMergePr(workspace: string): Promise<void> {
 	return invoke<void>("git_merge_pr", { workspace });
 }
+
+export function gitRerunFailedChecks(workspace: string): Promise<void> {
+	return invoke<void>("git_rerun_failed_checks", { workspace });
+}

@@ -726,7 +726,7 @@ function ChecksTab({
 					<span className="text-[10px] text-text-muted font-medium uppercase tracking-wide">
 						Checks
 					</span>
-					{data.checks.map((c) => (
+					{[...data.checks].sort((a, b) => a.name.localeCompare(b.name)).map((c) => (
 						<button
 							key={c.id}
 							type="button"

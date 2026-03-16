@@ -449,6 +449,42 @@ pub async fn git_merge_pr(workspace: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn git_rerun_failed_checks(workspace: String) -> Result<(), String> {
+    log::info!("rerunning failed checks for workspace {workspace}");
+    let context = branch_workspace_context(&workspace).await?;
+    let branch = current_workspace_branch(&context).await?;
+    let pr = find_open_pull_request(&context)
+        .await?
+        .ok_or_else(|| format!("no open pull request found for branch {}", branch))?;
+
+    let mut run_ids: Vec<String> = fetch_pr_checks(&context, &pr)
+        .await?
+        .into_iter()
+        .filter(|check| is_rerunnable_failed_check_state(check.state))
+        .filter_map(|check| check.link.as_deref().and_then(github_actions_run_id))
+        .collect();
+    run_ids.sort_unstable();
+    run_ids.dedup();
+
+    if run_ids.is_empty() {
+        return Err("no failed GitHub Actions checks to rerun".to_string());
+    }
+
+    for run_id in run_ids {
+        let result =
+            run_workspace_command(&context, &rerun_failed_checks_remote_command(&run_id)).await?;
+        if !result.success {
+            return Err(git_error(
+                "failed to rerun failed pull request checks",
+                &result.stderr,
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn git_create_pr(
     state: State<'_, TerminalManager>,
     workspace: String,
@@ -807,6 +843,10 @@ git fetch --quiet origin \"$TARGET_BRANCH\"\n\
 git rebase \"origin/$TARGET_BRANCH\"",
         target_branch = shell_quote(target_branch),
     )
+}
+
+fn rerun_failed_checks_remote_command(run_id: &str) -> String {
+    format!("gh run rerun {} --failed", shell_quote(run_id))
 }
 
 fn tree_dirty_remote_command() -> &'static str {
@@ -1295,6 +1335,23 @@ fn github_actions_job_id(link: &str) -> Option<String> {
     }
 }
 
+fn github_actions_run_id(link: &str) -> Option<String> {
+    let (_, tail) = link.split_once("/actions/runs/")?;
+    let id: String = tail.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+fn is_rerunnable_failed_check_state(state: CheckState) -> bool {
+    matches!(
+        state,
+        CheckState::Failure | CheckState::TimedOut | CheckState::StartupFailure
+    )
+}
+
 fn parse_check_state(value: Option<&str>) -> CheckState {
     let normalized = value
         .unwrap_or_default()
@@ -1615,6 +1672,12 @@ index 1111111..2222222 100644\n\
     }
 
     #[test]
+    fn rerun_failed_checks_remote_command_targets_failed_jobs_only() {
+        let command = rerun_failed_checks_remote_command("123456789");
+        assert_eq!(command, "gh run rerun '123456789' --failed");
+    }
+
+    #[test]
     fn trim_branch_input_rejects_empty_values() {
         assert_eq!(
             trim_branch_input("  feature/test  ", "branch").expect("branch should trim"),
@@ -1642,6 +1705,31 @@ index 1111111..2222222 100644\n\
             Some("987654321".to_string())
         );
         assert_eq!(github_actions_job_id("https://example.com"), None);
+    }
+
+    #[test]
+    fn github_actions_run_id_extracts_run_segment() {
+        assert_eq!(
+            github_actions_run_id(
+                "https://github.com/example/repo/actions/runs/123456789/job/987654321"
+            ),
+            Some("123456789".to_string())
+        );
+        assert_eq!(
+            github_actions_run_id("https://github.com/example/repo/checks?check_run_id=42"),
+            None
+        );
+    }
+
+    #[test]
+    fn is_rerunnable_failed_check_state_matches_strict_failed_states() {
+        assert!(is_rerunnable_failed_check_state(CheckState::Failure));
+        assert!(is_rerunnable_failed_check_state(CheckState::TimedOut));
+        assert!(is_rerunnable_failed_check_state(CheckState::StartupFailure));
+        assert!(!is_rerunnable_failed_check_state(CheckState::Cancelled));
+        assert!(!is_rerunnable_failed_check_state(CheckState::Success));
+        assert!(!is_rerunnable_failed_check_state(CheckState::Neutral));
+        assert!(!is_rerunnable_failed_check_state(CheckState::Skipped));
     }
 
     #[test]
