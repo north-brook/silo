@@ -33,6 +33,9 @@ pub struct BranchWorkspace {
 pub struct TemplateWorkspace {
     #[serde(flatten)]
     base: WorkspaceBase,
+    unread: bool,
+    working: Option<bool>,
+    sessions: Vec<WorkspaceSession>,
     template: bool,
 }
 
@@ -141,7 +144,7 @@ impl Workspace {
     pub(crate) fn sessions(&self) -> &[WorkspaceSession] {
         match self {
             Self::Branch(workspace) => &workspace.sessions,
-            Self::Template(_) => &[],
+            Self::Template(workspace) => &workspace.sessions,
         }
     }
 }
@@ -650,6 +653,9 @@ fn pending_template_workspace(name: &str, project_label: &str, zone: &str) -> Te
             zone: zone.to_string(),
             ready: false,
         },
+        unread: false,
+        working: None,
+        sessions: Vec::new(),
         template: true,
     }
 }
@@ -1511,24 +1517,28 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         ready,
     };
 
+    let unread = metadata
+        .get("unread")
+        .map(|value| parse_bool_value("unread", value))
+        .transpose()?
+        .unwrap_or(false);
+    let working = metadata
+        .get("working")
+        .map(|value| parse_bool_value("working", value))
+        .transpose()?;
+    let sessions = parse_workspace_sessions(metadata.get("sessions"));
+
     if template {
         Ok(Workspace::Template(TemplateWorkspace {
             base,
+            unread,
+            working,
+            sessions,
             template: true,
         }))
     } else {
         let branch = metadata.get("branch").cloned().unwrap_or_default();
         let target_branch = metadata.get("target_branch").cloned().unwrap_or_default();
-        let unread = metadata
-            .get("unread")
-            .map(|value| parse_bool_value("unread", value))
-            .transpose()?
-            .unwrap_or(false);
-        let working = metadata
-            .get("working")
-            .map(|value| parse_bool_value("working", value))
-            .transpose()?;
-        let sessions = parse_workspace_sessions(metadata.get("sessions"));
 
         Ok(Workspace::branch(
             base,
@@ -2584,6 +2594,52 @@ mod tests {
         assert!(!workspace.base.ready);
         assert_eq!(workspace.base.name, "template-demo-123");
         assert_eq!(workspace.base.project.as_deref(), Some("demo"));
+        assert!(!workspace.unread);
+        assert_eq!(workspace.working, None);
+        assert!(workspace.sessions.is_empty());
+    }
+
+    #[test]
+    fn parse_workspace_maps_template_session_metadata() {
+        let workspace = parse_workspace(&json!({
+            "name": "template-demo-123",
+            "zone": "us-east1-b",
+            "status": "RUNNING",
+            "creationTimestamp": "2026-03-11T13:00:00.000-04:00",
+            "labels": {
+                "project": "demo",
+                "template": "true",
+                "ready": "true"
+            },
+            "metadata": {
+                "items": [
+                    { "key": "last_active", "value": "2026-03-16T04:18:39Z" },
+                    { "key": "working", "value": "false" },
+                    { "key": "unread", "value": "false" },
+                    { "key": "sessions", "value": "[{\"type\":\"terminal\",\"name\":\"bun run build:render\",\"attachment_id\":\"terminal-1773634611341\"}]" }
+                ]
+            }
+        }))
+        .expect("workspace should parse");
+
+        let Workspace::Template(workspace) = workspace else {
+            panic!("workspace should parse as a template workspace");
+        };
+
+        assert!(workspace.template);
+        assert!(workspace.base.ready);
+        assert_eq!(
+            workspace.base.last_active.as_deref(),
+            Some("2026-03-16T04:18:39Z")
+        );
+        assert!(!workspace.unread);
+        assert_eq!(workspace.working, Some(false));
+        assert_eq!(workspace.sessions.len(), 1);
+        assert_eq!(workspace.sessions[0].name, "bun run build:render");
+        assert_eq!(
+            workspace.sessions[0].attachment_id,
+            "terminal-1773634611341"
+        );
     }
 
     #[test]
