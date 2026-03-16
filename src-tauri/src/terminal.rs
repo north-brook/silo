@@ -1743,11 +1743,45 @@ if [ -n \"${{ZSH_VERSION:-}}\" ]; then\n\
     *) add-zsh-hook zshexit _silo_observer_zshexit ;;\n\
   esac\n\
 elif [ -n \"${{BASH_VERSION:-}}\" ]; then\n\
+  SILO_OBSERVER_LAST_COMMAND=\"${{SILO_OBSERVER_LAST_COMMAND:-}}\"\n\
+  SILO_OBSERVER_BASH_IN_PROMPT=0\n\
+  _silo_observer_bash_preexec() {{\n\
+    local exit_code=$?\n\
+    [ -n \"${{SILO_OBSERVER_HOOK:-}}\" ] && return $exit_code\n\
+    [ -n \"${{ZMX_SESSION:-}}\" ] || return $exit_code\n\
+    [ \"${{SILO_OBSERVER_BASH_IN_PROMPT:-0}}\" = \"1\" ] && return $exit_code\n\
+    case \"$BASH_COMMAND\" in\n\
+      _silo_observer_*|trap*|history*|\"PROMPT_COMMAND=\"*) return $exit_code ;;\n\
+    esac\n\
+    if [ -n \"${{SILO_OBSERVER_LAST_COMMAND:-}}\" ] && [ \"$BASH_COMMAND\" = \"$SILO_OBSERVER_LAST_COMMAND\" ]; then\n\
+      return $exit_code\n\
+    fi\n\
+    SILO_OBSERVER_LAST_COMMAND=\"$BASH_COMMAND\"\n\
+    _silo_observer_emit --kind shell_command_started --session \"$ZMX_SESSION\" --command \"$BASH_COMMAND\"\n\
+    return $exit_code\n\
+  }}\n\
+  _silo_observer_bash_precmd() {{\n\
+    local exit_code=$?\n\
+    SILO_OBSERVER_BASH_IN_PROMPT=1\n\
+    [ -n \"${{SILO_OBSERVER_HOOK:-}}\" ] && {{ SILO_OBSERVER_BASH_IN_PROMPT=0; return $exit_code; }}\n\
+    [ -n \"${{ZMX_SESSION:-}}\" ] || {{ SILO_OBSERVER_BASH_IN_PROMPT=0; return $exit_code; }}\n\
+    if [ -n \"${{SILO_OBSERVER_LAST_COMMAND:-}}\" ]; then\n\
+      _silo_observer_emit --kind shell_command_finished --session \"$ZMX_SESSION\"\n\
+      SILO_OBSERVER_LAST_COMMAND=\"\"\n\
+    fi\n\
+    SILO_OBSERVER_BASH_IN_PROMPT=0\n\
+    return $exit_code\n\
+  }}\n\
   _silo_observer_bash_exit() {{\n\
     [ -n \"${{ZMX_SESSION:-}}\" ] || return 0\n\
     [ -n \"${{SILO_OBSERVER_SESSION_REGISTERED:-}}\" ] || return 0\n\
     _silo_observer_emit --kind shell_session_exited --session \"$ZMX_SESSION\"\n\
   }}\n\
+  trap _silo_observer_bash_preexec DEBUG\n\
+  case \";${{PROMPT_COMMAND:-}};\" in\n\
+    *\";_silo_observer_bash_precmd;\"*) ;;\n\
+    *) PROMPT_COMMAND=\"_silo_observer_bash_precmd${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}\" ;;\n\
+  esac\n\
   trap _silo_observer_bash_exit EXIT\n\
 fi\n",
         observer_bin = shell_quote(REMOTE_WORKSPACE_OBSERVER_BIN),
