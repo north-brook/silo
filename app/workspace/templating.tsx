@@ -1,10 +1,9 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Check, Laptop, Terminal } from "lucide-react";
+import { Check, Globe, Terminal } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { type ReactNode, useEffect, useState } from "react";
-import { ChromeIcon } from "../../components/icons/chrome";
 import { ClaudeIcon } from "../../components/icons/claude";
 import { CodexIcon } from "../../components/icons/codex";
 import { GCloudIcon } from "../../components/icons/gcloud";
@@ -46,7 +45,7 @@ const CONFIG_STEPS: ConfigStep[] = [
 	},
 	{
 		label: "Configuring chrome",
-		icon: <ChromeIcon height={ICON_SIZE} />,
+		icon: <Globe size={ICON_SIZE} />,
 		delay: 30_000,
 	},
 ];
@@ -179,11 +178,14 @@ export function TemplatingWorkspace({
 			invoke<{ attachment_id: string }>("terminal_create_terminal", {
 				workspace,
 			}),
-		onSuccess: (result) => {
-			queryClient.invalidateQueries({
-				queryKey: ["terminal_list_terminals", workspace],
-			});
-			router.push(
+			onSuccess: (result) => {
+				queryClient.invalidateQueries({
+					queryKey: ["terminal_list_terminals", workspace],
+				});
+				queryClient.invalidateQueries({
+					queryKey: ["workspaces_get_workspace", workspace],
+				});
+				router.push(
 				cloudSessionHref({
 					project: project ?? "",
 					workspace,
@@ -230,8 +232,8 @@ export function TemplatingWorkspace({
 							type="button"
 							className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-text-muted hover:text-text transition-colors"
 						>
-							<Laptop size={12} />
-							Open Desktop
+							<Globe size={12} />
+							Open Browser
 						</button>
 					</div>
 				)}

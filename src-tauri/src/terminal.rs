@@ -9,12 +9,12 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Emitter, EventTarget, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, EventTarget, State, Window};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use uuid::Uuid;
 
@@ -26,63 +26,24 @@ const MAX_SCROLLBACK_BYTES: usize = 512 * 1024;
 const ATTACH_COMMAND_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const ATTACH_RESERVATION_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const ATTACH_RESERVATION_WAIT_INTERVAL: Duration = Duration::from_millis(50);
-const WORKSPACE_METADATA_RESERVATION_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
-const WORKSPACE_METADATA_RESERVATION_WAIT_INTERVAL: Duration = Duration::from_millis(50);
-const WORKSPACE_METADATA_WRITE_RETRY_ATTEMPTS: usize = 4;
-const WORKSPACE_METADATA_WRITE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const TERMINAL_USER: &str = "silo";
 pub(crate) const TERMINAL_WORKSPACE_DIR: &str = "/home/silo/workspace";
 const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
 const REMOTE_BOOTSTRAP_STATE_FILE: &str = "/home/silo/.silo/workspace-bootstrap-state";
 const REMOTE_BOOTSTRAP_LOCK_DIR: &str = "/home/silo/.silo/workspace-bootstrap.lock";
-const REMOTE_CHROME_USER_DATA_DIR: &str = "/home/silo/.config/google-chrome";
 const REMOTE_WORKSPACE_OBSERVER_BIN: &str = "/home/silo/.silo/bin/workspace-observer";
 const REMOTE_WORKSPACE_OBSERVER_PIDFILE: &str = "/home/silo/.silo/workspace-observer/daemon.pid";
 const REMOTE_WORKSPACE_OBSERVER_SHELL_FILE: &str = "/home/silo/.silo/workspace-observer-shell.sh";
-const WORKSPACE_BOOTSTRAP_VERSION: &str = "10";
+const WORKSPACE_BOOTSTRAP_VERSION: &str = "11";
 const TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS: usize = 60;
 const TEMPLATE_BOOTSTRAP_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const WORKSPACE_OBSERVER_BIN_BYTES: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
     "/workspace-observer-x86_64-unknown-linux-musl"
 ));
-const CHROME_PROFILE_SYNC_PATHS: &[&str] = &[
-    "Local State",
-    "First Run",
-    "Last Version",
-    "Default/Preferences",
-    "Default/Secure Preferences",
-    "Default/Bookmarks",
-    "Default/Bookmarks.bak",
-    "Default/History",
-    "Default/History-journal",
-    "Default/Favicons",
-    "Default/Favicons-journal",
-    "Default/Web Data",
-    "Default/Web Data-journal",
-    "Default/Login Data",
-    "Default/Login Data-journal",
-    "Default/Login Data For Account",
-    "Default/Cookies",
-    "Default/Cookies-journal",
-    "Default/Network Persistent State",
-    "Default/Account Web Data",
-    "Default/Affiliation Database",
-    "Default/Session Storage",
-    "Default/Local Storage",
-    "Default/IndexedDB",
-    "Default/Service Worker",
-    "Default/Accounts",
-    "Default/trusted_vault.pb",
-];
-
-static TEMPLATE_CHROME_SYNC_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
 static TEMPLATE_BOOTSTRAP_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 static WORKSPACE_SSH_READY_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
-static WORKSPACE_METADATA_WRITES_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -169,10 +130,6 @@ struct AttachmentReservation {
     key: AttachmentKey,
 }
 
-struct WorkspaceMetadataReservation {
-    workspace: String,
-}
-
 enum AttachmentSlot {
     Existing(Arc<Attachment>),
     Reserved(AttachmentReservation),
@@ -181,14 +138,6 @@ enum AttachmentSlot {
 impl Drop for AttachmentReservation {
     fn drop(&mut self) {
         self.manager.release_reservation(&self.key);
-    }
-}
-
-impl Drop for WorkspaceMetadataReservation {
-    fn drop(&mut self) {
-        if let Ok(mut writes) = WORKSPACE_METADATA_WRITES_IN_FLIGHT.lock() {
-            writes.remove(&self.workspace);
-        }
     }
 }
 
@@ -271,8 +220,6 @@ struct WorkspaceBootstrap {
     workspace_branch: Option<String>,
     gh_username: String,
     gh_token: String,
-    chrome_user_data_dir: String,
-    chrome_user_data_hash: String,
     codex_token: String,
     claude_token: String,
     git_user_name: String,
@@ -297,15 +244,21 @@ pub async fn terminal_create_terminal(workspace: String) -> Result<TerminalCreat
         .map(|session| session.attachment_id)
         .collect::<HashSet<_>>();
     let attachment_id = generate_terminal_attachment_id(&existing_names);
-    let session = WorkspaceSession {
-        kind: "terminal".to_string(),
-        name: "shell".to_string(),
-        attachment_id: attachment_id.clone(),
-        working: None,
-        unread: None,
-    };
-    write_workspace_terminal_metadata(&workspace, SessionMutation::Upsert(session.clone())).await?;
+    Ok(TerminalCreateResult { attachment_id })
+}
 
+#[tauri::command]
+pub async fn terminal_create_assistant(
+    state: State<'_, TerminalManager>,
+    workspace: String,
+    model: String,
+) -> Result<TerminalCreateResult, String> {
+    let command = match model.trim() {
+        "codex" => "silo codex",
+        "claude" => "silo claude",
+        other => return Err(format!("unsupported assistant model: {other}")),
+    };
+    let attachment_id = start_terminal_command(state.inner(), &workspace, command).await?;
     Ok(TerminalCreateResult { attachment_id })
 }
 
@@ -319,7 +272,7 @@ pub async fn terminal_list_terminals(workspace: String) -> Result<Vec<WorkspaceS
 #[tauri::command]
 pub async fn terminal_attach_terminal(
     app: AppHandle,
-    window: WebviewWindow,
+    window: Window,
     state: State<'_, TerminalManager>,
     workspace: String,
     attachment_id: String,
@@ -344,10 +297,6 @@ pub async fn terminal_attach_terminal(
         name: attachment_id.clone(),
     };
     let startup_command = command.or_else(|| state.take_startup_command(&key));
-    if let Some(command) = startup_command.as_deref() {
-        let session = session_for_command(&attachment_id, command);
-        write_workspace_terminal_metadata(&workspace, SessionMutation::Upsert(session)).await?;
-    }
 
     let _reservation = match wait_for_attachment_slot(state.inner(), &key, &attachment_id).await? {
         AttachmentSlot::Existing(existing) => {
@@ -416,7 +365,6 @@ pub async fn terminal_run_terminal(
     let created = find_terminal_session(&lookup, &attachment_id)
         .await?
         .is_none();
-    write_workspace_terminal_metadata(&workspace, SessionMutation::Upsert(session.clone())).await?;
     let result = run_remote_command(
         &lookup,
         &terminal_run_remote_command(&attachment_id, &command),
@@ -495,9 +443,6 @@ pub async fn terminal_kill_terminal(
         ));
     }
 
-    write_workspace_terminal_metadata(&workspace, SessionMutation::Remove(attachment_id.clone()))
-        .await?;
-
     let key = AttachmentKey {
         workspace,
         name: attachment_id,
@@ -515,8 +460,6 @@ pub async fn terminal_read_terminal(
     attachment_id: String,
 ) -> Result<TerminalReadResult, String> {
     let lookup = workspaces::find_workspace(&workspace).await?;
-    write_workspace_terminal_metadata(&workspace, SessionMutation::MarkRead(attachment_id.clone()))
-        .await?;
     let command = run_terminal_user_command(&format!(
         "if [ -x {observer_bin} ]; then {observer_bin} mark-read --session {attachment_id}; fi",
         observer_bin = shell_quote(REMOTE_WORKSPACE_OBSERVER_BIN),
@@ -803,7 +746,7 @@ async fn attach_existing_terminal(
     lookup: &WorkspaceLookup,
     name: &str,
     scrollback_mode: AttachScrollbackMode,
-    window: &WebviewWindow,
+    window: &Window,
     output: Channel<Vec<u8>>,
     command: Option<String>,
     attach_started: Instant,
@@ -870,7 +813,7 @@ fn write_attachment_input(attachment: &Attachment, data: &[u8]) -> Result<(), St
 async fn list_terminals_in_workspace(
     lookup: &WorkspaceLookup,
 ) -> Result<Vec<WorkspaceSession>, String> {
-    let mut sessions = lookup.workspace.sessions().to_vec();
+    let mut sessions = lookup.workspace.terminals().to_vec();
     sort_workspace_sessions_oldest_to_newest(&mut sessions);
     Ok(sessions)
 }
@@ -1008,9 +951,6 @@ async fn bootstrap_workspace(lookup: &WorkspaceLookup) -> Result<(), String> {
         started.elapsed().as_millis()
     );
 
-    if lookup.workspace.is_template() {
-        spawn_template_chrome_profile_sync(lookup.clone(), bootstrap);
-    }
     Ok(())
 }
 
@@ -1151,19 +1091,6 @@ pub(crate) async fn wait_for_template_bootstrap(workspace: &str) -> Result<(), S
 
     Err(format!(
         "template workspace {workspace} did not finish bootstrapping in time"
-    ))
-}
-
-pub(crate) async fn wait_for_template_chrome_sync(workspace: &str) -> Result<(), String> {
-    for _ in 0..TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS {
-        if !template_chrome_sync_in_progress(workspace) {
-            return Ok(());
-        }
-        std::thread::sleep(TEMPLATE_BOOTSTRAP_POLL_INTERVAL);
-    }
-
-    Err(format!(
-        "chrome profile sync is still running for template workspace {workspace}"
     ))
 }
 
@@ -1368,20 +1295,12 @@ fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, S
         Some(branch)
     };
 
-    let (chrome_user_data_dir, chrome_user_data_hash) = if lookup.workspace.is_template() {
-        load_bootstrap_chrome_profile(&config.chrome.user_data_dir)
-    } else {
-        (String::new(), String::new())
-    };
-
     Ok(WorkspaceBootstrap {
         remote_url: project.remote_url.clone(),
         target_branch,
         workspace_branch,
         gh_username: config.git.gh_username.clone(),
         gh_token: config.git.gh_token.clone(),
-        chrome_user_data_dir,
-        chrome_user_data_hash,
         codex_token: config.codex.token.clone(),
         claude_token: config.claude.token.clone(),
         git_user_name: config.git.user_name.clone(),
@@ -1564,7 +1483,7 @@ fn bootstrap_git_command(command: &str) -> String {
 
 fn workspace_bootstrap_signature(workspace_name: &str, bootstrap: &WorkspaceBootstrap) -> String {
     format!(
-        "version={}\nworkspace={}\nremote_url={}\ntarget_branch={}\nworkspace_branch={}\ngh_username={}\ngh_token={}\nchrome_user_data_dir={}\nchrome_user_data_hash={}\ncodex_token={}\nclaude_token={}\ngit_user_name={}\ngit_user_email={}\nenv_files={}\nobserver_sources={}",
+        "version={}\nworkspace={}\nremote_url={}\ntarget_branch={}\nworkspace_branch={}\ngh_username={}\ngh_token={}\ncodex_token={}\nclaude_token={}\ngit_user_name={}\ngit_user_email={}\nenv_files={}\nobserver_sources={}",
         WORKSPACE_BOOTSTRAP_VERSION,
         workspace_name,
         bootstrap.remote_url,
@@ -1572,8 +1491,6 @@ fn workspace_bootstrap_signature(workspace_name: &str, bootstrap: &WorkspaceBoot
         bootstrap.workspace_branch.as_deref().unwrap_or(""),
         bootstrap.gh_username,
         bootstrap.gh_token,
-        bootstrap.chrome_user_data_dir,
-        bootstrap.chrome_user_data_hash,
         bootstrap.codex_token,
         bootstrap.claude_token,
         bootstrap.git_user_name,
@@ -1581,45 +1498,6 @@ fn workspace_bootstrap_signature(workspace_name: &str, bootstrap: &WorkspaceBoot
         bootstrap_env_files_signature(&bootstrap.env_files),
         workspace_observer_source_signature(),
     )
-}
-
-fn load_bootstrap_chrome_profile(configured_path: &str) -> (String, String) {
-    let trimmed = configured_path.trim();
-    if trimmed.is_empty() {
-        return (String::new(), String::new());
-    }
-
-    let source_dir = PathBuf::from(trimmed);
-    if !source_dir.is_dir() {
-        log::warn!(
-            "skipping missing chrome user data directory configured for bootstrap: {}",
-            source_dir.display()
-        );
-        return (String::new(), String::new());
-    }
-
-    let sync_paths = chrome_profile_sync_paths(&source_dir);
-    if sync_paths.is_empty() {
-        log::warn!(
-            "skipping chrome profile bootstrap because no syncable profile data was found in {}",
-            source_dir.display()
-        );
-        return (String::new(), String::new());
-    }
-
-    let hash = match hash_chrome_profile_dir(&source_dir, &sync_paths) {
-        Ok(hash) => hash,
-        Err(error) => {
-            log::warn!(
-                "skipping chrome profile bootstrap because hashing failed for {}: {}",
-                source_dir.display(),
-                error
-            );
-            return (String::new(), String::new());
-        }
-    };
-
-    (source_dir.to_string_lossy().into_owned(), hash)
 }
 
 fn load_bootstrap_env_files(
@@ -1693,103 +1571,6 @@ fn bootstrap_env_files_signature(env_files: &[BootstrapEnvFile]) -> String {
         .map(|env_file| format!("{}:{}", env_file.relative_path, env_file.contents_sha256))
         .collect::<Vec<_>>()
         .join(",")
-}
-
-fn chrome_profile_sync_paths(source_dir: &Path) -> Vec<PathBuf> {
-    CHROME_PROFILE_SYNC_PATHS
-        .iter()
-        .map(Path::new)
-        .filter(|relative_path| source_dir.join(relative_path).exists())
-        .map(PathBuf::from)
-        .collect()
-}
-
-fn hash_chrome_profile_dir(source_dir: &Path, sync_paths: &[PathBuf]) -> Result<String, String> {
-    let mut hasher = Sha256::new();
-    for sync_path in sync_paths {
-        hash_chrome_profile_entry(source_dir, &source_dir.join(sync_path), &mut hasher)?;
-    }
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-fn hash_chrome_profile_entry(root: &Path, path: &Path, hasher: &mut Sha256) -> Result<(), String> {
-    let relative_path = path.strip_prefix(root).map_err(|error| {
-        format!(
-            "failed to normalize chrome path {}: {error}",
-            path.display()
-        )
-    })?;
-
-    if !relative_path.as_os_str().is_empty() && should_skip_chrome_profile_entry(relative_path) {
-        return Ok(());
-    }
-
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("failed to read chrome path {}: {error}", path.display()))?;
-    let relative = relative_path.to_string_lossy();
-
-    if metadata.file_type().is_symlink() {
-        hasher.update(b"L");
-        hasher.update(relative.as_bytes());
-        let link_target = fs::read_link(path).map_err(|error| {
-            format!("failed to read chrome symlink {}: {error}", path.display())
-        })?;
-        hasher.update(link_target.to_string_lossy().as_bytes());
-        return Ok(());
-    }
-
-    if metadata.is_file() {
-        hasher.update(b"F");
-        hasher.update(relative.as_bytes());
-        let mut file = fs::File::open(path)
-            .map_err(|error| format!("failed to open chrome file {}: {error}", path.display()))?;
-        let mut buffer = [0u8; 8192];
-        loop {
-            let count = file.read(&mut buffer).map_err(|error| {
-                format!("failed to read chrome file {}: {error}", path.display())
-            })?;
-            if count == 0 {
-                break;
-            }
-            hasher.update(&buffer[..count]);
-        }
-        return Ok(());
-    }
-
-    if metadata.is_dir() {
-        hasher.update(b"D");
-        hasher.update(relative.as_bytes());
-        let mut entries: Vec<PathBuf> = fs::read_dir(path)
-            .map_err(|error| {
-                format!(
-                    "failed to list chrome directory {}: {error}",
-                    path.display()
-                )
-            })?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .collect();
-        entries.sort();
-
-        for entry in entries {
-            hash_chrome_profile_entry(root, &entry, hasher)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn should_skip_chrome_profile_entry(relative_path: &Path) -> bool {
-    relative_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .map(|name| {
-            matches!(
-                name,
-                "SingletonCookie" | "SingletonLock" | "SingletonSocket" | "DevToolsActivePort"
-            )
-        })
-        .unwrap_or(false)
 }
 
 fn workspace_env_file_sync_script(env_files: &[BootstrapEnvFile]) -> String {
@@ -2065,47 +1846,6 @@ fn terminal_shell_command(command: &str) -> String {
     )
 }
 
-async fn sync_template_chrome_profile(
-    lookup: &WorkspaceLookup,
-    bootstrap: &WorkspaceBootstrap,
-) -> Result<(), String> {
-    if bootstrap.chrome_user_data_dir.is_empty() {
-        return Ok(());
-    }
-
-    let source_dir = PathBuf::from(&bootstrap.chrome_user_data_dir);
-    if !source_dir.is_dir() {
-        log::warn!(
-            "skipping missing chrome user data directory during template bootstrap: {}",
-            source_dir.display()
-        );
-        return Ok(());
-    }
-
-    let sync_paths = chrome_profile_sync_paths(&source_dir);
-    if sync_paths.is_empty() {
-        log::warn!(
-            "skipping empty chrome profile sync set for template workspace {} from {}",
-            lookup.workspace.name(),
-            source_dir.display()
-        );
-        return Ok(());
-    }
-
-    let remote_command = chrome_profile_remote_sync_command();
-    let result =
-        run_remote_command_with_tar_stream(lookup, &remote_command, &source_dir, sync_paths)
-            .await?;
-    if !result.success {
-        return Err(remote_command_error(
-            "failed to sync chrome profile into template workspace",
-            &result.stderr,
-        ));
-    }
-
-    Ok(())
-}
-
 async fn persist_workspace_bootstrap_state(
     lookup: &WorkspaceLookup,
     signature: &str,
@@ -2132,55 +1872,6 @@ fn persist_workspace_bootstrap_state_command(signature: &str) -> String {
 
 fn clear_template_runtime_state_command() -> String {
     "rm -rf \"$HOME/.silo\"".to_string()
-}
-
-fn spawn_template_chrome_profile_sync(lookup: WorkspaceLookup, bootstrap: WorkspaceBootstrap) {
-    if bootstrap.chrome_user_data_dir.is_empty() || bootstrap.chrome_user_data_hash.is_empty() {
-        return;
-    }
-
-    let workspace_name = lookup.workspace.name().to_string();
-    let inserted = TEMPLATE_CHROME_SYNC_IN_FLIGHT
-        .lock()
-        .map(|mut in_flight| in_flight.insert(workspace_name.clone()))
-        .unwrap_or(false);
-    if !inserted {
-        return;
-    }
-
-    tauri::async_runtime::spawn(async move {
-        let result = sync_template_chrome_profile(&lookup, &bootstrap).await;
-        if let Err(error) = result {
-            log::warn!(
-                "background chrome profile sync failed for template workspace {}: {}",
-                workspace_name,
-                error
-            );
-        } else {
-            log::info!(
-                "background chrome profile sync completed for template workspace {}",
-                workspace_name
-            );
-        }
-
-        if let Ok(mut in_flight) = TEMPLATE_CHROME_SYNC_IN_FLIGHT.lock() {
-            in_flight.remove(&workspace_name);
-        }
-    });
-}
-
-fn template_chrome_sync_in_progress(workspace: &str) -> bool {
-    TEMPLATE_CHROME_SYNC_IN_FLIGHT
-        .lock()
-        .map(|in_flight| in_flight.contains(workspace))
-        .unwrap_or(false)
-}
-
-fn chrome_profile_remote_sync_command() -> String {
-    let remote_dir = shell_quote(REMOTE_CHROME_USER_DATA_DIR);
-    run_terminal_user_command(&format!(
-        "mkdir -p \"$HOME/.config\" && rm -rf {remote_dir} && mkdir -p {remote_dir} && tar -xzf - -C {remote_dir} --strip-components=1 && chmod 700 \"$HOME/.config\" {remote_dir} && chmod -R u=rwX,go= {remote_dir}",
-    ))
 }
 
 pub(crate) async fn run_remote_command(
@@ -2260,94 +1951,6 @@ fn command_result_with_stdin_write_error(output: Output, error: &std::io::Error)
         format!("{}\n{write_error}", result.stderr.trim_end())
     };
     result
-}
-
-async fn run_remote_command_with_tar_stream(
-    lookup: &WorkspaceLookup,
-    remote_command: &str,
-    source_dir: &Path,
-    sync_paths: Vec<PathBuf>,
-) -> Result<CommandResult, String> {
-    let account = lookup.account.clone();
-    let project = lookup.gcloud_project.clone();
-    let workspace = lookup.workspace.name().to_string();
-    let zone = lookup.workspace.zone().to_string();
-    let remote_command = remote_command.to_string();
-    let source_dir = source_dir.to_path_buf();
-    let sync_paths = sync_paths;
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let parent = source_dir.parent().ok_or_else(|| {
-            format!(
-                "chrome user data directory has no parent: {}",
-                source_dir.display()
-            )
-        })?;
-        let file_name = source_dir
-            .file_name()
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| {
-                format!(
-                    "chrome user data directory has no terminal path segment: {}",
-                    source_dir.display()
-                )
-            })?;
-
-        let mut tar = Command::new("tar");
-        tar.arg("-C").arg(parent);
-        tar.arg("-czf").arg("-");
-        for sync_path in &sync_paths {
-            tar.arg(Path::new(file_name).join(sync_path));
-        }
-        tar.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-        let mut tar_child = tar
-            .spawn()
-            .map_err(|error| format!("failed to start tar for chrome profile sync: {error}"))?;
-
-        let mut command =
-            build_gcloud_ssh_command(&account, &project, &workspace, &zone, Some(remote_command));
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut gcloud = command
-            .spawn()
-            .map_err(|error| format!("failed to execute gcloud ssh: {error}"))?;
-
-        let mut tar_stdout = tar_child
-            .stdout
-            .take()
-            .ok_or_else(|| "failed to capture tar stdout".to_string())?;
-        let mut gcloud_stdin = gcloud
-            .stdin
-            .take()
-            .ok_or_else(|| "failed to open gcloud ssh stdin".to_string())?;
-        std::io::copy(&mut tar_stdout, &mut gcloud_stdin)
-            .map_err(|error| format!("failed to stream chrome profile archive: {error}"))?;
-        drop(gcloud_stdin);
-
-        let tar_output = tar_child
-            .wait_with_output()
-            .map_err(|error| format!("failed to read tar output: {error}"))?;
-        if !tar_output.status.success() {
-            return Err(format!(
-                "failed to create chrome profile archive: {}",
-                String::from_utf8_lossy(&tar_output.stderr).trim()
-            ));
-        }
-
-        let output = gcloud
-            .wait_with_output()
-            .map_err(|error| format!("failed to read gcloud ssh output: {error}"))?;
-        Ok(CommandResult {
-            success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
-    })
-    .await
-    .map_err(|error| format!("gcloud ssh task failed: {error}"))?
 }
 
 fn build_gcloud_ssh_command(
@@ -2441,6 +2044,13 @@ fn pending_terminal_session(attachment_id: &str) -> WorkspaceSession {
         kind: "terminal".to_string(),
         name: "shell".to_string(),
         attachment_id: attachment_id.to_string(),
+        url: None,
+        logical_url: None,
+        resolved_url: None,
+        title: None,
+        favicon_url: None,
+        can_go_back: None,
+        can_go_forward: None,
         working: None,
         unread: None,
     }
@@ -2457,27 +2067,29 @@ fn generate_terminal_attachment_id(existing_names: &HashSet<String>) -> String {
     }
 }
 
-fn current_unix_timestamp_millis() -> u128 {
+pub(crate) fn current_unix_timestamp_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
 }
 
-async fn sleep_for(duration: Duration) {
-    let _ = tauri::async_runtime::spawn_blocking(move || std::thread::sleep(duration)).await;
-}
-
-fn sort_workspace_sessions_oldest_to_newest(sessions: &mut [WorkspaceSession]) {
+pub(crate) fn sort_workspace_sessions_oldest_to_newest(sessions: &mut [WorkspaceSession]) {
     sessions.sort_by(|left, right| {
-        terminal_name_timestamp(&left.attachment_id)
-            .cmp(&terminal_name_timestamp(&right.attachment_id))
+        session_name_timestamp(&left.attachment_id)
+            .cmp(&session_name_timestamp(&right.attachment_id))
             .then_with(|| left.attachment_id.cmp(&right.attachment_id))
     });
 }
 
-fn terminal_name_timestamp(name: &str) -> Option<u128> {
-    name.strip_prefix("terminal-")?.parse::<u128>().ok()
+fn session_name_timestamp(name: &str) -> Option<u128> {
+    if let Some(timestamp) = name.strip_prefix("terminal-") {
+        return timestamp.parse::<u128>().ok();
+    }
+    if let Some(timestamp) = name.strip_prefix("browser-") {
+        return timestamp.parse::<u128>().ok();
+    }
+    None
 }
 
 fn truncate_scrollback(mut scrollback: String, max_bytes: usize) -> (String, bool) {
@@ -2494,177 +2106,6 @@ fn truncate_scrollback(mut scrollback: String, max_bytes: usize) -> (String, boo
     (scrollback, true)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SessionMutation {
-    Upsert(WorkspaceSession),
-    Remove(String),
-    MarkRead(String),
-}
-
-struct WorkspaceTerminalMetadata {
-    sessions: Vec<WorkspaceSession>,
-    unread: bool,
-    working: Option<bool>,
-    last_active: String,
-    last_working: Option<String>,
-}
-
-fn mutate_sessions(
-    current_sessions: &[WorkspaceSession],
-    current_last_working: Option<&str>,
-    mutation: SessionMutation,
-) -> WorkspaceTerminalMetadata {
-    let mut sessions = current_sessions.to_vec();
-    match mutation {
-        SessionMutation::Upsert(session) => {
-            if let Some(existing) = sessions
-                .iter_mut()
-                .find(|existing| existing.attachment_id == session.attachment_id)
-            {
-                *existing = session;
-            } else {
-                sessions.push(session);
-            }
-        }
-        SessionMutation::Remove(attachment_id) => {
-            sessions.retain(|session| session.attachment_id != attachment_id);
-        }
-        SessionMutation::MarkRead(attachment_id) => {
-            if let Some(session) = sessions
-                .iter_mut()
-                .find(|session| session.attachment_id == attachment_id)
-            {
-                if session.unread.is_some() {
-                    session.unread = Some(false);
-                }
-            }
-        }
-    }
-    sort_workspace_sessions_oldest_to_newest(&mut sessions);
-    let now = current_rfc3339_timestamp();
-    let working = sessions
-        .iter()
-        .any(|session| session.working == Some(true))
-        .then_some(true);
-    WorkspaceTerminalMetadata {
-        unread: sessions.iter().any(|session| session.unread == Some(true)),
-        working,
-        sessions,
-        last_active: now.clone(),
-        last_working: if working.is_some() {
-            Some(now)
-        } else {
-            current_last_working.map(str::to_string)
-        },
-    }
-}
-
-fn workspace_terminal_metadata_entries(
-    metadata: &WorkspaceTerminalMetadata,
-) -> Result<Vec<(String, String)>, String> {
-    let sessions_json =
-        serde_json::to_string(&metadata.sessions).map_err(|error| error.to_string())?;
-    let mut entries = vec![
-        ("sessions".to_string(), sessions_json),
-        (
-            "unread".to_string(),
-            if metadata.unread { "true" } else { "false" }.to_string(),
-        ),
-        (
-            "working".to_string(),
-            if metadata.working.unwrap_or(false) {
-                "true"
-            } else {
-                "false"
-            }
-            .to_string(),
-        ),
-        ("last_active".to_string(), metadata.last_active.clone()),
-    ];
-    if let Some(last_working) = metadata.last_working.as_deref() {
-        entries.push(("last_working".to_string(), last_working.to_string()));
-    }
-    Ok(entries)
-}
-
-fn is_workspace_metadata_fingerprint_conflict(error: &str) -> bool {
-    error.contains("Supplied fingerprint does not match current metadata fingerprint")
-}
-
-async fn wait_for_workspace_metadata_slot(
-    workspace: &str,
-) -> Result<WorkspaceMetadataReservation, String> {
-    let started = Instant::now();
-    loop {
-        if let Ok(mut writes) = WORKSPACE_METADATA_WRITES_IN_FLIGHT.lock() {
-            if !writes.contains(workspace) {
-                writes.insert(workspace.to_string());
-                return Ok(WorkspaceMetadataReservation {
-                    workspace: workspace.to_string(),
-                });
-            }
-        }
-        if started.elapsed() >= WORKSPACE_METADATA_RESERVATION_WAIT_TIMEOUT {
-            return Err(format!(
-                "workspace metadata update already in progress: {workspace}"
-            ));
-        }
-        sleep_for(WORKSPACE_METADATA_RESERVATION_WAIT_INTERVAL).await;
-    }
-}
-
-async fn write_workspace_terminal_metadata(
-    workspace: &str,
-    mutation: SessionMutation,
-) -> Result<(), String> {
-    let _reservation = wait_for_workspace_metadata_slot(workspace).await?;
-
-    for attempt in 0..WORKSPACE_METADATA_WRITE_RETRY_ATTEMPTS {
-        let lookup = workspaces::find_workspace(workspace).await?;
-        let metadata = mutate_sessions(
-            lookup.workspace.sessions(),
-            lookup.workspace.last_working(),
-            mutation.clone(),
-        );
-        let entries = workspace_terminal_metadata_entries(&metadata)?;
-        let borrowed_entries = entries
-            .iter()
-            .map(|(key, value)| (key.as_str(), value.as_str()))
-            .collect::<Vec<_>>();
-
-        match workspaces::set_workspace_metadata_entries(workspace, &borrowed_entries).await {
-            Ok(()) => {
-                log::trace!(
-                    "updated terminal metadata for workspace {} sessions={} unread={} working={}",
-                    lookup.workspace.name(),
-                    metadata.sessions.len(),
-                    metadata.unread,
-                    metadata.working.unwrap_or(false)
-                );
-                return Ok(());
-            }
-            Err(error)
-                if is_workspace_metadata_fingerprint_conflict(&error)
-                    && attempt + 1 < WORKSPACE_METADATA_WRITE_RETRY_ATTEMPTS =>
-            {
-                log::warn!(
-                    "workspace metadata fingerprint conflict for {} on attempt {} of {}; retrying",
-                    workspace,
-                    attempt + 1,
-                    WORKSPACE_METADATA_WRITE_RETRY_ATTEMPTS
-                );
-                sleep_for(WORKSPACE_METADATA_WRITE_RETRY_INTERVAL).await;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-
-    Err(format!(
-        "failed to update metadata for workspace {} after {} attempts",
-        workspace, WORKSPACE_METADATA_WRITE_RETRY_ATTEMPTS
-    ))
-}
-
 fn session_for_command(attachment_id: &str, command: &str) -> WorkspaceSession {
     let name = sanitize_session_display_name(command);
     let assistant_capable = assistant_capable_command(&name);
@@ -2672,6 +2113,13 @@ fn session_for_command(attachment_id: &str, command: &str) -> WorkspaceSession {
         kind: "terminal".to_string(),
         name,
         attachment_id: attachment_id.to_string(),
+        url: None,
+        logical_url: None,
+        resolved_url: None,
+        title: None,
+        favicon_url: None,
+        can_go_back: None,
+        can_go_forward: None,
         working: assistant_capable.then_some(false),
         unread: assistant_capable.then_some(false),
     }
@@ -2704,12 +2152,6 @@ fn assistant_capable_command(command: &str) -> bool {
         .unwrap_or_default()
         .to_ascii_lowercase();
     matches!(token.as_str(), "codex" | "claude" | "cc")
-}
-
-fn current_rfc3339_timestamp() -> String {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
 fn terminal_command_bytes(command: &str) -> Vec<u8> {
@@ -2983,98 +2425,6 @@ mod tests {
     }
 
     #[test]
-    fn load_bootstrap_chrome_profile_hashes_only_syncable_profile_state() {
-        let temp_dir = TempDir::new();
-        let chrome_dir = temp_dir.path.join("Chrome");
-        fs::create_dir_all(chrome_dir.join("Default/Extensions/uBlock"))
-            .expect("chrome extensions dir should exist");
-        fs::write(
-            chrome_dir.join("Default/Preferences"),
-            "{\"theme\":\"dark\"}",
-        )
-        .expect("preferences file should exist");
-        fs::write(
-            chrome_dir.join("Default/Extensions/uBlock/manifest.json"),
-            "{\"name\":\"uBlock\"}",
-        )
-        .expect("extension payload should exist");
-
-        let (source_dir, original_hash) =
-            load_bootstrap_chrome_profile(&chrome_dir.to_string_lossy());
-        assert_eq!(source_dir, chrome_dir.to_string_lossy());
-        assert!(!original_hash.is_empty());
-
-        fs::write(
-            chrome_dir.join("Default/Extensions/uBlock/manifest.json"),
-            "{\"name\":\"uBlock Origin\"}",
-        )
-        .expect("extension payload should update");
-        let (_, hash_with_extension_change) =
-            load_bootstrap_chrome_profile(&chrome_dir.to_string_lossy());
-        assert_eq!(hash_with_extension_change, original_hash);
-
-        fs::write(
-            chrome_dir.join("Default/Preferences"),
-            "{\"theme\":\"light\"}",
-        )
-        .expect("preferences should update");
-        let (_, hash_with_real_change) =
-            load_bootstrap_chrome_profile(&chrome_dir.to_string_lossy());
-        assert_ne!(hash_with_real_change, original_hash);
-    }
-
-    #[test]
-    fn chrome_profile_sync_paths_include_profile_state_but_not_extensions_or_caches() {
-        let sync_paths = CHROME_PROFILE_SYNC_PATHS
-            .iter()
-            .copied()
-            .collect::<HashSet<_>>();
-
-        assert!(sync_paths.contains("Local State"));
-        assert!(sync_paths.contains("Default/Preferences"));
-        assert!(sync_paths.contains("Default/Login Data"));
-        assert!(sync_paths.contains("Default/Cookies"));
-        assert!(!sync_paths.contains("Default/Extensions"));
-        assert!(!sync_paths.contains("component_crx_cache"));
-        assert!(!sync_paths.contains("extensions_crx_cache"));
-        assert!(!sync_paths.contains("screen_ai"));
-    }
-
-    #[test]
-    fn chrome_profile_remote_sync_command_targets_google_chrome_dir() {
-        let command = chrome_profile_remote_sync_command();
-        assert!(command.contains(REMOTE_CHROME_USER_DATA_DIR));
-        assert!(command.contains("tar -xzf -"));
-        assert!(command.contains("rm -rf"));
-    }
-
-    #[test]
-    fn workspace_bootstrap_signature_includes_chrome_profile_state() {
-        let bootstrap = WorkspaceBootstrap {
-            remote_url: "git@github.com:example/demo.git".to_string(),
-            target_branch: "main".to_string(),
-            workspace_branch: Some("feature/test".to_string()),
-            gh_username: "octocat".to_string(),
-            gh_token: "gh-token".to_string(),
-            chrome_user_data_dir: "/Users/test/Library/Application Support/Google/Chrome"
-                .to_string(),
-            chrome_user_data_hash: "chrome-digest".to_string(),
-            codex_token: "codex-token".to_string(),
-            claude_token: "claude-token".to_string(),
-            git_user_name: "Test User".to_string(),
-            git_user_email: "test@example.com".to_string(),
-            env_files: Vec::new(),
-        };
-
-        let signature = workspace_bootstrap_signature("demo-silo-workspace", &bootstrap);
-
-        assert!(signature.contains(
-            "chrome_user_data_dir=/Users/test/Library/Application Support/Google/Chrome"
-        ));
-        assert!(signature.contains("chrome_user_data_hash=chrome-digest"));
-    }
-
-    #[test]
     fn codex_auth_json_contains_access_token() {
         let payload = codex_auth_json("codex-token");
         assert!(payload.contains("\"access_token\":\"codex-token\""));
@@ -3108,6 +2458,13 @@ mod tests {
                 kind: "terminal".to_string(),
                 name: "shell".to_string(),
                 attachment_id: "terminal-1741812345680".to_string(),
+                url: None,
+                logical_url: None,
+                resolved_url: None,
+                title: None,
+                favicon_url: None,
+                can_go_back: None,
+                can_go_forward: None,
                 working: None,
                 unread: None,
             },
@@ -3115,6 +2472,13 @@ mod tests {
                 kind: "terminal".to_string(),
                 name: "shell".to_string(),
                 attachment_id: "terminal-1741812345678".to_string(),
+                url: None,
+                logical_url: None,
+                resolved_url: None,
+                title: None,
+                favicon_url: None,
+                can_go_back: None,
+                can_go_forward: None,
                 working: None,
                 unread: None,
             },
@@ -3122,6 +2486,13 @@ mod tests {
                 kind: "terminal".to_string(),
                 name: "shell".to_string(),
                 attachment_id: "terminal-1741812345679".to_string(),
+                url: None,
+                logical_url: None,
+                resolved_url: None,
+                title: None,
+                favicon_url: None,
+                can_go_back: None,
+                can_go_forward: None,
                 working: None,
                 unread: None,
             },
@@ -3161,89 +2532,6 @@ mod tests {
         assert_eq!(session.name, "claude");
         assert_eq!(session.working, Some(false));
         assert_eq!(session.unread, Some(false));
-    }
-
-    #[test]
-    fn mutate_sessions_mark_read_recomputes_workspace_unread() {
-        let metadata = mutate_sessions(
-            &[WorkspaceSession {
-                kind: "terminal".to_string(),
-                name: "codex".to_string(),
-                attachment_id: "terminal-1".to_string(),
-                working: Some(false),
-                unread: Some(true),
-            }],
-            Some("2026-03-14T00:00:00Z"),
-            SessionMutation::MarkRead("terminal-1".to_string()),
-        );
-
-        assert!(!metadata.unread);
-        assert_eq!(metadata.working, None);
-        assert_eq!(
-            metadata.last_working.as_deref(),
-            Some("2026-03-14T00:00:00Z")
-        );
-        assert_eq!(metadata.sessions[0].unread, Some(false));
-    }
-
-    #[test]
-    fn mutate_sessions_remove_drops_session_and_working_flag() {
-        let metadata = mutate_sessions(
-            &[WorkspaceSession {
-                kind: "terminal".to_string(),
-                name: "codex".to_string(),
-                attachment_id: "terminal-1".to_string(),
-                working: Some(true),
-                unread: Some(false),
-            }],
-            Some("2026-03-14T00:00:00Z"),
-            SessionMutation::Remove("terminal-1".to_string()),
-        );
-
-        assert!(metadata.sessions.is_empty());
-        assert_eq!(metadata.working, None);
-        assert_eq!(
-            metadata.last_working.as_deref(),
-            Some("2026-03-14T00:00:00Z")
-        );
-    }
-
-    #[test]
-    fn mutate_sessions_updates_last_working_when_session_is_working() {
-        let metadata = mutate_sessions(
-            &[WorkspaceSession {
-                kind: "terminal".to_string(),
-                name: "codex".to_string(),
-                attachment_id: "terminal-1".to_string(),
-                working: Some(false),
-                unread: Some(false),
-            }],
-            Some("2026-03-14T00:00:00Z"),
-            SessionMutation::Upsert(WorkspaceSession {
-                kind: "terminal".to_string(),
-                name: "codex".to_string(),
-                attachment_id: "terminal-1".to_string(),
-                working: Some(true),
-                unread: Some(false),
-            }),
-        );
-
-        assert_eq!(metadata.working, Some(true));
-        assert!(metadata.last_working.is_some());
-        assert_ne!(
-            metadata.last_working.as_deref(),
-            Some("2026-03-14T00:00:00Z")
-        );
-    }
-
-    #[test]
-    fn fingerprint_conflict_detection_matches_gcloud_error() {
-        assert!(is_workspace_metadata_fingerprint_conflict(
-            "failed to update metadata: Supplied fingerprint does not match current metadata fingerprint"
-        ));
-        assert!(!is_workspace_metadata_fingerprint_conflict(
-            "failed to update metadata: instance not found"
-        ));
     }
 
     #[test]

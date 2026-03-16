@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowUp, ChevronsUpDown, Laptop, Terminal } from "lucide-react";
+import { ArrowUp, ChevronsUpDown, Globe, Terminal } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { ClaudeIcon } from "../../components/icons/claude";
@@ -94,11 +94,14 @@ export function PromptWorkspace({
 			invoke<{ attachment_id: string }>("terminal_create_terminal", {
 				workspace,
 			}),
-		onSuccess: (result) => {
-			queryClient.invalidateQueries({
-				queryKey: ["terminal_list_terminals", workspace],
-			});
-			router.push(
+			onSuccess: (result) => {
+				queryClient.invalidateQueries({
+					queryKey: ["terminal_list_terminals", workspace],
+				});
+				queryClient.invalidateQueries({
+					queryKey: ["workspaces_get_workspace", workspace],
+				});
+				router.push(
 				cloudSessionHref({
 					project: project ?? "",
 					workspace,
@@ -118,12 +121,15 @@ export function PromptWorkspace({
 	});
 	const submitPrompt = useMutation({
 		mutationFn: () => submitWorkspacePrompt(workspace, prompt, provider.id),
-		onSuccess: (result) => {
-			clearDraft();
-			queryClient.invalidateQueries({
-				queryKey: ["terminal_list_terminals", workspace],
-			});
-			router.push(
+			onSuccess: (result) => {
+				clearDraft();
+				queryClient.invalidateQueries({
+					queryKey: ["terminal_list_terminals", workspace],
+				});
+				queryClient.invalidateQueries({
+					queryKey: ["workspaces_get_workspace", workspace],
+				});
+				router.push(
 				cloudSessionHref({
 					project: project ?? "",
 					workspace,
@@ -264,8 +270,8 @@ export function PromptWorkspace({
 							type="button"
 							className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-text-muted hover:text-text transition-colors"
 						>
-							<Laptop size={12} />
-							Open Desktop
+							<Globe size={12} />
+							Open Browser
 						</button>
 					</div>
 				) : (

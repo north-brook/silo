@@ -3,7 +3,7 @@
 
 @theme {
 	--color-bg: #0a0a0c;
-	--color-surface: #0f1014;
+	--color-surface: #131419;
 	--color-border: #16181e;
 	--color-border-light: #1e2028;
 	--color-border-hover: #2a2d38;
@@ -41,6 +41,10 @@
 
 	body {
 		@apply min-h-screen text-text font-mono antialiased;
+	}
+
+	*:focus {
+		outline: none;
 	}
 
 	::selection {

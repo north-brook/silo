@@ -2,7 +2,7 @@
 
 import { useQueryClient } from "@tanstack/react-query";
 import { Channel } from "@tauri-apps/api/core";
-import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef, useState } from "react";
@@ -84,10 +84,10 @@ function usePageIsForeground() {
 }
 
 const THEME = {
-	background: "#0f1014",
+	background: "#131419",
 	foreground: "#b0b8c8",
 	cursor: "#638cff",
-	cursorAccent: "#0f1014",
+	cursorAccent: "#131419",
 	selectionBackground: "#638cff3d",
 	black: "#16181e",
 	red: "#f87171",
@@ -261,7 +261,7 @@ export function CloudTerminalHost({
 			term.write(normalizeTerminalOutput(data));
 		};
 
-		void getCurrentWebviewWindow()
+		void getCurrentWindow()
 			.listen<TerminalExitPayload>("terminal://exit", ({ payload }) => {
 				if (!disposed && payload.terminal_id === terminalIdRef.current) {
 					const reason = payload.signal
@@ -278,7 +278,7 @@ export function CloudTerminalHost({
 				unlistenExit = unlisten;
 			});
 
-		void getCurrentWebviewWindow()
+		void getCurrentWindow()
 			.listen<TerminalErrorPayload>("terminal://error", ({ payload }) => {
 				if (!disposed && payload.terminal_id === terminalIdRef.current) {
 					term.writeln(`\r\n[terminal error] ${payload.message}`);

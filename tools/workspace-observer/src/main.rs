@@ -23,11 +23,15 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const TURN_OUTPUT_IDLE_TIMEOUT: Duration = Duration::from_secs(6);
 const INITIAL_PROMPT_STARTUP_GRACE: Duration = Duration::from_secs(6);
 const FIFO_MODE: u32 = 0o622;
-const LEGACY_METADATA_KEY: &str = "silo_state";
 const AUTO_SUSPEND_IDLE_THRESHOLD: TimeDuration = TimeDuration::hours(4);
 const POLL_MISS_THRESHOLD_UNMANAGED: u16 = 3;
 const POLL_MISS_THRESHOLD_LIFECYCLE: u16 = 300;
 const SOFT_NEWLINE_SENTINEL: char = '\u{e000}';
+const TERMINAL_LAST_ACTIVE_METADATA_KEY: &str = "terminal-last-active";
+const TERMINAL_LAST_WORKING_METADATA_KEY: &str = "terminal-last-working";
+const TERMINAL_SESSION_METADATA_PREFIX: &str = "terminal-session-";
+const TERMINAL_UNREAD_METADATA_KEY: &str = "terminal-unread";
+const TERMINAL_WORKING_METADATA_KEY: &str = "terminal-working";
 
 fn main() {
     if let Err(error) = run() {
@@ -368,7 +372,7 @@ struct PublishedState {
     last_active: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_working: Option<String>,
-    sessions: Vec<PublishedSession>,
+    terminals: Vec<PublishedSession>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -377,6 +381,16 @@ struct PublishedSession {
     kind: &'static str,
     name: String,
     attachment_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    favicon_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    can_go_back: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    can_go_forward: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     working: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -540,7 +554,7 @@ fn reconcile_sessions(state: &mut ObserverState, live_sessions: &[ZmxSession]) {
 fn build_published_state(state: &ObserverState) -> PublishedState {
     let mut working = false;
     let mut unread = false;
-    let mut sessions = state
+    let mut terminals = state
         .sessions
         .iter()
         .map(|(session_name, session_state)| {
@@ -557,12 +571,17 @@ fn build_published_state(state: &ObserverState) -> PublishedState {
                 kind: "terminal",
                 name,
                 attachment_id: session_name.clone(),
+                url: None,
+                title: None,
+                favicon_url: None,
+                can_go_back: None,
+                can_go_forward: None,
                 working: assistant_capable.then_some(session_state.working),
                 unread: assistant_capable.then_some(session_state.unread),
             }
         })
         .collect::<Vec<_>>();
-    sessions.sort_by(|left, right| left.attachment_id.cmp(&right.attachment_id));
+    terminals.sort_by(|left, right| left.attachment_id.cmp(&right.attachment_id));
 
     PublishedState {
         branch: state.branch.clone(),
@@ -570,7 +589,7 @@ fn build_published_state(state: &ObserverState) -> PublishedState {
         unread,
         last_active: state.last_active.clone(),
         last_working: state.last_working.clone(),
-        sessions,
+        terminals,
     }
 }
 
@@ -1044,27 +1063,34 @@ fn flat_metadata_items(
     mut items: BTreeMap<String, String>,
     published: &PublishedState,
 ) -> Result<BTreeMap<String, String>, String> {
-    items.remove(LEGACY_METADATA_KEY);
+    items.retain(|key, _| !key.starts_with(TERMINAL_SESSION_METADATA_PREFIX));
     update_metadata_item(&mut items, "branch", published.branch.as_deref());
     update_metadata_item(
         &mut items,
-        "unread",
+        TERMINAL_UNREAD_METADATA_KEY,
         Some(bool_metadata_value(published.unread)),
     );
     update_metadata_item(
         &mut items,
-        "working",
+        TERMINAL_WORKING_METADATA_KEY,
         Some(bool_metadata_value(published.working)),
     );
-    update_metadata_item(&mut items, "last_active", published.last_active.as_deref());
     update_metadata_item(
         &mut items,
-        "last_working",
+        TERMINAL_LAST_ACTIVE_METADATA_KEY,
+        published.last_active.as_deref(),
+    );
+    update_metadata_item(
+        &mut items,
+        TERMINAL_LAST_WORKING_METADATA_KEY,
         published.last_working.as_deref(),
     );
-    let sessions = serde_json::to_string(&published.sessions)
-        .map_err(|error| format!("failed to serialize session metadata: {error}"))?;
-    update_metadata_item(&mut items, "sessions", Some(&sessions));
+    for terminal in &published.terminals {
+        let key = format!("{TERMINAL_SESSION_METADATA_PREFIX}{}", terminal.attachment_id);
+        let value = serde_json::to_string(terminal)
+            .map_err(|error| format!("failed to serialize session metadata: {error}"))?;
+        items.insert(key, value);
+    }
     Ok(items)
 }
 
@@ -1409,8 +1435,10 @@ mod tests {
         flat_metadata_items, normalize_assistant_input, parse_timestamp, parse_zmx_session,
         resolve_assistant_provider, sanitize_command_name, should_suspend_for_inactivity_at,
         turn_output_timeout, update_metadata_item, AssistantProvider, ObserverEvent, ObserverState,
-        PublishedSession, PublishedState, INITIAL_PROMPT_STARTUP_GRACE, SOFT_NEWLINE_SENTINEL,
-        TURN_OUTPUT_IDLE_TIMEOUT,
+        PublishedSession, PublishedState, INITIAL_PROMPT_STARTUP_GRACE,
+        SOFT_NEWLINE_SENTINEL, TERMINAL_LAST_ACTIVE_METADATA_KEY,
+        TERMINAL_LAST_WORKING_METADATA_KEY, TERMINAL_UNREAD_METADATA_KEY,
+        TERMINAL_WORKING_METADATA_KEY, TURN_OUTPUT_IDLE_TIMEOUT,
     };
     use std::collections::BTreeMap;
     use time::Duration as TimeDuration;
@@ -1495,20 +1523,28 @@ mod tests {
     }
 
     #[test]
-    fn flat_metadata_items_replaces_legacy_observer_state() {
+    fn flat_metadata_items_rewrites_terminal_state() {
         let mut items = BTreeMap::new();
         items.insert("target_branch".to_string(), "main".to_string());
-        items.insert("silo_state".to_string(), "{\"old\":true}".to_string());
+        items.insert(
+            "terminal-session-old".to_string(),
+            "{\"type\":\"terminal\",\"name\":\"old\",\"attachment_id\":\"old\"}".to_string(),
+        );
         let published = PublishedState {
             branch: Some("feature/inbox".to_string()),
             working: false,
             unread: true,
             last_active: Some("2026-03-14T00:00:00Z".to_string()),
             last_working: Some("2026-03-14T01:00:00Z".to_string()),
-            sessions: vec![PublishedSession {
+            terminals: vec![PublishedSession {
                 kind: "terminal",
                 name: "codex".to_string(),
                 attachment_id: "terminal-1".to_string(),
+                url: None,
+                title: None,
+                favicon_url: None,
+                can_go_back: None,
+                can_go_forward: None,
                 working: Some(false),
                 unread: Some(true),
             }],
@@ -1520,24 +1556,36 @@ mod tests {
             items.get("branch").map(String::as_str),
             Some("feature/inbox")
         );
-        assert_eq!(items.get("unread").map(String::as_str), Some("true"));
-        assert_eq!(items.get("working").map(String::as_str), Some("false"));
         assert_eq!(
-            items.get("last_active").map(String::as_str),
+            items.get(TERMINAL_UNREAD_METADATA_KEY).map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            items.get(TERMINAL_WORKING_METADATA_KEY).map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(
+            items
+                .get(TERMINAL_LAST_ACTIVE_METADATA_KEY)
+                .map(String::as_str),
             Some("2026-03-14T00:00:00Z")
         );
         assert_eq!(
-            items.get("last_working").map(String::as_str),
+            items
+                .get(TERMINAL_LAST_WORKING_METADATA_KEY)
+                .map(String::as_str),
             Some("2026-03-14T01:00:00Z")
         );
         assert_eq!(items.get("target_branch").map(String::as_str), Some("main"));
         assert_eq!(
-            items.get("sessions").map(String::as_str),
+            items
+                .get("terminal-session-terminal-1")
+                .map(String::as_str),
             Some(
-                "[{\"type\":\"terminal\",\"name\":\"codex\",\"attachment_id\":\"terminal-1\",\"working\":false,\"unread\":true}]"
+                "{\"type\":\"terminal\",\"name\":\"codex\",\"attachment_id\":\"terminal-1\",\"working\":false,\"unread\":true}"
             )
         );
-        assert!(!items.contains_key("silo_state"));
+        assert!(!items.contains_key("terminal-session-old"));
     }
 
     #[test]
@@ -1654,10 +1702,10 @@ mod tests {
 
         assert!(published.working);
         assert!(!published.unread);
-        assert_eq!(published.sessions.len(), 1);
-        assert_eq!(published.sessions[0].name, "codex");
-        assert_eq!(published.sessions[0].attachment_id, "terminal-1");
-        assert_eq!(published.sessions[0].working, Some(true));
+        assert_eq!(published.terminals.len(), 1);
+        assert_eq!(published.terminals[0].name, "codex");
+        assert_eq!(published.terminals[0].attachment_id, "terminal-1");
+        assert_eq!(published.terminals[0].working, Some(true));
     }
 
     #[test]

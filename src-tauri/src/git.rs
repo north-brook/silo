@@ -375,7 +375,6 @@ pub async fn git_update_target_branch(
 
 #[tauri::command]
 pub async fn git_pr_status(workspace: String) -> Result<Option<PullRequestStatus>, String> {
-    log::info!("checking PR status for workspace {workspace}");
     let context = branch_workspace_context(&workspace).await?;
     Ok(find_pull_request(&context)
         .await?
@@ -1443,9 +1442,7 @@ fn unescape_char(ch: char) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{
-        ChromeConfig, ClaudeConfig, CodexConfig, GcloudConfig, GitConfig, SiloConfig,
-    };
+    use crate::config::{ClaudeConfig, CodexConfig, GcloudConfig, GitConfig, SiloConfig};
     use indexmap::IndexMap;
 
     #[test]
@@ -1465,7 +1462,6 @@ mod tests {
         let config = SiloConfig {
             gcloud: GcloudConfig::default(),
             git: GitConfig::default(),
-            chrome: ChromeConfig::default(),
             codex: CodexConfig::default(),
             claude: ClaudeConfig::default(),
             projects: IndexMap::from_iter([(

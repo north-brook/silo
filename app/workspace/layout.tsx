@@ -1,18 +1,29 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Terminal, X } from "lucide-react";
+import { Globe, Plus, Terminal, X } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useMemo } from "react";
-import { CloudDeck, useCloud } from "../../components/cloud";
+import { Suspense, useEffect, useMemo, useState } from "react";
+import { useCloud } from "../../components/cloud";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../../components/dialog";
 import { ClaudeIcon } from "../../components/icons/claude";
 import { CodexIcon } from "../../components/icons/codex";
 import { Loader } from "../../components/loader";
 import { toast } from "../../components/toaster";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "../../components/tooltip";
 import { TopBar } from "../../components/top-bar";
-import { cloudSessionHref, normalizeTerminalSession } from "../../lib/cloud";
+import { cloudSessionHref, normalizeWorkspaceSession } from "../../lib/cloud";
 import { invoke } from "../../lib/invoke";
-import type { Workspace, WorkspaceSession } from "../../lib/workspaces";
+import {
+	isTemplateWorkspace,
+	type Workspace,
+	type WorkspaceSession,
+	workspaceSessions,
+} from "../../lib/workspaces";
 
 export default function WorkspaceLayout({
 	children,
@@ -66,13 +77,35 @@ function terminalTabPresentation(name: string) {
 	};
 }
 
+function browserTabPresentation(session: WorkspaceSession) {
+	const label =
+		session.title?.trim() ||
+		session.name.trim() ||
+		session.url?.trim() ||
+		"browser";
+	const icon = session.favicon_url ? (
+		<span
+			aria-hidden
+			className="h-3 w-3 rounded-[2px] shrink-0 bg-center bg-cover bg-no-repeat"
+			style={{ backgroundImage: `url("${session.favicon_url}")` }}
+		/>
+	) : (
+		<Globe size={12} />
+	);
+	return { icon, label };
+}
+
 function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 	const searchParams = useSearchParams();
 	const router = useRouter();
 	const queryClient = useQueryClient();
-	const { ensureWorkspaceSessions, removeSession } = useCloud();
+	const { ensureWorkspaceSessions } = useCloud();
+	const [newTabOpen, setNewTabOpen] = useState(false);
 	const workspaceName =
 		searchParams.get("name") ?? searchParams.get("workspace") ?? "";
+	const activeKind = searchParams.get("kind");
+	const activeAttachmentId = searchParams.get("attachment_id");
+	const projectParam = searchParams.get("project") ?? "";
 
 	const workspace = useQuery({
 		queryKey: ["workspaces_get_workspace", workspaceName],
@@ -86,25 +119,39 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 				},
 			),
 		enabled: !!workspaceName,
-		refetchInterval: 10000,
+		refetchInterval: 2000,
 	});
 	const isWorkspaceReady =
 		workspace.data?.status === "RUNNING" && workspace.data?.ready === true;
+	const project = projectParam || workspace.data?.project || "";
+	const workspaceHref = useMemo(() => {
+		const params = new URLSearchParams({ name: workspaceName });
+		if (project) {
+			params.set("project", project);
+		}
+		return `/workspace?${params.toString()}`;
+	}, [project, workspaceName]);
 
-	const terminals = useQuery({
-		queryKey: ["terminal_list_terminals", workspaceName],
-		queryFn: () =>
-			invoke<WorkspaceSession[]>(
-				"terminal_list_terminals",
-				{ workspace: workspaceName },
-				{
-					log: "state_changes_only",
-					key: `poll:terminal_list_terminals:${workspaceName}`,
-				},
+	const sessions = useMemo<WorkspaceSession[]>(
+		() =>
+			workspace.data && !isTemplateWorkspace(workspace.data)
+				? workspaceSessions(workspace.data)
+				: [],
+		[workspace.data],
+	);
+	const cloudSessions = useMemo(
+		() =>
+			sessions.map((session) =>
+				normalizeWorkspaceSession(workspaceName, session),
 			),
-		enabled: !!workspaceName && isWorkspaceReady,
-		refetchInterval: 2000,
-	});
+		[sessions, workspaceName],
+	);
+	useEffect(() => {
+		if (!workspaceName || !isWorkspaceReady) {
+			return;
+		}
+		ensureWorkspaceSessions(workspaceName, cloudSessions);
+	}, [cloudSessions, ensureWorkspaceSessions, isWorkspaceReady, workspaceName]);
 
 	const createTerminal = useMutation({
 		mutationFn: () =>
@@ -112,8 +159,9 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 				workspace: workspaceName,
 			}),
 		onSuccess: (result) => {
+			setNewTabOpen(false);
 			queryClient.invalidateQueries({
-				queryKey: ["terminal_list_terminals", workspaceName],
+				queryKey: ["workspaces_get_workspace", workspaceName],
 			});
 			router.push(
 				cloudSessionHref({
@@ -134,48 +182,117 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 		},
 	});
 
-	const project = searchParams.get("project") ?? workspace.data?.project ?? "";
-	const activeKind = searchParams.get("kind");
-	const activeAttachmentId = searchParams.get("attachment_id");
-	const fresh = searchParams.get("fresh") === "1";
-	const workspaceHref = useMemo(() => {
-		const params = new URLSearchParams({ name: workspaceName });
-		if (project) {
-			params.set("project", project);
-		}
-		return `/workspace?${params.toString()}`;
-	}, [project, workspaceName]);
-	const terminalData = terminals.data;
-	const terminalList = terminalData ?? [];
-	const cloudSessions = useMemo(
-		() =>
-			(terminalData ?? []).map((session) =>
-				normalizeTerminalSession(workspaceName, session),
-			),
-		[terminalData, workspaceName],
-	);
-	const activeSession =
-		workspaceName && activeKind === "terminal" && activeAttachmentId
-			? (cloudSessions.find(
-					(session) => session.attachmentId === activeAttachmentId,
-				) ?? {
+	const createAssistant = useMutation({
+		mutationFn: (model: "codex" | "claude") =>
+			invoke<{ attachment_id: string }>("terminal_create_assistant", {
+				workspace: workspaceName,
+				model,
+			}),
+		onSuccess: (result) => {
+			setNewTabOpen(false);
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_get_workspace", workspaceName],
+			});
+			router.push(
+				cloudSessionHref({
+					project,
 					workspace: workspaceName,
 					kind: "terminal",
-					attachmentId: activeAttachmentId,
-					name: activeAttachmentId,
-					working: null,
-					unread: null,
-				})
-			: null;
-	const showCloudDeck = activeSession?.kind === "terminal";
+					attachmentId: result.attachment_id,
+					fresh: true,
+				}),
+			);
+		},
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to create assistant",
+				description: error.message,
+			});
+		},
+	});
+
+	const createBrowser = useMutation({
+		mutationFn: () =>
+			invoke<{ attachment_id: string }>("browser_create_tab", {
+				workspace: workspaceName,
+			}),
+		onSuccess: (result) => {
+			setNewTabOpen(false);
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_get_workspace", workspaceName],
+			});
+			router.push(
+				cloudSessionHref({
+					project,
+					workspace: workspaceName,
+					kind: "browser",
+					attachmentId: result.attachment_id,
+					fresh: true,
+				}),
+			);
+		},
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to create browser",
+				description: error.message,
+			});
+		},
+	});
+
+	const isPending = createTerminal.isPending || createAssistant.isPending || createBrowser.isPending;
 
 	useEffect(() => {
-		if (!workspaceName || !isWorkspaceReady) {
-			return;
-		}
+		const handler = (e: KeyboardEvent) => {
+			if (e.metaKey && e.key === "t") {
+				e.preventDefault();
+				setNewTabOpen(true);
+			}
+		};
+		window.addEventListener("keydown", handler);
+		return () => window.removeEventListener("keydown", handler);
+	}, []);
 
-		ensureWorkspaceSessions(workspaceName, cloudSessions);
-	}, [cloudSessions, ensureWorkspaceSessions, isWorkspaceReady, workspaceName]);
+	const TAB_OPTIONS = [
+		{
+			label: "Terminal",
+			icon: <Terminal size={12} />,
+			action: () => createTerminal.mutate(),
+			pending: createTerminal.isPending,
+		},
+		{
+			label: "Codex",
+			icon: <CodexIcon height={12} />,
+			action: () => createAssistant.mutate("codex"),
+			pending: createAssistant.isPending && createAssistant.variables === "codex",
+		},
+		{
+			label: "Claude",
+			icon: <ClaudeIcon height={12} />,
+			action: () => createAssistant.mutate("claude"),
+			pending: createAssistant.isPending && createAssistant.variables === "claude",
+		},
+		{
+			label: "Browser",
+			icon: <Globe size={12} />,
+			action: () => createBrowser.mutate(),
+			pending: createBrowser.isPending,
+		},
+	];
+
+	useEffect(() => {
+		if (!newTabOpen) return;
+		const handler = (e: KeyboardEvent) => {
+			const num = Number.parseInt(e.key, 10);
+			if (num >= 1 && num <= TAB_OPTIONS.length) {
+				e.preventDefault();
+				TAB_OPTIONS[num - 1].action();
+			}
+		};
+		window.addEventListener("keydown", handler);
+		return () => window.removeEventListener("keydown", handler);
+	}, [newTabOpen, TAB_OPTIONS]);
 
 	return (
 		<>
@@ -190,14 +307,14 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 					</div>
 				</header>
 			)}
-			{terminalList.length > 0 && (
+			{(sessions.length > 0 || isWorkspaceReady) && (
 				<div className="w-full bg-bg shrink-0 flex items-end overflow-x-auto">
-					{terminalList.map((session) => (
-						<TerminalTab
+					{sessions.map((session) => (
+						<WorkspaceTab
 							key={session.attachment_id}
 							session={session}
 							isActive={
-								activeKind === "terminal" &&
+								activeKind === session.type &&
 								activeAttachmentId === session.attachment_id
 							}
 							workspaceName={workspaceName}
@@ -205,31 +322,69 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 							workspaceHref={workspaceHref}
 						/>
 					))}
-					<button
-						type="button"
-						disabled={createTerminal.isPending}
-						onClick={() => createTerminal.mutate()}
-						className="h-9 flex items-center px-2.5 border-b border-border-light text-text-muted hover:text-text-bright transition-colors disabled:opacity-50"
-					>
-						{createTerminal.isPending ? <Loader /> : <Plus size={12} />}
-					</button>
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<button
+								type="button"
+								onClick={() => setNewTabOpen(true)}
+								className="h-9 flex items-center px-2.5 border-b border-border-light text-text-muted hover:text-text-bright transition-colors"
+							>
+								<Plus size={12} />
+							</button>
+						</TooltipTrigger>
+						<TooltipContent side="right">
+							<span className="flex items-center gap-1.5">
+								New tab
+								<span className="flex items-center gap-0.5">
+									<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+										⌘
+									</kbd>
+									<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+										T
+									</kbd>
+								</span>
+							</span>
+						</TooltipContent>
+					</Tooltip>
 					<div className="flex-1 h-9 border-b border-border-light" />
 				</div>
 			)}
-			{showCloudDeck ? (
-				<CloudDeck
-					workspace={workspaceName}
-					activeSession={activeSession}
-					skipInitialScrollback={fresh}
-				/>
-			) : (
-				children
-			)}
+			<Dialog open={newTabOpen} onOpenChange={setNewTabOpen}>
+				<DialogContent className="max-w-xs p-0 gap-0">
+					<DialogHeader className="p-4 pb-2">
+						<DialogTitle>New Tab</DialogTitle>
+					</DialogHeader>
+					<div className="flex flex-col pt-1 pb-3">
+						{TAB_OPTIONS.map((option, index) => (
+							<button
+								key={option.label}
+								type="button"
+								disabled={isPending}
+								onClick={option.action}
+								className="flex items-center gap-2.5 w-full px-4 py-2 text-xs text-text hover:bg-btn-hover hover:text-text-bright transition-colors disabled:opacity-50"
+							>
+								{option.icon}
+								<span className="truncate flex-1 text-left">{option.label}</span>
+								<span className="shrink-0 w-5 h-5 inline-flex items-center justify-center">
+									{option.pending ? (
+										<Loader className="text-text-muted" />
+									) : (
+										<kbd className="text-[10px] text-text-placeholder border border-border-light rounded px-1.5 py-0.5">
+											{index + 1}
+										</kbd>
+									)}
+								</span>
+							</button>
+						))}
+					</div>
+				</DialogContent>
+			</Dialog>
+			{children}
 		</>
 	);
 }
 
-function TerminalTab({
+function WorkspaceTab({
 	session,
 	isActive,
 	workspaceName,
@@ -246,22 +401,30 @@ function TerminalTab({
 	const queryClient = useQueryClient();
 	const { removeSession } = useCloud();
 
-	const killTerminal = useMutation({
+	const killSession = useMutation({
 		mutationFn: () =>
-			invoke("terminal_kill_terminal", {
-				workspace: workspaceName,
-				attachmentId: session.attachment_id,
-			}),
+			session.type === "browser"
+				? invoke("browser_kill_tab", {
+						workspace: workspaceName,
+						attachmentId: session.attachment_id,
+					})
+				: invoke("terminal_kill_terminal", {
+						workspace: workspaceName,
+						attachmentId: session.attachment_id,
+					}),
 		onSuccess: () => {
 			queryClient.invalidateQueries({
-				queryKey: ["terminal_list_terminals", workspaceName],
+				queryKey: ["workspaces_get_workspace", workspaceName],
 			});
-			removeSession(workspaceName, "terminal", session.attachment_id);
+			removeSession(workspaceName, session.type, session.attachment_id);
 		},
 		onError: (error) => {
 			toast({
 				variant: "error",
-				title: "Failed to close terminal",
+				title:
+					session.type === "browser"
+						? "Failed to close browser"
+						: "Failed to close terminal",
 				description: error.message,
 			});
 		},
@@ -271,36 +434,42 @@ function TerminalTab({
 		if (isActive) {
 			router.replace(workspaceHref);
 		}
-		killTerminal.mutate();
+		killSession.mutate();
 	};
 
-	const { icon, label } = terminalTabPresentation(session.name);
+	const { icon, label } =
+		session.type === "browser"
+			? browserTabPresentation(session)
+			: terminalTabPresentation(session.name);
 
 	return (
-		// biome-ignore lint/a11y/noStaticElementInteractions: can't use <button> because it contains interactive children
 		<div
+			role="tab"
+			aria-selected={isActive}
+			tabIndex={0}
 			onClick={() =>
 				router.push(
 					cloudSessionHref({
 						project,
 						workspace: workspaceName,
-						kind: "terminal",
+						kind: session.type,
 						attachmentId: session.attachment_id,
 					}),
 				)
 			}
-			onKeyDown={(e) => {
-				if (e.key === "Enter" || e.key === " ") {
-					e.preventDefault();
-					router.push(
-						cloudSessionHref({
-							project,
-							workspace: workspaceName,
-							kind: "terminal",
-							attachmentId: session.attachment_id,
-						}),
-					);
+			onKeyDown={(event) => {
+				if (event.key !== "Enter" && event.key !== " ") {
+					return;
 				}
+				event.preventDefault();
+				router.push(
+					cloudSessionHref({
+						project,
+						workspace: workspaceName,
+						kind: session.type,
+						attachmentId: session.attachment_id,
+					}),
+				);
 			}}
 			className={`group/tab h-9 flex items-center gap-1.5 pl-3.5 pr-2.5 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
 				isActive
@@ -309,8 +478,8 @@ function TerminalTab({
 			}`}
 		>
 			{icon}
-			<span className="max-w-48 truncate">{label}</span>
-			{killTerminal.isPending ? (
+			<span className="max-w-36 truncate">{label}</span>
+			{killSession.isPending ? (
 				<span className="p-0.5">
 					<Loader className="text-error" />
 				</span>
@@ -323,8 +492,8 @@ function TerminalTab({
 					<span className="shrink-0 w-2 h-2 rounded-full bg-blue-400 group-hover/unread:hidden" />
 					<button
 						type="button"
-						onClick={(e) => {
-							e.stopPropagation();
+						onClick={(event) => {
+							event.stopPropagation();
 							handleClose();
 						}}
 						className="hidden group-hover/unread:block p-0.5 rounded transition-colors hover:bg-border-light text-text-muted hover:text-text-bright"
@@ -335,8 +504,8 @@ function TerminalTab({
 			) : (
 				<button
 					type="button"
-					onClick={(e) => {
-						e.stopPropagation();
+					onClick={(event) => {
+						event.stopPropagation();
 						handleClose();
 					}}
 					className={`p-0.5 rounded transition-colors hover:bg-border-light ${

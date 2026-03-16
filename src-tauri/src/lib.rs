@@ -1,4 +1,4 @@
-mod chrome;
+mod browser;
 mod claude;
 mod codex;
 mod config;
@@ -8,9 +8,12 @@ mod logging;
 mod projects;
 mod prompts;
 mod river_names;
+mod router;
+mod state;
 mod system;
 mod templates;
 mod terminal;
+mod tls;
 mod workspaces;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -18,6 +21,8 @@ pub fn run() {
     let (logging_plugin, session_log) = logging::build_plugin();
 
     tauri::Builder::default()
+        .manage(browser::BrowserManager::default())
+        .manage(state::WorkspaceMetadataManager::default())
         .manage(terminal::TerminalManager::default())
         .plugin(logging_plugin)
         .plugin(tauri_plugin_opener::init())
@@ -43,8 +48,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             claude::claude_authenticate,
             claude::claude_configured,
-            chrome::chrome_installed,
-            chrome::chrome_configured,
             codex::codex_authenticate,
             codex::codex_configured,
             git::git_authenticate,
@@ -86,7 +89,19 @@ pub fn run() {
             workspaces::workspaces_get_workspace,
             workspaces::workspaces_submit_prompt,
             workspaces::workspaces_delete_workspace,
+            browser::browser_create_tab,
+            browser::browser_mount_tab,
+            browser::browser_resize_tab,
+            browser::browser_unmount_tab,
+            browser::browser_kill_tab,
+            browser::browser_go_to,
+            browser::browser_report_page_state,
+            browser::browser_go_back,
+            browser::browser_go_forward,
+            browser::browser_refresh_page,
+            browser::browser_open_devtools,
             terminal::terminal_create_terminal,
+            terminal::terminal_create_assistant,
             terminal::terminal_list_terminals,
             terminal::terminal_attach_terminal,
             terminal::terminal_run_terminal,

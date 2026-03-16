@@ -4,7 +4,6 @@ import { useQuery } from "@tanstack/react-query";
 import { Check, HardDrive } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { type ReactNode, Suspense, useEffect, useRef, useState } from "react";
-import { ChromeIcon } from "../../../components/icons/chrome";
 import { GCloudIcon } from "../../../components/icons/gcloud";
 import { SiloIcon } from "../../../components/icons/silo";
 import { Loader } from "../../../components/loader";
@@ -20,36 +19,27 @@ interface Step {
 const ICON_SIZE = 12;
 
 function useSavingSteps(status: string, deleted: boolean): Step[] {
-	const [wasStopping, setWasStopping] = useState(false);
 	const [wasStopped, setWasStopped] = useState(false);
 
 	const isStopping = status === "STOPPING";
 	const isStopped = status === "TERMINATED" || status === "STOPPED";
 
 	useEffect(() => {
-		if (isStopping) setWasStopping(true);
-	}, [isStopping]);
-
-	useEffect(() => {
 		if (isStopped) setWasStopped(true);
 	}, [isStopped]);
 
-	// 1. Syncing Chrome profile — active until VM starts stopping
-	const chromeState: Step["state"] =
-		wasStopping || isStopped ? "done" : "active";
-
-	// 2. Stopping virtual machine — active while stopping, done once stopped
+	// 1. Stopping virtual machine — active while stopping, done once stopped
 	const stopState: Step["state"] =
 		isStopped || wasStopped ? "done" : isStopping ? "active" : "pending";
 
-	// 3. Snapshotting disk — active once stopped, done when VM is deleted
+	// 2. Snapshotting disk — active once stopped, done when VM is deleted
 	const snapshotState: Step["state"] = deleted
 		? "done"
 		: wasStopped
 			? "active"
 			: "pending";
 
-	// 4. Cleaning up — active after snapshot (VM deletion), done when complete
+	// 3. Cleaning up — active after snapshot (VM deletion), done when complete
 	const cleanupState: Step["state"] = deleted
 		? "done"
 		: snapshotState === "done"
@@ -57,11 +47,6 @@ function useSavingSteps(status: string, deleted: boolean): Step[] {
 			: "pending";
 
 	return [
-		{
-			label: "Syncing Chrome profile",
-			icon: <ChromeIcon height={ICON_SIZE} />,
-			state: chromeState,
-		},
 		{
 			label: "Stopping virtual machine",
 			icon: <GCloudIcon height={ICON_SIZE} />,

@@ -1,6 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "../lib/invoke";
-import { ChromeIcon } from "./icons/chrome";
 import { ClaudeIcon } from "./icons/claude";
 import { CodexIcon } from "./icons/codex";
 import { GCloudIcon } from "./icons/gcloud";
@@ -235,55 +234,11 @@ function ClaudeStatus() {
 	);
 }
 
-function ChromeStatus() {
-	const installed = useQuery({
-		queryKey: ["chrome_installed"],
-		queryFn: () =>
-			invoke<boolean>("chrome_installed", {
-				log: "state_changes_only",
-				key: "poll:chrome_installed",
-			}),
-		refetchInterval: 5000,
-	});
-	const configured = useQuery({
-		queryKey: ["chrome_configured"],
-		queryFn: () =>
-			invoke<boolean>("chrome_configured", {
-				log: "state_changes_only",
-				key: "poll:chrome_configured",
-			}),
-		enabled: installed.data === true,
-		refetchInterval: 5000,
-	});
-
-	const active = installed.data && configured.data;
-	const label = !installed.data
-		? "Chrome: not installed"
-		: !configured.data
-			? "Chrome: not configured"
-			: "Chrome: connected";
-
-	return (
-		<Tooltip>
-			<TooltipTrigger asChild>
-				<span
-					style={{ opacity: active ? 1 : 0.5 }}
-					className="flex items-center"
-				>
-					<ChromeIcon height={12} />
-				</span>
-			</TooltipTrigger>
-			<TooltipContent side="bottom">{label}</TooltipContent>
-		</Tooltip>
-	);
-}
-
 export function StatusIcons() {
 	return (
 		<div className="flex items-center gap-2">
 			<GCloudStatus />
 			<GHStatus />
-			<ChromeStatus />
 			<CodexStatus />
 			<ClaudeStatus />
 		</div>

@@ -37,7 +37,6 @@ serial_log "Starting silo base image provisioning"
 
 apt-get update
 apt-get install -y \
-  alsa-utils \
   build-essential \
   ca-certificates \
   cmake \
@@ -51,38 +50,15 @@ apt-get install -y \
   gnupg \
   glib-networking \
   jq \
-  jackd2 \
   less \
-  libdrm2 \
-  libegl1 \
   libgcrypt20 \
   libgirepository-1.0-1 \
-  libgl1 \
   libglib2.0-0 \
-  libgles1 \
-  libgles2 \
-  libglvnd0 \
-  libglx0 \
   libgudev-1.0-0 \
-  libjack-jackd2-0 \
-  libopengl0 \
-  libopus0 \
-  libpulse0 \
-  libvpx-dev \
-  libwayland-dev \
-  libwayland-egl1 \
-  libx11-xcb1 \
-  libxcb-dri3-0 \
-  libxdamage1 \
-  libxext6 \
-  libxfixes3 \
-  libxtst6 \
-  libxv1 \
   make \
   patch \
   procps \
   psmisc \
-  pulseaudio \
   python3 \
   python3-dev \
   python3-gi \
@@ -98,33 +74,10 @@ apt-get install -y \
   tmux \
   tree \
   unzip \
-  wayland-protocols \
   wget \
-  wmctrl \
-  x11-utils \
-  x11-xkb-utils \
-  x11-xserver-utils \
-  x264 \
-  x265 \
-  xdotool \
-  xfce4 \
-  xfce4-terminal \
-  xsel \
-  xserver-xorg-core \
-  xvfb \
   xz-utils \
   zip \
   zsh
-
-install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
-  | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg
-chmod 0644 /etc/apt/keyrings/google-chrome.gpg
-cat > /etc/apt/sources.list.d/google-chrome.list <<'EOF'
-deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main
-EOF
-apt-get update
-apt-get install -y google-chrome-stable
 
 ARCHITECTURE="$(dpkg --print-architecture)"
 UBUNTU_CODENAME="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME}")"
@@ -144,40 +97,6 @@ apt-get install -y \
 systemctl enable containerd.service docker.service
 systemctl start containerd.service docker.service
 timeout 60 bash -lc 'until docker info >/dev/null 2>&1; do sleep 1; done'
-
-serial_log "Installing selkies-gstreamer runtime dependencies"
-
-apt-get install -y \
-  aom-tools \
-  libopenh264-dev \
-  svt-av1 \
-  xcvt || true
-
-SELKIES_VERSION="$(
-  curl -fsSL "https://api.github.com/repos/selkies-project/selkies/releases/latest" \
-    | jq -r '.tag_name' \
-    | sed 's/[^0-9.\-]*//g'
-)"
-DISTRIB_RELEASE="$(. /etc/os-release && printf '%s' "${VERSION_ID}")"
-
-install -d -m 0755 /opt
-rm -rf /opt/gstreamer /opt/gst-web
-
-curl -fsSL \
-  "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/gstreamer-selkies_gpl_v${SELKIES_VERSION}_ubuntu${DISTRIB_RELEASE}_amd64.tar.gz" \
-  | tar -C /opt -xzf -
-
-curl -fsSLo "/tmp/selkies_gstreamer-${SELKIES_VERSION}-py3-none-any.whl" \
-  "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies_gstreamer-${SELKIES_VERSION}-py3-none-any.whl"
-PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir --ignore-installed \
-  "/tmp/selkies_gstreamer-${SELKIES_VERSION}-py3-none-any.whl"
-rm -f "/tmp/selkies_gstreamer-${SELKIES_VERSION}-py3-none-any.whl"
-
-curl -fsSL \
-  "https://github.com/selkies-project/selkies/releases/download/v${SELKIES_VERSION}/selkies-gstreamer-web_v${SELKIES_VERSION}.tar.gz" \
-  | tar -C /opt -xzf -
-
-printf '%s\n' "${SELKIES_VERSION}" > /opt/selkies-version
 
 if ! id -u "${DEVELOPER_USER}" >/dev/null 2>&1; then
   useradd -m -d "${DEVELOPER_HOME}" -s /usr/bin/zsh "${DEVELOPER_USER}"
@@ -222,9 +141,6 @@ mkdir -p /etc/profile.d
 cat > /etc/profile.d/silo-homebrew.sh <<'EOF'
 export HOMEBREW_PREFIX="/home/linuxbrew/.linuxbrew"
 export BUN_INSTALL="/home/silo/.bun"
-export SELKIES_VERSION_FILE="/opt/selkies-version"
-export SELKIES_GSTREAMER_ROOT="/opt/gstreamer"
-export SELKIES_WEB_ROOT="/opt/gst-web"
 
 if [ -x "${HOMEBREW_PREFIX}/bin/brew" ]; then
   eval "$("${HOMEBREW_PREFIX}/bin/brew" shellenv)"
@@ -303,7 +219,7 @@ fi
 
 export PATH="${DEVELOPER_HOME}/.local/bin:${PATH}"
 
-for command_name in bun cargo claude codex corepack direnv docker gh google-chrome just node npm npx pnpm rustc shellcheck yarn zig zmx; do
+for command_name in bun cargo claude codex corepack direnv docker gh just node npm npx pnpm rustc shellcheck yarn zig zmx; do
   target_path="$(command -v "${command_name}" || true)"
   if [[ -n "${target_path}" ]]; then
     ln -sf "${target_path}" "/usr/local/bin/${command_name}"
@@ -332,7 +248,6 @@ fdfind --version
 find --version
 git --version
 gh --version
-google-chrome --version
 jq --version
 less --version
 make --version
@@ -365,13 +280,8 @@ zig version
 command -v zmx
 zsh --version
 id "${DEVELOPER_USER}"
-cat /opt/selkies-version
-python3 -c 'import selkies_gstreamer'
-test -d /opt/gstreamer
-test -d /opt/gst-web
-su - "${DEVELOPER_USER}" -s /bin/bash -c 'for command_name in brew bun cargo claude codex curl docker fd git gh google-chrome jq node npm pnpm python3 rg rustc yarn yq zig zmx zsh; do command -v "${command_name}" >/dev/null; done'
+su - "${DEVELOPER_USER}" -s /bin/bash -c 'for command_name in brew bun cargo claude codex curl docker fd git gh jq node npm pnpm python3 rg rustc yarn yq zig zmx zsh; do command -v "${command_name}" >/dev/null; done'
 su - "${DEVELOPER_USER}" -s /bin/bash -c 'docker version >/dev/null && docker info >/dev/null && docker compose version >/dev/null'
-su - "${DEVELOPER_USER}" -s /bin/bash -c 'test -f /opt/selkies-version && python3 -c "import selkies_gstreamer"'
 su - "${DEVELOPER_USER}" -s /bin/bash -c '
   prefix="$(brew --prefix)"
   repo="$(brew --repository)"

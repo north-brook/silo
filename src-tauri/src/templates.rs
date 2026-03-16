@@ -52,7 +52,6 @@ pub async fn templates_save_template(project: String) -> Result<(), String> {
     }
 
     terminal::wait_for_template_bootstrap(&workspace_name).await?;
-    terminal::wait_for_template_chrome_sync(&workspace_name).await?;
     terminal::clear_template_runtime_state(&workspace_name).await?;
 
     let zone = workspace.zone().to_string();

@@ -7,6 +7,7 @@ import { CloudProvider } from "../components/cloud";
 import { GitBar, GitBarProvider } from "../components/git-bar";
 import { NewWorkspaceProvider } from "../components/new-workspace";
 import { OpenProjectProvider } from "../components/open-project";
+import { OverlayStateProvider } from "../components/overlay-state";
 import { PromptDraftProvider } from "../components/prompt-context";
 import { ProjectsBar, ProjectsBarProvider } from "../components/projects-bar";
 import { Toaster } from "../components/toaster";
@@ -34,25 +35,27 @@ export default function RootLayout({
 					disableHoverableContent
 				>
 					<body className="flex flex-col h-screen overflow-hidden">
-						<CloudProvider>
-							<PromptDraftProvider>
-								<GitBarProvider>
-									<ProjectsBarProvider>
-										<OpenProjectProvider>
-											<NewWorkspaceProvider>
-												<div className="flex flex-1 min-h-0">
-													<ProjectsBar />
-													<main className="flex-1 min-w-0 overflow-hidden flex flex-col">
-														{children}
-													</main>
-													<GitBar />
-												</div>
-											</NewWorkspaceProvider>
-										</OpenProjectProvider>
-									</ProjectsBarProvider>
-								</GitBarProvider>
-							</PromptDraftProvider>
-						</CloudProvider>
+						<OverlayStateProvider>
+							<CloudProvider>
+								<PromptDraftProvider>
+									<GitBarProvider>
+										<ProjectsBarProvider>
+											<OpenProjectProvider>
+												<NewWorkspaceProvider>
+													<div className="flex flex-1 min-h-0">
+														<ProjectsBar />
+														<main className="flex-1 min-w-0 overflow-hidden flex flex-col">
+															{children}
+														</main>
+														<GitBar />
+													</div>
+												</NewWorkspaceProvider>
+											</OpenProjectProvider>
+										</ProjectsBarProvider>
+									</GitBarProvider>
+								</PromptDraftProvider>
+							</CloudProvider>
+						</OverlayStateProvider>
 						<Toaster />
 					</body>
 				</TooltipProvider>

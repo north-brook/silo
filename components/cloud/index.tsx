@@ -9,9 +9,10 @@ import {
 	useRef,
 	useState,
 } from "react";
-import { Loader } from "../loader";
 import type { CloudSession } from "../../lib/cloud";
 import { cloudSessionKey } from "../../lib/cloud";
+import { Loader } from "../loader";
+import { CloudBrowserHost } from "./browser";
 import { CloudTerminalHost } from "./terminal";
 
 type CloudHostStatus = "idle" | "attaching" | "ready" | "error";
@@ -22,6 +23,7 @@ interface CloudHostRecord {
 	status: CloudHostStatus;
 	errorMessage: string | null;
 	terminalId: string | null;
+	portalUrl: string | null;
 	skipInitialScrollback: boolean;
 }
 
@@ -32,13 +34,20 @@ interface CloudContextValue {
 		session: CloudSession,
 		options?: { skipInitialScrollback?: boolean },
 	) => void;
-	ensureWorkspaceSessions: (workspace: string, sessions: CloudSession[]) => void;
+	ensureWorkspaceSessions: (
+		workspace: string,
+		sessions: CloudSession[],
+	) => void;
 	getHost: (key: string | null) => CloudHostRecord | null;
 	registerWorkspaceOutlet: (
 		workspace: string,
 		element: HTMLDivElement | null,
 	) => void;
-	removeSession: (workspace: string, kind: string, attachmentId: string) => void;
+	removeSession: (
+		workspace: string,
+		kind: string,
+		attachmentId: string,
+	) => void;
 	setActiveSession: (workspace: string | null, key: string | null) => void;
 }
 
@@ -55,6 +64,7 @@ function upsertHostRecord(
 		status: existing?.status ?? "idle",
 		errorMessage: existing?.errorMessage ?? null,
 		terminalId: existing?.terminalId ?? null,
+		portalUrl: existing?.portalUrl ?? null,
 		skipInitialScrollback:
 			options?.skipInitialScrollback ??
 			existing?.skipInitialScrollback ??
@@ -103,6 +113,13 @@ export function CloudProvider({
 					existing.session.kind === next.session.kind &&
 					existing.session.attachmentId === next.session.attachmentId &&
 					existing.session.name === next.session.name &&
+					existing.session.url === next.session.url &&
+					existing.session.logicalUrl === next.session.logicalUrl &&
+					existing.session.resolvedUrl === next.session.resolvedUrl &&
+					existing.session.title === next.session.title &&
+					existing.session.faviconUrl === next.session.faviconUrl &&
+					existing.session.canGoBack === next.session.canGoBack &&
+					existing.session.canGoForward === next.session.canGoForward &&
 					existing.session.working === next.session.working &&
 					existing.session.unread === next.session.unread &&
 					existing.skipInitialScrollback === next.skipInitialScrollback
@@ -132,6 +149,14 @@ export function CloudProvider({
 						if (
 							!existing ||
 							existing.session.name !== nextRecord.session.name ||
+							existing.session.url !== nextRecord.session.url ||
+							existing.session.logicalUrl !== nextRecord.session.logicalUrl ||
+							existing.session.resolvedUrl !== nextRecord.session.resolvedUrl ||
+							existing.session.title !== nextRecord.session.title ||
+							existing.session.faviconUrl !== nextRecord.session.faviconUrl ||
+							existing.session.canGoBack !== nextRecord.session.canGoBack ||
+							existing.session.canGoForward !==
+								nextRecord.session.canGoForward ||
 							existing.session.working !== nextRecord.session.working ||
 							existing.session.unread !== nextRecord.session.unread
 						) {
@@ -153,6 +178,13 @@ export function CloudProvider({
 					if (
 						!existing ||
 						existing.session.name !== nextRecord.session.name ||
+						existing.session.url !== nextRecord.session.url ||
+						existing.session.logicalUrl !== nextRecord.session.logicalUrl ||
+						existing.session.resolvedUrl !== nextRecord.session.resolvedUrl ||
+						existing.session.title !== nextRecord.session.title ||
+						existing.session.faviconUrl !== nextRecord.session.faviconUrl ||
+						existing.session.canGoBack !== nextRecord.session.canGoBack ||
+						existing.session.canGoForward !== nextRecord.session.canGoForward ||
 						existing.session.working !== nextRecord.session.working ||
 						existing.session.unread !== nextRecord.session.unread
 					) {
@@ -217,10 +249,15 @@ export function CloudProvider({
 		[],
 	);
 
-	const setActiveSession = useCallback((workspace: string | null, key: string | null) => {
-		setActiveWorkspace((previous) => (previous === workspace ? previous : workspace));
-		setActiveSessionKey((previous) => (previous === key ? previous : key));
-	}, []);
+	const setActiveSession = useCallback(
+		(workspace: string | null, key: string | null) => {
+			setActiveWorkspace((previous) =>
+				previous === workspace ? previous : workspace,
+			);
+			setActiveSessionKey((previous) => (previous === key ? previous : key));
+		},
+		[],
+	);
 
 	const getHost = useCallback(
 		(key: string | null) => {
@@ -239,6 +276,7 @@ export function CloudProvider({
 				status: CloudHostStatus;
 				errorMessage?: string | null;
 				terminalId?: string | null;
+				portalUrl?: string | null;
 			},
 		) => {
 			setHosts((previous) => {
@@ -258,12 +296,17 @@ export function CloudProvider({
 						state.terminalId === undefined
 							? existing.terminalId
 							: state.terminalId,
+					portalUrl:
+						state.portalUrl === undefined
+							? existing.portalUrl
+							: state.portalUrl,
 				};
 
 				if (
 					next.status === existing.status &&
 					next.errorMessage === existing.errorMessage &&
-					next.terminalId === existing.terminalId
+					next.terminalId === existing.terminalId &&
+					next.portalUrl === existing.portalUrl
 				) {
 					return previous;
 				}
@@ -346,6 +389,24 @@ export function CloudProvider({
 						);
 					}
 
+					if (record.session.kind === "browser") {
+						const workspaceIsActive =
+							record.session.workspace === activeWorkspace;
+						const browserTarget = workspaceIsActive
+							? (workspaceOutlets[record.session.workspace] ?? null)
+							: null;
+						return (
+							<CloudBrowserHost
+								key={record.key}
+								session={record.session}
+								target={browserTarget}
+								workspaceActive={workspaceIsActive}
+								visible={isActive}
+								onHostStateChange={(state) => updateHost(record.key, state)}
+							/>
+						);
+					}
+
 					return null;
 				})}
 		</CloudContext.Provider>
@@ -364,19 +425,19 @@ export function CloudDeck({
 	workspace,
 	activeSession,
 	skipInitialScrollback,
+	bgClassName = "bg-surface",
 }: {
 	workspace: string;
 	activeSession: CloudSession | null;
 	skipInitialScrollback: boolean;
+	bgClassName?: string;
 }) {
 	const outletRef = useRef<HTMLDivElement>(null);
-	const {
-		ensureSession,
-		getHost,
-		registerWorkspaceOutlet,
-		setActiveSession,
-	} = useCloud();
-	const activeSessionKey = activeSession ? cloudSessionKey(activeSession) : null;
+	const { ensureSession, getHost, registerWorkspaceOutlet, setActiveSession } =
+		useCloud();
+	const activeSessionKey = activeSession
+		? cloudSessionKey(activeSession)
+		: null;
 	const activeHost = getHost(activeSessionKey);
 
 	useEffect(() => {
@@ -397,12 +458,7 @@ export function CloudDeck({
 			setActiveSession(null, null);
 		};
 	}, [
-		activeSession?.attachmentId,
-		activeSession?.kind,
-		activeSession?.name,
-		activeSession?.unread,
-		activeSession?.working,
-		activeSession?.workspace,
+		activeSession,
 		activeSessionKey,
 		ensureSession,
 		setActiveSession,
@@ -411,12 +467,14 @@ export function CloudDeck({
 	]);
 
 	return (
-		<div className="flex-1 min-h-0 bg-surface relative">
+		<div className={`flex-1 min-h-0 ${bgClassName} relative`}>
 			{activeSession && (!activeHost || activeHost.status !== "ready") && (
-				<div className="absolute inset-0 flex items-center justify-center z-10">
+				<div className={`absolute inset-0 flex items-center justify-center z-10 ${bgClassName}`}>
 					<div className="flex items-center gap-2 text-[11px] text-text-muted">
 						{activeHost?.status === "error" ? (
-							<span>{activeHost.errorMessage ?? "Session failed to attach"}</span>
+							<span>
+								{activeHost.errorMessage ?? "Session failed to attach"}
+							</span>
 						) : (
 							<>
 								<Loader />

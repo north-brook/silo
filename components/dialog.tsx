@@ -2,9 +2,43 @@
 
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import * as React from "react";
+import { useOverlayRegistration } from "./overlay-state";
 import { cn } from "../lib/utils";
 
-const Dialog = DialogPrimitive.Root;
+function Dialog({
+	open: openProp,
+	defaultOpen,
+	onOpenChange,
+	...props
+}: React.ComponentPropsWithoutRef<typeof DialogPrimitive.Root>) {
+	const [uncontrolledOpen, setUncontrolledOpen] = React.useState(
+		defaultOpen ?? false,
+	);
+	const controlled = openProp !== undefined;
+	const open = controlled ? openProp : uncontrolledOpen;
+
+	useOverlayRegistration(open);
+
+	const handleOpenChange = React.useCallback(
+		(nextOpen: boolean) => {
+			if (!controlled) {
+				setUncontrolledOpen(nextOpen);
+			}
+			onOpenChange?.(nextOpen);
+		},
+		[controlled, onOpenChange],
+	);
+
+	return (
+		<DialogPrimitive.Root
+			open={open}
+			defaultOpen={defaultOpen}
+			onOpenChange={handleOpenChange}
+			{...props}
+		/>
+	);
+}
+
 const DialogTrigger = DialogPrimitive.Trigger;
 const DialogClose = DialogPrimitive.Close;
 const DialogPortal = DialogPrimitive.Portal;

@@ -19,7 +19,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 anyhow = "1"
-tauri = { version = "2", features = ["protocol-asset"] }
+tauri = { version = "2", features = ["protocol-asset", "unstable", "macos-proxy"] }
 tauri-plugin-opener = "2"
 tauri-plugin-log = "2"
 serde = { version = "1", features = ["derive"] }
@@ -35,3 +35,4 @@ time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 sha2 = "0.10"
+urlencoding = "2"

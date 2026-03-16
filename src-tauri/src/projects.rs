@@ -468,7 +468,7 @@ fn resolve_package_json_icon(project_root: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::config::{
-        ChromeConfig, ClaudeConfig, CodexConfig, GcloudConfig, GitConfig, ProjectConfig, SiloConfig,
+        ClaudeConfig, CodexConfig, GcloudConfig, GitConfig, ProjectConfig, SiloConfig,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -477,7 +477,6 @@ mod tests {
         let config = SiloConfig {
             gcloud: GcloudConfig::default(),
             git: GitConfig::default(),
-            chrome: ChromeConfig::default(),
             codex: CodexConfig::default(),
             claude: ClaudeConfig::default(),
             projects: IndexMap::from_iter([
@@ -517,7 +516,6 @@ mod tests {
         let config = SiloConfig {
             gcloud: GcloudConfig::default(),
             git: GitConfig::default(),
-            chrome: ChromeConfig::default(),
             codex: CodexConfig::default(),
             claude: ClaudeConfig::default(),
             projects: IndexMap::from_iter([
@@ -559,7 +557,6 @@ mod tests {
         let config = SiloConfig {
             gcloud: GcloudConfig::default(),
             git: GitConfig::default(),
-            chrome: ChromeConfig::default(),
             codex: CodexConfig::default(),
             claude: ClaudeConfig::default(),
             projects: IndexMap::from_iter([

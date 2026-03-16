@@ -269,17 +269,20 @@ function GitBarHeader() {
 
 	const createPr = useMutation({
 		mutationFn: () => gitCreatePr(workspace),
-		onSuccess: (result) => {
-			queryClient.invalidateQueries({
-				queryKey: ["git_pr_status", workspace],
+			onSuccess: (result) => {
+				queryClient.invalidateQueries({
+					queryKey: ["git_pr_status", workspace],
 			});
 			queryClient.invalidateQueries({
 				queryKey: ["git_pr_observe", workspace],
 			});
-			queryClient.invalidateQueries({
-				queryKey: ["terminal_list_terminals", workspace],
-			});
-			router.push(
+				queryClient.invalidateQueries({
+					queryKey: ["terminal_list_terminals", workspace],
+				});
+				queryClient.invalidateQueries({
+					queryKey: ["workspaces_get_workspace", workspace],
+				});
+				router.push(
 				cloudSessionHref({
 					project,
 					workspace,
@@ -300,7 +303,7 @@ function GitBarHeader() {
 
 	const push = useMutation({
 		mutationFn: () => gitPush(workspace),
-		onSuccess: (result) => {
+			onSuccess: (result) => {
 			queryClient.invalidateQueries({
 				queryKey: ["git_diff", workspace],
 			});
@@ -310,10 +313,13 @@ function GitBarHeader() {
 			queryClient.invalidateQueries({
 				queryKey: ["git_pr_observe", workspace],
 			});
-			queryClient.invalidateQueries({
-				queryKey: ["terminal_list_terminals", workspace],
-			});
-			router.push(
+				queryClient.invalidateQueries({
+					queryKey: ["terminal_list_terminals", workspace],
+				});
+				queryClient.invalidateQueries({
+					queryKey: ["workspaces_get_workspace", workspace],
+				});
+				router.push(
 				cloudSessionHref({
 					project,
 					workspace,

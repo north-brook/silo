@@ -2,9 +2,43 @@
 
 import * as PopoverPrimitive from "@radix-ui/react-popover";
 import * as React from "react";
+import { useOverlayRegistration } from "./overlay-state";
 import { cn } from "../lib/utils";
 
-const Popover = PopoverPrimitive.Root;
+function Popover({
+	open: openProp,
+	defaultOpen,
+	onOpenChange,
+	...props
+}: React.ComponentPropsWithoutRef<typeof PopoverPrimitive.Root>) {
+	const [uncontrolledOpen, setUncontrolledOpen] = React.useState(
+		defaultOpen ?? false,
+	);
+	const controlled = openProp !== undefined;
+	const open = controlled ? openProp : uncontrolledOpen;
+
+	useOverlayRegistration(open);
+
+	const handleOpenChange = React.useCallback(
+		(nextOpen: boolean) => {
+			if (!controlled) {
+				setUncontrolledOpen(nextOpen);
+			}
+			onOpenChange?.(nextOpen);
+		},
+		[controlled, onOpenChange],
+	);
+
+	return (
+		<PopoverPrimitive.Root
+			open={open}
+			defaultOpen={defaultOpen}
+			onOpenChange={handleOpenChange}
+			{...props}
+		/>
+	);
+}
+
 const PopoverTrigger = PopoverPrimitive.Trigger;
 const PopoverAnchor = PopoverPrimitive.Anchor;
 

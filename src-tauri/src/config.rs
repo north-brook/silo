@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use crate::chrome::detect_chrome_user_data_dir;
 use crate::codex::detect_codex_token;
 use indexmap::IndexMap;
 use log::{info, trace};
@@ -26,7 +25,6 @@ const SERVICE_ACCOUNT_KEY_SUFFIX: &str = "-silo-workspaces.json";
 pub(crate) struct SiloConfig {
     pub(crate) gcloud: GcloudConfig,
     pub(crate) git: GitConfig,
-    pub(crate) chrome: ChromeConfig,
     pub(crate) codex: CodexConfig,
     pub(crate) claude: ClaudeConfig,
     pub(crate) projects: IndexMap<String, ProjectConfig>,
@@ -101,12 +99,6 @@ pub(crate) struct GitConfig {
 #[serde(default)]
 pub(crate) struct CodexConfig {
     pub(crate) token: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-#[serde(default)]
-pub(crate) struct ChromeConfig {
-    pub(crate) user_data_dir: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -400,9 +392,6 @@ fn config_to_value(config: &SiloConfig) -> Result<Value, ConfigError> {
         .entry("git".to_string())
         .or_insert_with(|| Value::Table(Table::new()));
     table
-        .entry("chrome".to_string())
-        .or_insert_with(|| Value::Table(Table::new()));
-    table
         .entry("codex".to_string())
         .or_insert_with(|| Value::Table(Table::new()));
     table
@@ -443,9 +432,6 @@ fn detect_initial_config(home_dir: &Path) -> SiloConfig {
                 .unwrap_or_default(),
             user_email: command_output("git", ["config", "--global", "user.email"])
                 .unwrap_or_default(),
-        },
-        chrome: ChromeConfig {
-            user_data_dir: detect_chrome_user_data_dir(home_dir).unwrap_or_default(),
         },
         codex: CodexConfig {
             token: detect_codex_token(home_dir).unwrap_or_default(),
@@ -596,7 +582,6 @@ mod tests {
             fs::read_to_string(temp_dir.config_path()).expect("config file should be readable");
         assert!(contents.contains("[gcloud]"));
         assert!(contents.contains("[git]"));
-        assert!(contents.contains("[chrome]"));
         assert!(contents.contains("[codex]"));
         assert!(contents.contains("[claude]"));
         assert!(contents.contains("[projects]"));
@@ -742,7 +727,6 @@ mod tests {
         assert_eq!(config.git.gh_token, "");
         assert_eq!(config.git.user_name, "");
         assert_eq!(config.git.user_email, "");
-        assert_eq!(config.chrome.user_data_dir, "");
         assert_eq!(config.gcloud.project, "");
         assert_eq!(config.gcloud.service_account, "");
         assert_eq!(config.gcloud.service_account_key_file, "");
@@ -881,9 +865,6 @@ mod tests {
                     user_name: "Monalisa Octocat".to_string(),
                     user_email: "octocat@example.com".to_string(),
                 },
-                chrome: ChromeConfig {
-                    user_data_dir: "/tmp/chrome".to_string(),
-                },
                 codex: CodexConfig {
                     token: "codex-token".to_string(),
                 },
@@ -900,7 +881,6 @@ mod tests {
         assert_eq!(config.git.gh_token, "gh-token");
         assert_eq!(config.git.user_name, "Monalisa Octocat");
         assert_eq!(config.git.user_email, "octocat@example.com");
-        assert_eq!(config.chrome.user_data_dir, "/tmp/chrome");
         assert_eq!(config.codex.token, "codex-token");
         assert_eq!(config.claude.token, "");
     }
@@ -921,9 +901,6 @@ mod tests {
                 gh_token: "existing-gh-token".to_string(),
                 user_name: "Existing User".to_string(),
                 user_email: "existing@example.com".to_string(),
-            },
-            chrome: ChromeConfig {
-                user_data_dir: "/tmp/existing-chrome".to_string(),
             },
             codex: CodexConfig {
                 token: "existing-codex-token".to_string(),
@@ -1021,9 +998,6 @@ mod tests {
                     .unwrap_or_default(),
                 user_email: command("git", vec!["config", "--global", "user.email"])
                     .unwrap_or_default(),
-            },
-            chrome: ChromeConfig {
-                user_data_dir: detect_chrome_user_data_dir(home_dir).unwrap_or_default(),
             },
             codex: CodexConfig {
                 token: detect_codex(home_dir).unwrap_or_default(),

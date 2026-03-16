@@ -14,6 +14,13 @@ export interface WorkspaceSession {
 	type: string;
 	name: string;
 	attachment_id: string;
+	url?: string | null;
+	logical_url?: string | null;
+	resolved_url?: string | null;
+	title?: string | null;
+	favicon_url?: string | null;
+	can_go_back?: boolean | null;
+	can_go_forward?: boolean | null;
 	working: boolean | null;
 	unread: boolean | null;
 }
@@ -27,7 +34,8 @@ export interface BranchWorkspace extends WorkspaceBase {
 	target_branch: string;
 	unread: boolean;
 	working: boolean | null;
-	sessions: WorkspaceSession[];
+	terminals: WorkspaceSession[];
+	browsers: WorkspaceSession[];
 }
 
 export interface TemplateWorkspace extends WorkspaceBase {
@@ -48,6 +56,27 @@ export function workspaceLabel(workspace: Workspace): string {
 	}
 
 	return workspace.branch || workspace.name;
+}
+
+export function workspaceSessions(workspace: Workspace): WorkspaceSession[] {
+	if (isTemplateWorkspace(workspace)) {
+		return [];
+	}
+
+	return [...workspace.terminals, ...workspace.browsers].sort((left, right) => {
+		const leftTimestamp = sessionTimestamp(left.attachment_id);
+		const rightTimestamp = sessionTimestamp(right.attachment_id);
+		if (leftTimestamp !== rightTimestamp) {
+			return leftTimestamp - rightTimestamp;
+		}
+		return left.attachment_id.localeCompare(right.attachment_id);
+	});
+}
+
+function sessionTimestamp(attachmentId: string): number {
+	const [, rawTimestamp = "0"] = attachmentId.split("-", 2);
+	const timestamp = Number.parseInt(rawTimestamp, 10);
+	return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
 export function createWorkspace(project: string): Promise<Workspace> {
