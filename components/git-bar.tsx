@@ -26,6 +26,7 @@ import {
 	Suspense,
 	useContext,
 	useEffect,
+	useRef,
 	useState,
 } from "react";
 import { cloudSessionHref } from "../lib/cloud";
@@ -48,6 +49,7 @@ import {
 import { invoke } from "../lib/invoke";
 import { listenShortcutEvent, shortcutEvents } from "../lib/shortcuts";
 import { isTemplateWorkspace, type Workspace } from "../lib/workspaces";
+import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from "./dialog";
 import { Loader } from "./loader";
 import { toast } from "./toaster";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
@@ -466,6 +468,19 @@ function GitBarHeader() {
 			? "bg-yellow-600 text-white hover:bg-yellow-500"
 			: "bg-green-600 text-white hover:bg-green-500";
 
+	const [mergeConfirmOpen, setMergeConfirmOpen] = useState(false);
+
+	const handleMerge = () => {
+		if (checksRunning || checksFailing) {
+			setMergeConfirmOpen(true);
+		} else {
+			merge.mutate();
+		}
+	};
+
+	const handleMergeRef = useRef(handleMerge);
+	handleMergeRef.current = handleMerge;
+
 	useEffect(() => {
 		const runCreatePushOrMerge = (action: "create_or_push" | "merge") => {
 			if (action === "create_or_push") {
@@ -478,7 +493,7 @@ function GitBarHeader() {
 			}
 
 			if (showMerge && !merge.isPending) {
-				merge.mutate();
+				handleMergeRef.current();
 			}
 		};
 
@@ -516,18 +531,7 @@ function GitBarHeader() {
 		return () => window.removeEventListener("keydown", handler);
 	}, [showCreatePr, showPush, showMerge, createPr, push, merge]);
 
-	const hotkeyKbd = (keys: string[]) => (
-		<span className="flex items-center gap-0.5">
-			{keys.map((k) => (
-				<kbd
-					key={k}
-					className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text"
-				>
-					{k}
-				</kbd>
-			))}
-		</span>
-	);
+	const hotkeyKbd = hotkeyKbdHelper;
 
 	return (
 		<div className="h-9 flex items-center justify-between pl-1.5 pr-3 border-b border-border-light shrink-0">
@@ -603,7 +607,7 @@ function GitBarHeader() {
 							<button
 								type="button"
 								disabled={merge.isPending}
-								onClick={() => merge.mutate()}
+								onClick={() => handleMerge()}
 								className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium ${mergeColor} transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
 							>
 								{merge.isPending ? (
@@ -638,6 +642,56 @@ function GitBarHeader() {
 					</Tooltip>
 				)}
 			</div>
+
+			<Dialog open={mergeConfirmOpen} onOpenChange={setMergeConfirmOpen}>
+				<DialogContent
+					className="max-w-sm"
+					onKeyDown={(e) => {
+						if (e.metaKey && e.key === "Enter") {
+							e.preventDefault();
+							merge.mutate();
+							setMergeConfirmOpen(false);
+						}
+					}}
+				>
+					<DialogHeader className="flex flex-row items-center justify-between">
+						<DialogTitle>
+							{checksFailing
+								? "Merge with failing checks?"
+								: "Merge with running checks?"}
+						</DialogTitle>
+						<DialogClose className="text-text-muted hover:text-text transition-colors">
+							<X size={14} />
+						</DialogClose>
+					</DialogHeader>
+
+					<div className="mt-3 flex flex-col gap-0.5">
+						{[...checks]
+							.sort((a, b) => a.name.localeCompare(b.name))
+							.map((c) => (
+								<div
+									key={c.id}
+									className="flex items-center gap-2 px-1 py-1 text-[11px]"
+								>
+									<CheckStateIcon state={c.state} />
+									<span className="text-text truncate">{c.name}</span>
+								</div>
+							))}
+					</div>
+
+					<button
+						type="button"
+						onClick={() => {
+							merge.mutate();
+							setMergeConfirmOpen(false);
+						}}
+						className="mt-4 w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded text-[11px] font-medium bg-yellow-600 text-white hover:bg-yellow-500 transition-colors"
+					>
+						<GitMerge size={10} />
+						Merge
+					</button>
+				</DialogContent>
+			</Dialog>
 		</div>
 	);
 }
@@ -688,32 +742,46 @@ function GitBarTabs() {
 	return (
 		<>
 			<div className="w-full bg-bg shrink-0 flex items-end">
-				<button
-					type="button"
-					onClick={() => openTab("diff")}
-					className={`h-9 flex items-center gap-1.5 px-3 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
-						activeTab === "diff"
-							? "bg-surface text-text-bright border-r-border-light border-b-surface"
-							: "text-text-muted border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text"
-					}`}
-				>
-					Diff
-					<span className="text-emerald-400">+{additions}</span>
-					<span className="text-red-400">-{deletions}</span>
-				</button>
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<button
+							type="button"
+							onClick={() => openTab("diff")}
+							className={`h-9 flex items-center gap-1.5 px-3 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
+								activeTab === "diff"
+									? "bg-surface text-text-bright border-r-border-light border-b-surface"
+									: "text-text-muted border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text"
+							}`}
+						>
+							Diff
+							<span className="text-emerald-400">+{additions}</span>
+							<span className="text-red-400">-{deletions}</span>
+						</button>
+					</TooltipTrigger>
+					<TooltipContent side="bottom">
+						{hotkeyKbdHelper(["⌘", "⇧", "D"])}
+					</TooltipContent>
+				</Tooltip>
 				{hasPr && (
-					<button
-						type="button"
-						onClick={() => openTab("checks")}
-						className={`h-9 flex items-center gap-1.5 px-3 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
-							activeTab === "checks"
-								? "bg-surface text-text-bright border-r-border-light border-b-surface"
-								: "text-text-muted border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text"
-						}`}
-					>
-						Checks
-						{checksIndicator}
-					</button>
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<button
+								type="button"
+								onClick={() => openTab("checks")}
+								className={`h-9 flex items-center gap-1.5 px-3 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
+									activeTab === "checks"
+										? "bg-surface text-text-bright border-r-border-light border-b-surface"
+										: "text-text-muted border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text"
+								}`}
+							>
+								Checks
+								{checksIndicator}
+							</button>
+						</TooltipTrigger>
+						<TooltipContent side="bottom">
+							{hotkeyKbdHelper(["⌘", "⇧", "C"])}
+						</TooltipContent>
+					</Tooltip>
 				)}
 				<div className="flex-1 h-9 border-b border-border-light" />
 			</div>
@@ -932,6 +1000,21 @@ function ChecksTab({
 				</p>
 			)}
 		</div>
+	);
+}
+
+function hotkeyKbdHelper(keys: string[]) {
+	return (
+		<span className="flex items-center gap-0.5">
+			{keys.map((k) => (
+				<kbd
+					key={k}
+					className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text"
+				>
+					{k}
+				</kbd>
+			))}
+		</span>
 	);
 }
 
