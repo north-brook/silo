@@ -3,7 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Check, HardDrive } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { type ReactNode, Suspense, useEffect, useRef, useState } from "react";
+import { type ReactNode, Suspense, useEffect, useRef } from "react";
 import { GCloudIcon } from "../../../components/icons/gcloud";
 import { SiloIcon } from "../../../components/icons/silo";
 import { Loader } from "../../../components/loader";
@@ -19,32 +19,16 @@ interface Step {
 const ICON_SIZE = 12;
 
 function useSavingSteps(status: string, deleted: boolean): Step[] {
-	const [wasStopped, setWasStopped] = useState(false);
-
 	const isStopping = status === "STOPPING";
 	const isStopped = status === "TERMINATED" || status === "STOPPED";
-
-	useEffect(() => {
-		if (isStopped) setWasStopped(true);
-	}, [isStopped]);
-
-	// 1. Stopping virtual machine — active while stopping, done once stopped
 	const stopState: Step["state"] =
-		isStopped || wasStopped ? "done" : isStopping ? "active" : "pending";
-
-	// 2. Snapshotting disk — active once stopped, done when VM is deleted
+		deleted || isStopped ? "done" : isStopping ? "active" : "pending";
 	const snapshotState: Step["state"] = deleted
 		? "done"
-		: wasStopped
+		: isStopped
 			? "active"
 			: "pending";
-
-	// 3. Cleaning up — active after snapshot (VM deletion), done when complete
-	const cleanupState: Step["state"] = deleted
-		? "done"
-		: snapshotState === "done"
-			? "active"
-			: "pending";
+	const cleanupState: Step["state"] = deleted ? "done" : "pending";
 
 	return [
 		{
