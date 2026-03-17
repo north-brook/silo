@@ -79,9 +79,7 @@ fn handle_shortcut_menu_event(app_handle: &AppHandle<Wry>, menu_id: &str) -> boo
         }
         MENU_ID_TOGGLE_GIT_BAR => emit_shortcut_event(app_handle, SHORTCUT_EVENT_TOGGLE_GIT_BAR),
         MENU_ID_OPEN_GIT_DIFF => emit_shortcut_event(app_handle, SHORTCUT_EVENT_OPEN_GIT_DIFF),
-        MENU_ID_OPEN_GIT_CHECKS => {
-            emit_shortcut_event(app_handle, SHORTCUT_EVENT_OPEN_GIT_CHECKS)
-        }
+        MENU_ID_OPEN_GIT_CHECKS => emit_shortcut_event(app_handle, SHORTCUT_EVENT_OPEN_GIT_CHECKS),
         MENU_ID_GIT_CREATE_OR_PUSH_PR => {
             emit_shortcut_event(app_handle, SHORTCUT_EVENT_GIT_CREATE_OR_PUSH_PR)
         }
@@ -93,7 +91,7 @@ fn handle_shortcut_menu_event(app_handle: &AppHandle<Wry>, menu_id: &str) -> boo
             let Ok(index) = index.parse::<u8>() else {
                 return false;
             };
-            if !(1..=9).contains(&index) {
+            if !(0..=9).contains(&index) {
                 return false;
             }
             emit_workspace_jump_event(app_handle, index);
@@ -179,7 +177,7 @@ pub fn run() {
                 let refresh_browser = MenuItem::with_id(
                     handle,
                     MENU_ID_REFRESH_BROWSER,
-                    "Refresh Page",
+                    "Refresh",
                     true,
                     Some("CmdOrCtrl+R"),
                 )?;
@@ -228,7 +226,7 @@ pub fn run() {
                 let git_create_or_push_pr = MenuItem::with_id(
                     handle,
                     MENU_ID_GIT_CREATE_OR_PUSH_PR,
-                    "Create Or Push PR",
+                    "Create or Push PR",
                     true,
                     Some("CmdOrCtrl+Shift+P"),
                 )?;
@@ -245,6 +243,14 @@ pub fn run() {
                     "Close Window",
                     true,
                     None::<&str>,
+                )?;
+
+                let dashboard_jump = MenuItem::with_id(
+                    handle,
+                    format!("{MENU_ID_JUMP_TO_WORKSPACE_PREFIX}0"),
+                    "Dashboard",
+                    true,
+                    Some("CmdOrCtrl+0"),
                 )?;
 
                 let workspace_jump_items = (1..=9)
@@ -279,18 +285,18 @@ pub fn run() {
                     .items(&[&new_workspace, &open_project, &new_tab, &close_tab])
                     .build()?;
 
-                let jump_to_workspace_submenu = SubmenuBuilder::new(handle, "Jump To Workspace")
+                let jump_to_workspace_submenu = SubmenuBuilder::new(handle, "Jump to Workspace")
                     .items(&workspace_jump_refs)
                     .build()?;
 
+                let browser_submenu = SubmenuBuilder::new(handle, "Browser")
+                    .items(&[&go_back_browser, &go_forward_browser, &refresh_browser])
+                    .build()?;
+
                 let navigate_submenu = SubmenuBuilder::new(handle, "Navigate")
-                    .items(&[
-                        &go_back_browser,
-                        &go_forward_browser,
-                        &refresh_browser,
-                        &previous_tab,
-                        &next_tab,
-                    ])
+                    .item(&dashboard_jump)
+                    .separator()
+                    .items(&[&previous_tab, &next_tab])
                     .separator()
                     .item(&jump_to_workspace_submenu)
                     .build()?;
@@ -303,7 +309,6 @@ pub fn run() {
                     .items(&[
                         &open_git_diff,
                         &open_git_checks,
-                        &toggle_git_bar,
                         &git_create_or_push_pr,
                         &git_merge_pr,
                     ])
@@ -328,6 +333,7 @@ pub fn run() {
                 let menu = MenuBuilder::new(handle)
                     .item(&app_submenu)
                     .item(&file_submenu)
+                    .item(&browser_submenu)
                     .item(&navigate_submenu)
                     .item(&view_submenu)
                     .item(&git_submenu)

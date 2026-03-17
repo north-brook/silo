@@ -74,6 +74,8 @@ pub struct BrowserViewport {
 struct BrowserWebviewState {
     label: String,
     resolved_url: String,
+    viewport: BrowserViewport,
+    visible: bool,
 }
 
 struct BrowserUrlTarget {
@@ -591,6 +593,16 @@ impl BrowserManager {
                     .map_err(|error| format!("failed to navigate browser tab: {error}"))?;
                 self.set_resolved_url(workspace, attachment_id, resolved_url)?;
             }
+            self.upsert_webview_state(
+                workspace,
+                attachment_id,
+                BrowserWebviewState {
+                    label,
+                    resolved_url: resolved_url.to_string(),
+                    viewport,
+                    visible,
+                },
+            )?;
             return Ok(());
         }
 
@@ -691,6 +703,8 @@ impl BrowserManager {
             BrowserWebviewState {
                 label,
                 resolved_url: resolved_url.to_string(),
+                viewport,
+                visible,
             },
         );
         Ok(())
@@ -712,6 +726,7 @@ impl BrowserManager {
         if visible {
             let _ = webview.set_focus();
         }
+        self.set_webview_runtime_state(workspace, attachment_id, viewport, visible)?;
         Ok(true)
     }
 
@@ -728,6 +743,7 @@ impl BrowserManager {
         webview
             .hide()
             .map_err(|error| format!("failed to hide browser webview: {error}"))?;
+        self.set_webview_visible(workspace, attachment_id, false)?;
         Ok(true)
     }
 
@@ -766,6 +782,34 @@ impl BrowserManager {
             .map(|state| state.resolved_url.clone()))
     }
 
+    fn current_webview_state(
+        &self,
+        workspace: &str,
+        attachment_id: &str,
+    ) -> Result<Option<BrowserWebviewState>, String> {
+        let webviews = self
+            .webviews
+            .lock()
+            .map_err(|_| "browser webview lock poisoned".to_string())?;
+        Ok(webviews
+            .get(&browser_webview_label(workspace, attachment_id))
+            .cloned())
+    }
+
+    fn upsert_webview_state(
+        &self,
+        workspace: &str,
+        attachment_id: &str,
+        state: BrowserWebviewState,
+    ) -> Result<(), String> {
+        let mut webviews = self
+            .webviews
+            .lock()
+            .map_err(|_| "browser webview lock poisoned".to_string())?;
+        webviews.insert(browser_webview_label(workspace, attachment_id), state);
+        Ok(())
+    }
+
     fn set_resolved_url(
         &self,
         workspace: &str,
@@ -778,6 +822,40 @@ impl BrowserManager {
             .map_err(|_| "browser webview lock poisoned".to_string())?;
         if let Some(state) = webviews.get_mut(&browser_webview_label(workspace, attachment_id)) {
             state.resolved_url = resolved_url.to_string();
+        }
+        Ok(())
+    }
+
+    fn set_webview_runtime_state(
+        &self,
+        workspace: &str,
+        attachment_id: &str,
+        viewport: BrowserViewport,
+        visible: bool,
+    ) -> Result<(), String> {
+        let mut webviews = self
+            .webviews
+            .lock()
+            .map_err(|_| "browser webview lock poisoned".to_string())?;
+        if let Some(state) = webviews.get_mut(&browser_webview_label(workspace, attachment_id)) {
+            state.viewport = viewport;
+            state.visible = visible;
+        }
+        Ok(())
+    }
+
+    fn set_webview_visible(
+        &self,
+        workspace: &str,
+        attachment_id: &str,
+        visible: bool,
+    ) -> Result<(), String> {
+        let mut webviews = self
+            .webviews
+            .lock()
+            .map_err(|_| "browser webview lock poisoned".to_string())?;
+        if let Some(state) = webviews.get_mut(&browser_webview_label(workspace, attachment_id)) {
+            state.visible = visible;
         }
         Ok(())
     }
@@ -850,6 +928,7 @@ fn handle_page_load(
     resolved_url: String,
 ) {
     let _ = manager.set_resolved_url(workspace, attachment_id, &resolved_url);
+    reapply_tracked_webview_state(manager, workspace, attachment_id, webview);
     let logical_url = manager
         .loopback_router
         .logical_url_for_reported_url(workspace, &resolved_url)
@@ -886,9 +965,10 @@ fn handle_title_changed(
     app: &AppHandle<Wry>,
     workspace: &str,
     attachment_id: &str,
-    _webview: &Webview<Wry>,
+    webview: &Webview<Wry>,
     title: &str,
 ) {
+    reapply_tracked_webview_state(manager, workspace, attachment_id, webview);
     let resolved_url = manager
         .current_resolved_url(workspace, attachment_id)
         .ok()
@@ -931,6 +1011,18 @@ fn handle_title_changed(
         enqueue_browser_metadata_update(metadata.inner(), &workspace, None, session);
         let _ = emit_browser_state_changed(&app_handle, &workspace, &attachment_id);
     });
+}
+
+fn reapply_tracked_webview_state(
+    manager: &BrowserManager,
+    workspace: &str,
+    attachment_id: &str,
+    webview: &Webview<Wry>,
+) {
+    let Ok(Some(state)) = manager.current_webview_state(workspace, attachment_id) else {
+        return;
+    };
+    let _ = set_webview_viewport(webview, state.viewport, state.visible);
 }
 
 fn enqueue_browser_metadata_update(
