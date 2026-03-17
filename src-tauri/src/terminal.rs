@@ -249,7 +249,6 @@ pub async fn terminal_create_terminal(
 #[tauri::command]
 pub async fn terminal_create_assistant(
     state: State<'_, TerminalManager>,
-    workspace_state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
     model: String,
 ) -> Result<TerminalCreateResult, String> {
@@ -259,8 +258,6 @@ pub async fn terminal_create_assistant(
         other => return Err(format!("unsupported assistant model: {other}")),
     };
     let attachment_id = start_terminal_command(state.inner(), &workspace, command).await?;
-    workspace_state
-        .upsert_workspace_session(&workspace, session_for_command(&attachment_id, command));
     Ok(TerminalCreateResult { attachment_id })
 }
 
@@ -446,6 +443,18 @@ pub async fn terminal_kill_terminal(
         ));
     }
     workspace_state.remove_workspace_session(&workspace, "terminal", &attachment_id);
+    if workspace_state.clear_active_workspace_session_if_matches(
+        &workspace,
+        "terminal",
+        &attachment_id,
+        lookup.workspace.active_session(),
+    ) {
+        workspace_state.enqueue(
+            &workspace,
+            Some(lookup.clone()),
+            crate::state::active_session_metadata_entries(None),
+        );
+    }
 
     let key = AttachmentKey {
         workspace,

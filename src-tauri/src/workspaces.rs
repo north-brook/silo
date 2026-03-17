@@ -1,7 +1,9 @@
 use crate::config::{ConfigStore, ProjectConfig, SiloConfig};
 use crate::river_names::DEFAULT_RIVER_NAMES;
 use crate::state::{
-    WorkspaceMetadataEntry, BROWSER_LAST_ACTIVE_METADATA_KEY, BROWSER_SESSION_METADATA_PREFIX,
+    active_session_metadata_entries, workspace_last_active_metadata_key, WorkspaceMetadataEntry,
+    ACTIVE_SESSION_ATTACHMENT_ID_METADATA_KEY, ACTIVE_SESSION_KIND_METADATA_KEY,
+    BROWSER_LAST_ACTIVE_METADATA_KEY, BROWSER_SESSION_METADATA_PREFIX,
     TERMINAL_LAST_ACTIVE_METADATA_KEY, TERMINAL_LAST_WORKING_METADATA_KEY,
     TERMINAL_SESSION_METADATA_PREFIX, TERMINAL_UNREAD_METADATA_KEY, TERMINAL_WORKING_METADATA_KEY,
 };
@@ -60,10 +62,32 @@ struct WorkspaceBase {
     project: Option<String>,
     last_active: Option<String>,
     last_working: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_session: Option<WorkspaceActiveSession>,
     created_at: String,
     status: String,
     zone: String,
     ready: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceActiveSession {
+    #[serde(rename = "type")]
+    pub(crate) kind: String,
+    pub(crate) attachment_id: String,
+}
+
+impl WorkspaceActiveSession {
+    pub(crate) fn new(kind: impl Into<String>, attachment_id: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            attachment_id: attachment_id.into(),
+        }
+    }
+
+    pub(crate) fn matches(&self, kind: &str, attachment_id: &str) -> bool {
+        self.kind == kind && self.attachment_id == attachment_id
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -130,6 +154,10 @@ impl Workspace {
         self.base().last_active.as_deref()
     }
 
+    pub(crate) fn active_session(&self) -> Option<&WorkspaceActiveSession> {
+        self.base().active_session.as_ref()
+    }
+
     pub(crate) fn name(&self) -> &str {
         &self.base().name
     }
@@ -183,6 +211,12 @@ impl Workspace {
         sessions.extend_from_slice(self.browsers());
         terminal::sort_workspace_sessions_oldest_to_newest(&mut sessions);
         sessions
+    }
+
+    pub(crate) fn has_session(&self, kind: &str, attachment_id: &str) -> bool {
+        self.sessions()
+            .into_iter()
+            .any(|session| session.kind == kind && session.attachment_id == attachment_id)
     }
 }
 
@@ -251,6 +285,33 @@ pub(crate) fn overlay_workspace_sessions(
             workspace.browsers = browsers;
             Workspace::Template(workspace)
         }
+    }
+}
+
+pub(crate) fn overlay_workspace_active_session(
+    workspace: Workspace,
+    active_session: Option<WorkspaceActiveSession>,
+) -> Workspace {
+    match workspace {
+        Workspace::Branch(mut workspace) => {
+            workspace.base.active_session = active_session;
+            Workspace::Branch(workspace)
+        }
+        Workspace::Template(mut workspace) => {
+            workspace.base.active_session = active_session;
+            Workspace::Template(workspace)
+        }
+    }
+}
+
+pub(crate) fn clear_invalid_workspace_active_session(workspace: Workspace) -> Workspace {
+    let invalid = workspace
+        .active_session()
+        .is_some_and(|active| !workspace.has_session(&active.kind, &active.attachment_id));
+    if invalid {
+        overlay_workspace_active_session(workspace, None)
+    } else {
+        workspace
     }
 }
 
@@ -493,9 +554,48 @@ pub async fn workspaces_get_workspace(
 }
 
 #[tauri::command]
+pub async fn workspaces_set_active_session(
+    state: State<'_, crate::state::WorkspaceMetadataManager>,
+    workspace: String,
+    kind: String,
+    attachment_id: String,
+) -> Result<(), String> {
+    let kind = kind.trim().to_string();
+    let attachment_id = attachment_id.trim().to_string();
+    if kind.is_empty() {
+        return Err("active session kind must not be empty".to_string());
+    }
+    if attachment_id.is_empty() {
+        return Err("active session attachment_id must not be empty".to_string());
+    }
+
+    let lookup = find_workspace(&workspace).await?;
+    let resolved = state.apply_workspace_state(lookup.workspace.clone());
+    if !resolved.has_session(&kind, &attachment_id) {
+        return Err(format!(
+            "workspace {} is missing session {}:{}",
+            workspace, kind, attachment_id
+        ));
+    }
+
+    let active_session = WorkspaceActiveSession::new(kind.clone(), attachment_id);
+    state.set_active_workspace_session(&workspace, active_session.clone());
+
+    let mut entries = active_session_metadata_entries(Some(&active_session));
+    if let Some(key) = workspace_last_active_metadata_key(&kind) {
+        entries.push(WorkspaceMetadataEntry {
+            key: key.to_string(),
+            value: Some(current_rfc3339_timestamp()),
+        });
+    }
+    state.enqueue(&workspace, Some(lookup), entries);
+
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn workspaces_submit_prompt(
     state: State<'_, terminal::TerminalManager>,
-    workspace_state: State<'_, crate::state::WorkspaceMetadataManager>,
     workspace: String,
     prompt: String,
     model: String,
@@ -510,10 +610,6 @@ pub async fn workspaces_submit_prompt(
     let command = prompt_command_for_model(&model, &prompt)?;
     let attachment_id =
         terminal::start_terminal_command(state.inner(), &workspace, &command).await?;
-    workspace_state.upsert_workspace_session(
-        &workspace,
-        terminal::session_for_command(&attachment_id, &command),
-    );
 
     Ok(terminal::TerminalCreateResult { attachment_id })
 }
@@ -781,6 +877,7 @@ fn pending_workspace(
             project: Some(sanitize_label_value(project_label)),
             last_active: None,
             last_working: None,
+            active_session: None,
             created_at,
             status: "PROVISIONING".to_string(),
             zone: zone.to_string(),
@@ -806,6 +903,7 @@ fn pending_template_workspace(name: &str, project_label: &str, zone: &str) -> Te
             project: Some(sanitize_label_value(project_label)),
             last_active: None,
             last_working: None,
+            active_session: None,
             created_at,
             status: "PROVISIONING".to_string(),
             zone: zone.to_string(),
@@ -1652,6 +1750,7 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         .map(str::to_owned);
     let last_active = resolve_workspace_last_active(&metadata);
     let last_working = resolve_workspace_last_working(&metadata);
+    let active_session = resolve_workspace_active_session(&metadata);
     let ready = labels
         .get("ready")
         .and_then(Value::as_str)
@@ -1664,6 +1763,7 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         project,
         last_active,
         last_working,
+        active_session,
         created_at,
         status,
         zone,
@@ -1858,12 +1958,35 @@ fn resolve_workspace_last_working(metadata: &HashMap<String, String>) -> Option<
     metadata.get(TERMINAL_LAST_WORKING_METADATA_KEY).cloned()
 }
 
+fn resolve_workspace_active_session(
+    metadata: &HashMap<String, String>,
+) -> Option<WorkspaceActiveSession> {
+    let kind = metadata
+        .get(ACTIVE_SESSION_KIND_METADATA_KEY)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let attachment_id = metadata
+        .get(ACTIVE_SESSION_ATTACHMENT_ID_METADATA_KEY)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+
+    Some(WorkspaceActiveSession::new(kind, attachment_id))
+}
+
 fn parse_bool_value(label: &str, value: &str) -> Result<bool, String> {
     match value.trim() {
         "true" => Ok(true),
         "false" => Ok(false),
         other => Err(format!("invalid {label} label value: {other}")),
     }
+}
+
+fn current_rfc3339_timestamp() -> String {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
 fn workspace_metadata_arg(entries: &[(&str, &str)]) -> Result<String, String> {
@@ -2155,6 +2278,7 @@ mod tests {
             project: Some("demo".to_string()),
             last_active: last_active.map(str::to_string),
             last_working: None,
+            active_session: None,
             created_at: "2026-03-11T10:00:00Z".to_string(),
             status: "RUNNING".to_string(),
             zone: "us-east1-b".to_string(),
@@ -2626,6 +2750,8 @@ mod tests {
                     { "key": "terminal-working", "value": "true" },
                     { "key": "terminal-last-active", "value": "2026-03-11T13:05:00Z" },
                     { "key": "terminal-last-working", "value": "2026-03-11T13:04:30Z" },
+                    { "key": "active-session-kind", "value": "terminal" },
+                    { "key": "active-session-attachment-id", "value": "terminal-1" },
                     { "key": "terminal-session-terminal-1", "value": "{\"type\":\"terminal\",\"name\":\"codex\",\"attachment_id\":\"terminal-1\",\"working\":true,\"unread\":false}" }
                 ]
             }
@@ -2652,6 +2778,10 @@ mod tests {
         );
         assert_eq!(workspace.base.created_at, "2026-03-11T13:00:00.000-04:00");
         assert_eq!(workspace.base.zone, "us-east1-b");
+        assert_eq!(
+            workspace.base.active_session,
+            Some(WorkspaceActiveSession::new("terminal", "terminal-1"))
+        );
         assert_eq!(workspace.terminals.len(), 1);
         assert_eq!(workspace.terminals[0].name, "codex");
         assert_eq!(workspace.terminals[0].attachment_id, "terminal-1");
@@ -2718,6 +2848,7 @@ mod tests {
         assert_eq!(workspace.working, None);
         assert_eq!(workspace.base.last_active, None);
         assert_eq!(workspace.base.last_working, None);
+        assert_eq!(workspace.base.active_session, None);
     }
 
     #[test]
@@ -2818,6 +2949,40 @@ mod tests {
             workspace.terminals[0].attachment_id,
             "terminal-1773634611341"
         );
+    }
+
+    #[test]
+    fn parse_workspace_requires_both_active_session_metadata_keys() {
+        let workspace = parse_workspace(&json!({
+            "name": "ws-demo-123",
+            "zone": "us-east1-b",
+            "status": "RUNNING",
+            "creationTimestamp": "2026-03-11T13:00:00.000-04:00",
+            "metadata": {
+                "items": [
+                    { "key": "active-session-kind", "value": "terminal" }
+                ]
+            }
+        }))
+        .expect("workspace should parse");
+
+        let Workspace::Branch(workspace) = workspace else {
+            panic!("workspace should parse as a branch workspace");
+        };
+
+        assert_eq!(workspace.base.active_session, None);
+    }
+
+    #[test]
+    fn clear_invalid_workspace_active_session_removes_stale_active_session() {
+        let workspace = overlay_workspace_active_session(
+            test_branch_workspace("ws-demo-123", None),
+            Some(WorkspaceActiveSession::new("terminal", "terminal-1")),
+        );
+
+        let workspace = clear_invalid_workspace_active_session(workspace);
+
+        assert_eq!(workspace.active_session(), None);
     }
 
     #[test]

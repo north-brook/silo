@@ -1,4 +1,6 @@
-use crate::workspaces::{self, Workspace, WorkspaceLookup, WorkspaceSession};
+use crate::workspaces::{
+    self, Workspace, WorkspaceActiveSession, WorkspaceLookup, WorkspaceSession,
+};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,6 +22,7 @@ struct PendingWorkspaceMetadata {
 pub struct WorkspaceMetadataManager {
     metadata: Arc<Mutex<HashMap<String, PendingWorkspaceMetadata>>>,
     sessions: Arc<Mutex<HashMap<String, HashMap<String, Option<WorkspaceSession>>>>>,
+    active_sessions: Arc<Mutex<HashMap<String, Option<WorkspaceActiveSession>>>>,
 }
 
 const WORKSPACE_METADATA_FLUSH_DELAY: Duration = Duration::from_millis(40);
@@ -27,6 +30,8 @@ const WORKSPACE_METADATA_BACKGROUND_RETRY_ATTEMPTS: usize = 2;
 const WORKSPACE_METADATA_BACKGROUND_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 pub(crate) const BROWSER_LAST_ACTIVE_METADATA_KEY: &str = "browser-last-active";
 pub(crate) const BROWSER_SESSION_METADATA_PREFIX: &str = "browser-session-";
+pub(crate) const ACTIVE_SESSION_KIND_METADATA_KEY: &str = "active-session-kind";
+pub(crate) const ACTIVE_SESSION_ATTACHMENT_ID_METADATA_KEY: &str = "active-session-attachment-id";
 pub(crate) const TERMINAL_LAST_ACTIVE_METADATA_KEY: &str = "terminal-last-active";
 pub(crate) const TERMINAL_LAST_WORKING_METADATA_KEY: &str = "terminal-last-working";
 pub(crate) const TERMINAL_SESSION_METADATA_PREFIX: &str = "terminal-session-";
@@ -35,6 +40,29 @@ pub(crate) const TERMINAL_WORKING_METADATA_KEY: &str = "terminal-working";
 
 pub(crate) fn browser_session_metadata_key(attachment_id: &str) -> String {
     format!("{BROWSER_SESSION_METADATA_PREFIX}{attachment_id}")
+}
+
+pub(crate) fn active_session_metadata_entries(
+    active_session: Option<&WorkspaceActiveSession>,
+) -> Vec<WorkspaceMetadataEntry> {
+    vec![
+        WorkspaceMetadataEntry {
+            key: ACTIVE_SESSION_KIND_METADATA_KEY.to_string(),
+            value: active_session.map(|session| session.kind.clone()),
+        },
+        WorkspaceMetadataEntry {
+            key: ACTIVE_SESSION_ATTACHMENT_ID_METADATA_KEY.to_string(),
+            value: active_session.map(|session| session.attachment_id.clone()),
+        },
+    ]
+}
+
+pub(crate) fn workspace_last_active_metadata_key(kind: &str) -> Option<&'static str> {
+    match kind {
+        "browser" => Some(BROWSER_LAST_ACTIVE_METADATA_KEY),
+        "terminal" => Some(TERMINAL_LAST_ACTIVE_METADATA_KEY),
+        _ => None,
+    }
 }
 
 fn workspace_session_key(kind: &str, attachment_id: &str) -> String {
@@ -231,6 +259,16 @@ impl WorkspaceMetadataManager {
 
     pub(crate) fn apply_workspace_state(&self, workspace: Workspace) -> Workspace {
         let workspace_name = workspace.name().to_string();
+        let workspace = self.apply_workspace_session_state(&workspace_name, workspace);
+        let workspace = self.apply_active_workspace_state(&workspace_name, workspace);
+        workspaces::clear_invalid_workspace_active_session(workspace)
+    }
+
+    fn apply_workspace_session_state(
+        &self,
+        workspace_name: &str,
+        workspace: Workspace,
+    ) -> Workspace {
         let metadata_sessions = workspace
             .sessions()
             .into_iter()
@@ -246,7 +284,7 @@ impl WorkspaceMetadataManager {
             let Ok(mut sessions) = self.sessions.lock() else {
                 return workspace;
             };
-            let Some(entries) = sessions.get_mut(&workspace_name) else {
+            let Some(entries) = sessions.get_mut(workspace_name) else {
                 return workspace;
             };
             entries.retain(|key, pending| match pending {
@@ -254,13 +292,70 @@ impl WorkspaceMetadataManager {
                 None => metadata_sessions.contains_key(key),
             });
             if entries.is_empty() {
-                sessions.remove(&workspace_name);
+                sessions.remove(workspace_name);
                 return workspace;
             }
             entries.clone()
         };
 
         workspaces::overlay_workspace_sessions(workspace, &overlay)
+    }
+
+    fn apply_active_workspace_state(
+        &self,
+        workspace_name: &str,
+        workspace: Workspace,
+    ) -> Workspace {
+        let overlay = {
+            let Ok(mut active_sessions) = self.active_sessions.lock() else {
+                return workspace;
+            };
+            let Some(pending) = active_sessions.get(workspace_name).cloned() else {
+                return workspace;
+            };
+            if pending == workspace.active_session().cloned() {
+                active_sessions.remove(workspace_name);
+                return workspace;
+            }
+            pending
+        };
+
+        workspaces::overlay_workspace_active_session(workspace, overlay)
+    }
+
+    pub(crate) fn set_active_workspace_session(
+        &self,
+        workspace: &str,
+        active_session: WorkspaceActiveSession,
+    ) {
+        let Ok(mut active_sessions) = self.active_sessions.lock() else {
+            return;
+        };
+        active_sessions.insert(workspace.to_string(), Some(active_session));
+    }
+
+    pub(crate) fn clear_active_workspace_session_if_matches(
+        &self,
+        workspace: &str,
+        kind: &str,
+        attachment_id: &str,
+        metadata_active_session: Option<&WorkspaceActiveSession>,
+    ) -> bool {
+        let Ok(mut active_sessions) = self.active_sessions.lock() else {
+            return metadata_active_session
+                .is_some_and(|active| active.matches(kind, attachment_id));
+        };
+        let current_active = active_sessions
+            .get(workspace)
+            .cloned()
+            .flatten()
+            .or_else(|| metadata_active_session.cloned());
+        if current_active.is_some_and(|active| active.matches(kind, attachment_id)) {
+            active_sessions.insert(workspace.to_string(), None);
+            true
+        } else {
+            false
+        }
     }
 
     pub(crate) fn apply_workspace_states(&self, workspaces: Vec<Workspace>) -> Vec<Workspace> {

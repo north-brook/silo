@@ -269,6 +269,18 @@ pub async fn browser_kill_tab(
     } else {
         cached_sessions
     };
+    if metadata.clear_active_workspace_session_if_matches(
+        &workspace,
+        "browser",
+        &attachment_id,
+        lookup.workspace.active_session(),
+    ) {
+        metadata.enqueue(
+            &workspace,
+            Some(lookup.clone()),
+            crate::state::active_session_metadata_entries(None),
+        );
+    }
     state
         .loopback_router
         .release_unused_workspace_routes(&workspace, &remaining_sessions)?;

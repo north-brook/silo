@@ -59,6 +59,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
 interface GitBarContextValue {
 	isOpen: boolean;
 	toggle: () => void;
+	activeTab: "diff" | "checks";
+	openTab: (tab: "diff" | "checks") => void;
 	diff: Diff | null;
 	hasChanges: boolean;
 	workspace: string;
@@ -73,6 +75,8 @@ interface GitBarContextValue {
 const GitBarContext = createContext<GitBarContextValue>({
 	isOpen: false,
 	toggle: () => {},
+	activeTab: "diff",
+	openTab: () => {},
 	diff: null,
 	hasChanges: false,
 	workspace: "",
@@ -143,6 +147,13 @@ function GitBarProviderInner({ children }: { children: ReactNode }) {
 	});
 
 	const [isOpen, setIsOpen] = useState(false);
+	const [activeTab, setActiveTab] = useState<"diff" | "checks">("diff");
+
+	useEffect(() => {
+		if (activeTab === "checks" && !hasPr) {
+			setActiveTab("diff");
+		}
+	}, [activeTab, hasPr]);
 
 	useEffect(() => {
 		if (isTauri()) {
@@ -161,9 +172,68 @@ function GitBarProviderInner({ children }: { children: ReactNode }) {
 		return () => window.removeEventListener("keydown", handler);
 	}, []);
 
+	useEffect(() => {
+		const openTab = (tab: "diff" | "checks") => {
+			if (tab === "diff") {
+				if (!hasChanges) {
+					return;
+				}
+			} else if (!hasPr) {
+				return;
+			}
+
+			setActiveTab(tab);
+			setIsOpen(true);
+		};
+
+		if (isTauri()) {
+			const unlistenDiff = listenShortcutEvent<void>(
+				shortcutEvents.openGitDiff,
+				() => {
+					openTab("diff");
+				},
+			);
+			const unlistenChecks = listenShortcutEvent<void>(
+				shortcutEvents.openGitChecks,
+				() => {
+					openTab("checks");
+				},
+			);
+			return () => {
+				unlistenDiff();
+				unlistenChecks();
+			};
+		}
+
+		const handler = (e: KeyboardEvent) => {
+			if (!e.metaKey || !e.shiftKey || e.altKey || e.ctrlKey) return;
+			if (e.key.toLowerCase() === "d") {
+				e.preventDefault();
+				openTab("diff");
+			}
+			if (e.key.toLowerCase() === "c") {
+				e.preventDefault();
+				openTab("checks");
+			}
+		};
+		window.addEventListener("keydown", handler);
+		return () => window.removeEventListener("keydown", handler);
+	}, [hasChanges, hasPr]);
+
 	const value: GitBarContextValue = {
 		isOpen,
 		toggle: () => setIsOpen((o) => !o),
+		activeTab,
+		openTab: (tab) => {
+			if (tab === "checks" && !hasPr) {
+				return;
+			}
+			if (tab === "diff" && !hasChanges) {
+				return;
+			}
+			setActiveTab(tab);
+			setIsOpen(true);
+		},
 		diff: diff.data ?? null,
 		hasChanges,
 		workspace: workspaceName,
@@ -577,8 +647,14 @@ function GitBarHeader() {
 // ---------------------------------------------------------------------------
 
 function GitBarTabs() {
-	const { diff, prStatus, observation, observationLoading } = useGitBar();
-	const [activeTab, setActiveTab] = useState<"diff" | "checks">("diff");
+	const {
+		activeTab,
+		diff,
+		openTab,
+		prStatus,
+		observation,
+		observationLoading,
+	} = useGitBar();
 
 	const hasPr = prStatus?.status === "open";
 
@@ -614,7 +690,7 @@ function GitBarTabs() {
 			<div className="w-full bg-bg shrink-0 flex items-end">
 				<button
 					type="button"
-					onClick={() => setActiveTab("diff")}
+					onClick={() => openTab("diff")}
 					className={`h-9 flex items-center gap-1.5 px-3 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
 						activeTab === "diff"
 							? "bg-surface text-text-bright border-r-border-light border-b-surface"
@@ -628,7 +704,7 @@ function GitBarTabs() {
 				{hasPr && (
 					<button
 						type="button"
-						onClick={() => setActiveTab("checks")}
+						onClick={() => openTab("checks")}
 						className={`h-9 flex items-center gap-1.5 px-3 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
 							activeTab === "checks"
 								? "bg-surface text-text-bright border-r-border-light border-b-surface"
@@ -679,22 +755,9 @@ function DiffSectionView({
 
 	return (
 		<div>
-			<div className="flex items-center justify-between px-3 py-1.5 text-[11px]">
+			<div className="flex items-center px-3 py-1.5 text-[11px]">
 				<span className="text-[10px] text-text-muted font-medium uppercase tracking-wide">
 					{label}
-				</span>
-				<span className="text-text-muted">
-					{section.overview.additions > 0 && (
-						<span className="text-emerald-400">
-							+{section.overview.additions}
-						</span>
-					)}
-					{section.overview.additions > 0 &&
-						section.overview.deletions > 0 &&
-						" "}
-					{section.overview.deletions > 0 && (
-						<span className="text-red-400">-{section.overview.deletions}</span>
-					)}
 				</span>
 			</div>
 			{section.files.map((file) => (

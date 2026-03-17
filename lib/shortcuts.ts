@@ -15,6 +15,8 @@ export const shortcutEvents = {
 	nextTab: "silo://next-tab",
 	toggleProjectsBar: "silo://toggle-projects-bar",
 	toggleGitBar: "silo://toggle-git-bar",
+	openGitDiff: "silo://open-git-diff",
+	openGitChecks: "silo://open-git-checks",
 	gitCreateOrPushPr: "silo://git-create-or-push-pr",
 	gitMergePr: "silo://git-merge-pr",
 	jumpToWorkspace: "silo://jump-to-workspace",
@@ -31,18 +33,32 @@ export function listenShortcutEvent<T>(
 	let disposed = false;
 	let unlisten: null | (() => void) = null;
 
-	void listen<T>(event, ({ payload }) => {
-		handler(payload);
-	}).then((nextUnlisten) => {
-		if (disposed) {
-			nextUnlisten();
+	const disposeListener = (nextUnlisten: null | (() => void)) => {
+		if (!nextUnlisten) {
 			return;
 		}
-		unlisten = nextUnlisten;
-	});
+
+		try {
+			nextUnlisten();
+		} catch {
+			// Tauri can race listener registration and component teardown on fast route changes.
+		}
+	};
+
+	void listen<T>(event, ({ payload }) => {
+		handler(payload);
+	})
+		.then((nextUnlisten) => {
+			if (disposed) {
+				disposeListener(nextUnlisten);
+				return;
+			}
+			unlisten = nextUnlisten;
+		})
+		.catch(() => {});
 
 	return () => {
 		disposed = true;
-		unlisten?.();
+		disposeListener(unlisten);
 	};
 }

@@ -29,6 +29,8 @@ const MENU_ID_PREVIOUS_TAB: &str = "previous_tab";
 const MENU_ID_NEXT_TAB: &str = "next_tab";
 const MENU_ID_TOGGLE_PROJECTS_BAR: &str = "toggle_projects_bar";
 const MENU_ID_TOGGLE_GIT_BAR: &str = "toggle_git_bar";
+const MENU_ID_OPEN_GIT_DIFF: &str = "open_git_diff";
+const MENU_ID_OPEN_GIT_CHECKS: &str = "open_git_checks";
 const MENU_ID_GIT_CREATE_OR_PUSH_PR: &str = "git_create_or_push_pr";
 const MENU_ID_GIT_MERGE_PR: &str = "git_merge_pr";
 const MENU_ID_CLOSE_WINDOW: &str = "close_window";
@@ -45,6 +47,8 @@ const SHORTCUT_EVENT_PREVIOUS_TAB: &str = "silo://previous-tab";
 const SHORTCUT_EVENT_NEXT_TAB: &str = "silo://next-tab";
 const SHORTCUT_EVENT_TOGGLE_PROJECTS_BAR: &str = "silo://toggle-projects-bar";
 const SHORTCUT_EVENT_TOGGLE_GIT_BAR: &str = "silo://toggle-git-bar";
+const SHORTCUT_EVENT_OPEN_GIT_DIFF: &str = "silo://open-git-diff";
+const SHORTCUT_EVENT_OPEN_GIT_CHECKS: &str = "silo://open-git-checks";
 const SHORTCUT_EVENT_GIT_CREATE_OR_PUSH_PR: &str = "silo://git-create-or-push-pr";
 const SHORTCUT_EVENT_GIT_MERGE_PR: &str = "silo://git-merge-pr";
 const SHORTCUT_EVENT_JUMP_TO_WORKSPACE: &str = "silo://jump-to-workspace";
@@ -63,21 +67,21 @@ fn handle_shortcut_menu_event(app_handle: &AppHandle<Wry>, menu_id: &str) -> boo
         MENU_ID_OPEN_PROJECT => emit_shortcut_event(app_handle, SHORTCUT_EVENT_OPEN_PROJECT),
         MENU_ID_NEW_TAB => emit_shortcut_event(app_handle, SHORTCUT_EVENT_NEW_TAB),
         MENU_ID_CLOSE_TAB => emit_shortcut_event(app_handle, SHORTCUT_EVENT_CLOSE_TAB),
-        MENU_ID_GO_BACK_BROWSER => {
-            emit_shortcut_event(app_handle, SHORTCUT_EVENT_GO_BACK_BROWSER)
-        }
+        MENU_ID_GO_BACK_BROWSER => emit_shortcut_event(app_handle, SHORTCUT_EVENT_GO_BACK_BROWSER),
         MENU_ID_GO_FORWARD_BROWSER => {
             emit_shortcut_event(app_handle, SHORTCUT_EVENT_GO_FORWARD_BROWSER)
         }
-        MENU_ID_REFRESH_BROWSER => {
-            emit_shortcut_event(app_handle, SHORTCUT_EVENT_REFRESH_BROWSER)
-        }
+        MENU_ID_REFRESH_BROWSER => emit_shortcut_event(app_handle, SHORTCUT_EVENT_REFRESH_BROWSER),
         MENU_ID_PREVIOUS_TAB => emit_shortcut_event(app_handle, SHORTCUT_EVENT_PREVIOUS_TAB),
         MENU_ID_NEXT_TAB => emit_shortcut_event(app_handle, SHORTCUT_EVENT_NEXT_TAB),
         MENU_ID_TOGGLE_PROJECTS_BAR => {
             emit_shortcut_event(app_handle, SHORTCUT_EVENT_TOGGLE_PROJECTS_BAR)
         }
         MENU_ID_TOGGLE_GIT_BAR => emit_shortcut_event(app_handle, SHORTCUT_EVENT_TOGGLE_GIT_BAR),
+        MENU_ID_OPEN_GIT_DIFF => emit_shortcut_event(app_handle, SHORTCUT_EVENT_OPEN_GIT_DIFF),
+        MENU_ID_OPEN_GIT_CHECKS => {
+            emit_shortcut_event(app_handle, SHORTCUT_EVENT_OPEN_GIT_CHECKS)
+        }
         MENU_ID_GIT_CREATE_OR_PUSH_PR => {
             emit_shortcut_event(app_handle, SHORTCUT_EVENT_GIT_CREATE_OR_PUSH_PR)
         }
@@ -207,6 +211,20 @@ pub fn run() {
                     true,
                     Some("CmdOrCtrl+Shift+B"),
                 )?;
+                let open_git_diff = MenuItem::with_id(
+                    handle,
+                    MENU_ID_OPEN_GIT_DIFF,
+                    "Show Diff",
+                    true,
+                    Some("CmdOrCtrl+Shift+D"),
+                )?;
+                let open_git_checks = MenuItem::with_id(
+                    handle,
+                    MENU_ID_OPEN_GIT_CHECKS,
+                    "Show Checks",
+                    true,
+                    Some("CmdOrCtrl+Shift+C"),
+                )?;
                 let git_create_or_push_pr = MenuItem::with_id(
                     handle,
                     MENU_ID_GIT_CREATE_OR_PUSH_PR,
@@ -282,7 +300,13 @@ pub fn run() {
                     .build()?;
 
                 let git_submenu = SubmenuBuilder::new(handle, "Git")
-                    .items(&[&git_create_or_push_pr, &git_merge_pr])
+                    .items(&[
+                        &open_git_diff,
+                        &open_git_checks,
+                        &toggle_git_bar,
+                        &git_create_or_push_pr,
+                        &git_merge_pr,
+                    ])
                     .build()?;
 
                 let edit_submenu = SubmenuBuilder::new(handle, "Edit")
@@ -371,6 +395,7 @@ pub fn run() {
             workspaces::workspaces_stop_workspace,
             workspaces::workspaces_suspend_workspace,
             workspaces::workspaces_get_workspace,
+            workspaces::workspaces_set_active_session,
             workspaces::workspaces_submit_prompt,
             workspaces::workspaces_delete_workspace,
             browser::browser_create_tab,
