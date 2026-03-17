@@ -22,6 +22,9 @@ const MENU_ID_NEW_WORKSPACE: &str = "new_workspace";
 const MENU_ID_OPEN_PROJECT: &str = "open_project";
 const MENU_ID_NEW_TAB: &str = "new_tab";
 const MENU_ID_CLOSE_TAB: &str = "close_tab";
+const MENU_ID_GO_BACK_BROWSER: &str = "go_back_browser";
+const MENU_ID_GO_FORWARD_BROWSER: &str = "go_forward_browser";
+const MENU_ID_REFRESH_BROWSER: &str = "refresh_browser";
 const MENU_ID_PREVIOUS_TAB: &str = "previous_tab";
 const MENU_ID_NEXT_TAB: &str = "next_tab";
 const MENU_ID_TOGGLE_PROJECTS_BAR: &str = "toggle_projects_bar";
@@ -35,6 +38,9 @@ const SHORTCUT_EVENT_NEW_WORKSPACE: &str = "silo://new-workspace";
 const SHORTCUT_EVENT_OPEN_PROJECT: &str = "silo://open-project";
 const SHORTCUT_EVENT_NEW_TAB: &str = "silo://new-tab";
 const SHORTCUT_EVENT_CLOSE_TAB: &str = "silo://close-tab";
+const SHORTCUT_EVENT_GO_BACK_BROWSER: &str = "silo://go-back-browser";
+const SHORTCUT_EVENT_GO_FORWARD_BROWSER: &str = "silo://go-forward-browser";
+const SHORTCUT_EVENT_REFRESH_BROWSER: &str = "silo://refresh-browser";
 const SHORTCUT_EVENT_PREVIOUS_TAB: &str = "silo://previous-tab";
 const SHORTCUT_EVENT_NEXT_TAB: &str = "silo://next-tab";
 const SHORTCUT_EVENT_TOGGLE_PROJECTS_BAR: &str = "silo://toggle-projects-bar";
@@ -57,6 +63,15 @@ fn handle_shortcut_menu_event(app_handle: &AppHandle<Wry>, menu_id: &str) -> boo
         MENU_ID_OPEN_PROJECT => emit_shortcut_event(app_handle, SHORTCUT_EVENT_OPEN_PROJECT),
         MENU_ID_NEW_TAB => emit_shortcut_event(app_handle, SHORTCUT_EVENT_NEW_TAB),
         MENU_ID_CLOSE_TAB => emit_shortcut_event(app_handle, SHORTCUT_EVENT_CLOSE_TAB),
+        MENU_ID_GO_BACK_BROWSER => {
+            emit_shortcut_event(app_handle, SHORTCUT_EVENT_GO_BACK_BROWSER)
+        }
+        MENU_ID_GO_FORWARD_BROWSER => {
+            emit_shortcut_event(app_handle, SHORTCUT_EVENT_GO_FORWARD_BROWSER)
+        }
+        MENU_ID_REFRESH_BROWSER => {
+            emit_shortcut_event(app_handle, SHORTCUT_EVENT_REFRESH_BROWSER)
+        }
         MENU_ID_PREVIOUS_TAB => emit_shortcut_event(app_handle, SHORTCUT_EVENT_PREVIOUS_TAB),
         MENU_ID_NEXT_TAB => emit_shortcut_event(app_handle, SHORTCUT_EVENT_NEXT_TAB),
         MENU_ID_TOGGLE_PROJECTS_BAR => {
@@ -142,6 +157,27 @@ pub fn run() {
                     "Close Tab",
                     true,
                     Some("CmdOrCtrl+W"),
+                )?;
+                let go_back_browser = MenuItem::with_id(
+                    handle,
+                    MENU_ID_GO_BACK_BROWSER,
+                    "Back",
+                    true,
+                    Some("CmdOrCtrl+["),
+                )?;
+                let go_forward_browser = MenuItem::with_id(
+                    handle,
+                    MENU_ID_GO_FORWARD_BROWSER,
+                    "Forward",
+                    true,
+                    Some("CmdOrCtrl+]"),
+                )?;
+                let refresh_browser = MenuItem::with_id(
+                    handle,
+                    MENU_ID_REFRESH_BROWSER,
+                    "Refresh Page",
+                    true,
+                    Some("CmdOrCtrl+R"),
                 )?;
                 let previous_tab = MenuItem::with_id(
                     handle,
@@ -230,7 +266,13 @@ pub fn run() {
                     .build()?;
 
                 let navigate_submenu = SubmenuBuilder::new(handle, "Navigate")
-                    .items(&[&previous_tab, &next_tab])
+                    .items(&[
+                        &go_back_browser,
+                        &go_forward_browser,
+                        &refresh_browser,
+                        &previous_tab,
+                        &next_tab,
+                    ])
                     .separator()
                     .item(&jump_to_workspace_submenu)
                     .build()?;

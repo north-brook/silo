@@ -1,5 +1,5 @@
 [package]
-name = "silo"
+name = "Silo"
 version = "0.1.0"
 description = "Cloud development environments"
 authors = ["Bryce Bjork"]

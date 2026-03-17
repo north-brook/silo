@@ -3,6 +3,31 @@
 version = 4
 
 [[package]]
+name = "Silo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "indexmap 2.13.0",
+ "log",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sysinfo",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-fs",
+ "tauri-plugin-log",
+ "tauri-plugin-opener",
+ "time",
+ "toml 0.9.12+spec-1.1.0",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3690,31 +3715,6 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
-]
-
-[[package]]
-name = "silo"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "indexmap 2.13.0",
- "log",
- "portable-pty",
- "serde",
- "serde_json",
- "sha2",
- "sysinfo",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-fs",
- "tauri-plugin-log",
- "tauri-plugin-opener",
- "time",
- "toml 0.9.12+spec-1.1.0",
- "urlencoding",
- "uuid",
 ]
 
 [[package]]
