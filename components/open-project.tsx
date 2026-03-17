@@ -1,10 +1,12 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useRouter } from "next/navigation";
 import { createContext, useContext, useEffect } from "react";
 import { invoke } from "../lib/invoke";
+import { listenShortcutEvent, shortcutEvents } from "../lib/shortcuts";
 import type { Workspace } from "../lib/workspaces";
 import { toast } from "./toaster";
 
@@ -63,6 +65,12 @@ export function OpenProjectProvider({
 	});
 
 	useEffect(() => {
+		if (isTauri()) {
+			return listenShortcutEvent<void>(shortcutEvents.openProject, () => {
+				addProject.mutate();
+			});
+		}
+
 		const handler = (e: KeyboardEvent) => {
 			if (e.metaKey && e.shiftKey && e.key === "o") {
 				e.preventDefault();
