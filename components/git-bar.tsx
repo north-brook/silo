@@ -707,7 +707,7 @@ function DiffSectionView({
 function DiffFileRow({ file }: { file: DiffFile }) {
 	return (
 		<div className="flex items-center justify-between px-3 py-1 text-[11px] hover:bg-btn-hover transition-colors">
-			<span className="truncate min-w-0 text-text-muted">{file.path}</span>
+			<span className="truncate min-w-0 text-text">{file.path}</span>
 			<span className="shrink-0 ml-2 text-text-muted">
 				{file.additions > 0 && (
 					<span className="text-emerald-400">+{file.additions}</span>
