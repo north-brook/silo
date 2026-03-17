@@ -809,7 +809,12 @@ export function ProjectsBar() {
 
 	useEffect(() => {
 		const openWorkspaceByHotkey = (digit: number) => {
-			if (digit < 1 || digit > 9 || Number.isNaN(digit)) {
+			if (digit < 0 || digit > 9 || Number.isNaN(digit)) {
+				return;
+			}
+
+			if (digit === 0) {
+				router.push("/");
 				return;
 			}
 
@@ -868,7 +873,7 @@ export function ProjectsBar() {
 		const handler = (e: KeyboardEvent) => {
 			if (!e.metaKey || e.shiftKey || e.altKey || e.ctrlKey) return;
 			const digit = Number.parseInt(e.key, 10);
-			if (digit < 1 || digit > 9 || Number.isNaN(digit)) return;
+			if (digit < 0 || digit > 9 || Number.isNaN(digit)) return;
 
 			e.preventDefault();
 			openWorkspaceByHotkey(digit);
@@ -941,23 +946,29 @@ export function ProjectsBar() {
 					<LogoIcon height={12} />
 					Dashboard
 				</span>
-				<span className="shrink-0 ml-auto flex items-center -mr-1">
-					<Tooltip>
-						<TooltipTrigger asChild>
-							<button
-								type="button"
-								onClick={(e) => {
-									e.stopPropagation();
-									newWorkspace.open();
-								}}
-								className="p-1 text-text-placeholder hover:text-text-bright opacity-0 group-hover:opacity-100 transition-opacity"
-							>
-								<Plus size={12} />
-							</button>
-						</TooltipTrigger>
-						<TooltipContent side="right">New Workspace</TooltipContent>
-					</Tooltip>
-				</span>
+				{metaKeyHeld ? (
+					<span className="shrink-0 ml-auto -mr-1 w-5 h-5 flex items-center justify-center text-[10px] font-medium text-text-muted">
+						0
+					</span>
+				) : (
+					<span className="shrink-0 ml-auto flex items-center -mr-1">
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<button
+									type="button"
+									onClick={(e) => {
+										e.stopPropagation();
+										newWorkspace.open();
+									}}
+									className="p-1 text-text-placeholder hover:text-text-bright opacity-0 group-hover:opacity-100 transition-opacity"
+								>
+									<Plus size={12} />
+								</button>
+							</TooltipTrigger>
+							<TooltipContent side="right">New Workspace</TooltipContent>
+						</Tooltip>
+					</span>
+				)}
 			</div>
 			<div className="flex-1 overflow-y-auto pb-1 mt-0.5 flex flex-col gap-0.5">
 				{projects.data.map((project) => {
