@@ -27,6 +27,7 @@ const FRONTEND_BOOT_ID = createBootId();
 let frontendLoggingInitialized = false;
 let frontendLoggingSuppressed = false;
 const lastInvokeResults = new Map<string, unknown>();
+let webSocketPatched = false;
 
 const pluginWriters: Record<LogLevel, (message: string) => Promise<void>> = {
 	debug: pluginDebug,
@@ -40,8 +41,21 @@ export function initializeFrontendLogging() {
 	frontendLoggingInitialized = true;
 
 	patchConsole();
+	patchWebSocket();
 	window.addEventListener("error", handleWindowError);
 	window.addEventListener("unhandledrejection", handleUnhandledRejection);
+	document.addEventListener("visibilitychange", () => {
+		void writeLog(
+			"info",
+			`frontend visibilitychange boot_id=${FRONTEND_BOOT_ID} visibility=${document.visibilityState} href=${window.location.href}`,
+		);
+	});
+	window.addEventListener("popstate", () => {
+		void writeLog(
+			"info",
+			`frontend popstate boot_id=${FRONTEND_BOOT_ID} href=${window.location.href}`,
+		);
+	});
 	window.addEventListener("beforeunload", () => {
 		frontendLoggingSuppressed = true;
 	});
@@ -59,7 +73,7 @@ export function initializeFrontendLogging() {
 	});
 	void writeLog(
 		"info",
-		`frontend logging initialized boot_id=${FRONTEND_BOOT_ID} ${formatIpcDiagnostics()}`,
+		`frontend logging initialized boot_id=${FRONTEND_BOOT_ID} ${formatIpcDiagnostics()} ${formatNavigationDiagnostics()}`,
 	);
 }
 
@@ -222,6 +236,75 @@ function patchConsole() {
 	}
 }
 
+function patchWebSocket() {
+	if (typeof window === "undefined" || webSocketPatched) return;
+	webSocketPatched = true;
+
+	const NativeWebSocket = window.WebSocket;
+	const hmrOverrideOrigin =
+		process.env.NEXT_PUBLIC_TAURI_HMR_ORIGIN ?? "ws://localhost:3000";
+	class InstrumentedWebSocket extends NativeWebSocket {
+		constructor(url: string | URL, protocols?: string | string[]) {
+			const normalizedUrl = typeof url === "string" ? url : url.toString();
+			const rewrittenUrl = rewriteHmrWebSocketUrl(normalizedUrl, hmrOverrideOrigin);
+			super(rewrittenUrl, protocols);
+			const shouldTrace =
+				normalizedUrl.includes("_next/webpack-hmr") ||
+				normalizedUrl.includes("tauri.localhost") ||
+				normalizedUrl.includes("localhost:3000");
+			if (!shouldTrace) {
+				return;
+			}
+
+				void writeLog(
+					"info",
+					`websocket create boot_id=${FRONTEND_BOOT_ID} url=${normalizedUrl} rewritten_url=${rewrittenUrl} ready_state=${this.readyState}`,
+				);
+				this.addEventListener("open", () => {
+					void writeLog(
+						"info",
+						`websocket open boot_id=${FRONTEND_BOOT_ID} url=${normalizedUrl} rewritten_url=${rewrittenUrl} protocol=${this.protocol}`,
+					);
+				});
+				this.addEventListener("error", () => {
+					void writeLog(
+						"warn",
+						`websocket error boot_id=${FRONTEND_BOOT_ID} url=${normalizedUrl} rewritten_url=${rewrittenUrl} ready_state=${this.readyState}`,
+					);
+				});
+				this.addEventListener("close", (event) => {
+					void writeLog(
+						"warn",
+						`websocket close boot_id=${FRONTEND_BOOT_ID} url=${normalizedUrl} rewritten_url=${rewrittenUrl} code=${event.code} reason=${event.reason || "none"} clean=${event.wasClean}`,
+					);
+				});
+			}
+		}
+
+	window.WebSocket = InstrumentedWebSocket;
+}
+
+function rewriteHmrWebSocketUrl(url: string, overrideOrigin: string) {
+	if (!url.includes("/_next/webpack-hmr")) {
+		return url;
+	}
+
+	try {
+		const parsedUrl = new URL(url);
+		if (parsedUrl.hostname !== "tauri.localhost") {
+			return url;
+		}
+
+		const parsedOverride = new URL(overrideOrigin);
+		parsedUrl.protocol = parsedOverride.protocol;
+		parsedUrl.hostname = parsedOverride.hostname;
+		parsedUrl.port = parsedOverride.port;
+		return parsedUrl.toString();
+	} catch {
+		return url;
+	}
+}
+
 function handleWindowError(event: ErrorEvent) {
 	const details = [
 		event.message && `message=${event.message}`,
@@ -245,6 +328,38 @@ function handleUnhandledRejection(event: PromiseRejectionEvent) {
 		"error",
 		`unhandled rejection reason=${formatLogArg(event.reason)}`,
 	);
+}
+
+function formatNavigationDiagnostics() {
+	const navigationEntries = performance.getEntriesByType("navigation");
+	const navigationEntry = navigationEntries[
+		navigationEntries.length - 1
+	] as PerformanceNavigationTiming | undefined;
+	const documentWithDiscarded = document as Document & {
+		wasDiscarded?: boolean;
+	};
+	const notRestoredReasons =
+		"notRestoredReasons" in PerformanceNavigationTiming.prototype &&
+		navigationEntry &&
+		"notRestoredReasons" in navigationEntry
+			? JSON.stringify(
+					(
+						navigationEntry as PerformanceNavigationTiming & {
+							notRestoredReasons?: unknown;
+						}
+					).notRestoredReasons ?? null,
+				)
+			: "unavailable";
+
+	return [
+		`nav_type=${navigationEntry?.type ?? "unavailable"}`,
+		`nav_redirects=${navigationEntry?.redirectCount ?? "unavailable"}`,
+		`nav_transfer_size=${navigationEntry?.transferSize ?? "unavailable"}`,
+		`document_referrer=${document.referrer || "none"}`,
+		`history_length=${window.history.length}`,
+		`was_discarded=${documentWithDiscarded.wasDiscarded ?? false}`,
+		`not_restored_reasons=${notRestoredReasons}`,
+	].join(" ");
 }
 
 async function writeLog(level: LogLevel, message: string) {
