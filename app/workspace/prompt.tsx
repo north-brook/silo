@@ -180,6 +180,9 @@ export function PromptWorkspace({
 						}}
 						placeholder="What should we ship?"
 						rows={4}
+						spellCheck={false}
+						autoCorrect="off"
+						autoCapitalize="off"
 						className="w-full resize-none bg-transparent border-0 px-4 pt-4 pb-2 text-sm text-text-bright placeholder:text-text-placeholder outline-none focus:border-0 focus:ring-0 min-h-[6rem] max-h-64 overflow-y-auto"
 					/>
 					<div className="flex items-center justify-between px-3 pb-3">

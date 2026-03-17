@@ -330,6 +330,9 @@ function BrowserSessionHeader({
 				value={address}
 				onChange={(event) => setAddress(event.target.value)}
 				placeholder="Enter URL"
+				spellCheck={false}
+				autoCorrect="off"
+				autoCapitalize="off"
 				className="flex-1 min-w-0 h-7 rounded-md bg-bg px-2.5 text-[12px] text-text-bright outline-none border border-border-light focus:border-text-muted transition-colors"
 			/>
 			<Tooltip>
