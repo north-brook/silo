@@ -154,13 +154,10 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 	const branchWorkspace = isTemplateWorkspace(workspace) ? null : workspace;
 
 	const [editingBranch, setEditingBranch] = useState(false);
-	const [branchDraft, setBranchDraft] = useState(branchWorkspace?.branch ?? "");
+	const [branchDraft, setBranchDraft] = useState("");
 	const inputRef = useRef<HTMLInputElement>(null);
 
 	const [targetOpen, setTargetOpen] = useState(false);
-	const [optimisticTarget, setOptimisticTarget] = useState(
-		branchWorkspace?.target_branch ?? "",
-	);
 
 	const projects = useQuery({
 		queryKey: ["projects_list_projects"],
@@ -189,7 +186,6 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 			});
 		},
 		onError: (error) => {
-			setBranchDraft(branchWorkspace?.branch ?? "");
 			toast({
 				variant: "error",
 				title: "Failed to rename branch",
@@ -210,7 +206,6 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 			});
 		},
 		onError: (error) => {
-			setOptimisticTarget(branchWorkspace?.target_branch ?? "");
 			toast({
 				variant: "error",
 				title: "Failed to update target branch",
@@ -225,14 +220,6 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 			inputRef.current.select();
 		}
 	}, [editingBranch]);
-
-	useEffect(() => {
-		setBranchDraft(branchWorkspace?.branch ?? "");
-	}, [branchWorkspace?.branch]);
-
-	useEffect(() => {
-		setOptimisticTarget(branchWorkspace?.target_branch ?? "");
-	}, [branchWorkspace?.target_branch]);
 
 	const PRIORITY_BRANCHES = ["main", "master", "staging", "dev"];
 
@@ -256,13 +243,18 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 		if (trimmed && trimmed !== branchWorkspace.branch) {
 			updateBranch.mutate(trimmed);
 		} else {
-			setBranchDraft(branchWorkspace.branch);
+			setBranchDraft("");
 		}
 	};
 
 	if (!branchWorkspace) return null;
 
-	const targetBranch = optimisticTarget;
+	const displayedBranch = updateBranch.isPending
+		? updateBranch.variables
+		: branchWorkspace.branch;
+	const targetBranch = updateTargetBranch.isPending
+		? updateTargetBranch.variables
+		: branchWorkspace.target_branch;
 
 	return (
 		<header className="h-9 w-full border-b border-border-light shrink-0 flex items-center relative">
@@ -293,7 +285,7 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 							onKeyDown={(e) => {
 								if (e.key === "Enter") commitBranch();
 								if (e.key === "Escape") {
-									setBranchDraft(branchWorkspace.branch);
+									setBranchDraft("");
 									setEditingBranch(false);
 								}
 							}}
@@ -309,7 +301,7 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 							}}
 							className={`transition-colors ${hasPr ? "text-text cursor-default" : "text-text hover:text-text-bright"}`}
 						>
-							{branchDraft || "branch"}
+							{displayedBranch || "branch"}
 						</button>
 					)}
 					<ChevronRight size={10} className="shrink-0 text-text-placeholder" />
@@ -344,7 +336,6 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 									key={b}
 									type="button"
 									onClick={() => {
-										setOptimisticTarget(b);
 										updateTargetBranch.mutate(b);
 										setTargetOpen(false);
 									}}

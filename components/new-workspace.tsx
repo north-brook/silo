@@ -1,14 +1,15 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { createContext, useContext, useEffect, useState } from "react";
 import { invoke } from "../lib/invoke";
 import type { ListedProject } from "../lib/projects";
-import { listenShortcutEvent, shortcutEvents } from "../lib/shortcuts";
+import { shortcutEvents } from "../lib/shortcuts";
 import type { SnapshotTemplate } from "../lib/templates";
+import { useShortcut } from "../lib/use-shortcut";
 import { createWorkspace as createWorkspaceCommand } from "../lib/workspaces";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./dialog";
 import { Loader } from "./loader";
@@ -44,22 +45,18 @@ export function NewWorkspaceProvider({
 		refetchInterval: 15000,
 	});
 
-	useEffect(() => {
-		if (isTauri()) {
-			return listenShortcutEvent<void>(shortcutEvents.newWorkspace, () => {
-				setIsOpen(true);
-			});
-		}
-
-		const handler = (e: KeyboardEvent) => {
+	useShortcut<void>({
+		event: shortcutEvents.newWorkspace,
+		onTrigger: () => {
+			setIsOpen(true);
+		},
+		onKeyDown: (e) => {
 			if (e.metaKey && e.key === "n") {
 				e.preventDefault();
 				setIsOpen(true);
 			}
-		};
-		window.addEventListener("keydown", handler);
-		return () => window.removeEventListener("keydown", handler);
-	}, []);
+		},
+	});
 
 	return (
 		<NewWorkspaceContext.Provider value={{ open: () => setIsOpen(true) }}>

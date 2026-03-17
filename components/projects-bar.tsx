@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
 	Box,
 	ChevronDown,
@@ -27,8 +27,9 @@ import {
 } from "react";
 import { invoke } from "../lib/invoke";
 import type { ListedProject } from "../lib/projects";
-import { listenShortcutEvent, shortcutEvents } from "../lib/shortcuts";
+import { shortcutEvents } from "../lib/shortcuts";
 import type { SnapshotTemplate } from "../lib/templates";
+import { useShortcut } from "../lib/use-shortcut";
 import {
 	createWorkspace as createWorkspaceCommand,
 	isTemplateWorkspace,
@@ -69,22 +70,18 @@ export function useProjectsBar() {
 function ProjectsBarProviderInner({ children }: { children: ReactNode }) {
 	const [isOpen, setIsOpen] = useState(true);
 
-	useEffect(() => {
-		if (isTauri()) {
-			return listenShortcutEvent<void>(shortcutEvents.toggleProjectsBar, () => {
-				setIsOpen((open) => !open);
-			});
-		}
-
-		const handler = (e: KeyboardEvent) => {
+	useShortcut<void>({
+		event: shortcutEvents.toggleProjectsBar,
+		onTrigger: () => {
+			setIsOpen((open) => !open);
+		},
+		onKeyDown: (e) => {
 			if (e.metaKey && !e.shiftKey && e.key === "b") {
 				e.preventDefault();
 				setIsOpen((o) => !o);
 			}
-		};
-		window.addEventListener("keydown", handler);
-		return () => window.removeEventListener("keydown", handler);
-	}, []);
+		},
+	});
 
 	return (
 		<ProjectsBarContext.Provider
@@ -807,81 +804,71 @@ export function ProjectsBar() {
 		prevUnreadRef.current = currentUnread;
 	}, [workspaces.data]);
 
-	useEffect(() => {
-		const openWorkspaceByHotkey = (digit: number) => {
-			if (digit < 0 || digit > 9 || Number.isNaN(digit)) {
-				return;
-			}
-
-			if (digit === 0) {
-				router.push("/");
-				return;
-			}
-
-			const p = projects.data;
-			const w = workspaces.data;
-			if (!p || !w) {
-				return;
-			}
-
-			// Build flat workspace list matching sidebar order:
-			// projects in order, workspaces sorted by created_at within each project
-			const flatWorkspaces: Workspace[] = [];
-			for (const project of p) {
-				const projectWorkspaces = w
-					.filter((ws) => ws.project === project.name)
-					.sort((a, b) => a.created_at.localeCompare(b.created_at));
-				flatWorkspaces.push(...projectWorkspaces);
-			}
-
-			const target = flatWorkspaces[digit - 1];
-			if (!target) {
-				return;
-			}
-
-			const isSuspended = target.status === "SUSPENDED";
-			const isTemplate = isTemplateWorkspace(target);
-
-			if (isSuspended && !isTemplate) {
-				router.push(
-					`/workspace/resuming?project=${encodeURIComponent(target.project ?? "")}&workspace=${encodeURIComponent(target.name)}`,
-				);
-				void invoke("workspaces_resume_workspace", {
-					workspace: target.name,
-				}).then(() => {
-					queryClient.invalidateQueries({
-						queryKey: ["workspaces_list_workspaces"],
-					});
-				});
-				return;
-			}
-
-			router.push(
-				`/workspace?project=${encodeURIComponent(target.project ?? "")}&name=${encodeURIComponent(target.name)}`,
-			);
-		};
-
-		if (isTauri()) {
-			return listenShortcutEvent<number>(
-				shortcutEvents.jumpToWorkspace,
-				(digit) => {
-					openWorkspaceByHotkey(digit);
-				},
-			);
+	const openWorkspaceByHotkey = (digit: number) => {
+		if (digit < 0 || digit > 9 || Number.isNaN(digit)) {
+			return;
 		}
 
-		const handler = (e: KeyboardEvent) => {
+		if (digit === 0) {
+			router.push("/");
+			return;
+		}
+
+		const p = projects.data;
+		const w = workspaces.data;
+		if (!p || !w) {
+			return;
+		}
+
+		const flatWorkspaces: Workspace[] = [];
+		for (const project of p) {
+			const projectWorkspaces = w
+				.filter((ws) => ws.project === project.name)
+				.sort((a, b) => a.created_at.localeCompare(b.created_at));
+			flatWorkspaces.push(...projectWorkspaces);
+		}
+
+		const target = flatWorkspaces[digit - 1];
+		if (!target) {
+			return;
+		}
+
+		const isSuspended = target.status === "SUSPENDED";
+		const isTemplate = isTemplateWorkspace(target);
+
+		if (isSuspended && !isTemplate) {
+			router.push(
+				`/workspace/resuming?project=${encodeURIComponent(target.project ?? "")}&workspace=${encodeURIComponent(target.name)}`,
+			);
+			void invoke("workspaces_resume_workspace", {
+				workspace: target.name,
+			}).then(() => {
+				queryClient.invalidateQueries({
+					queryKey: ["workspaces_list_workspaces"],
+				});
+			});
+			return;
+		}
+
+		router.push(
+			`/workspace?project=${encodeURIComponent(target.project ?? "")}&name=${encodeURIComponent(target.name)}`,
+		);
+	};
+
+	useShortcut<number>({
+		event: shortcutEvents.jumpToWorkspace,
+		onTrigger: (digit) => {
+			openWorkspaceByHotkey(digit);
+		},
+		onKeyDown: (e, trigger) => {
 			if (!e.metaKey || e.shiftKey || e.altKey || e.ctrlKey) return;
 			const digit = Number.parseInt(e.key, 10);
 			if (digit < 0 || digit > 9 || Number.isNaN(digit)) return;
 
 			e.preventDefault();
-			openWorkspaceByHotkey(digit);
-		};
-
-		window.addEventListener("keydown", handler);
-		return () => window.removeEventListener("keydown", handler);
-	}, [projects.data, workspaces.data, router, queryClient]);
+			trigger(digit);
+		},
+	});
 
 	useEffect(() => {
 		const down = (e: KeyboardEvent) => {

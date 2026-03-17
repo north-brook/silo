@@ -6,7 +6,6 @@ import {
 	useQuery,
 	useQueryClient,
 } from "@tanstack/react-query";
-import { isTauri } from "@tauri-apps/api/core";
 import { Globe, Plus, Terminal, X } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
@@ -29,7 +28,8 @@ import {
 import { TopBar } from "../../components/top-bar";
 import { cloudSessionHref, normalizeWorkspaceSession } from "../../lib/cloud";
 import { invoke } from "../../lib/invoke";
-import { listenShortcutEvent, shortcutEvents } from "../../lib/shortcuts";
+import { shortcutEvents } from "../../lib/shortcuts";
+import { useShortcut } from "../../lib/use-shortcut";
 import {
 	isTemplateWorkspace,
 	type Workspace,
@@ -468,14 +468,12 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 		isCurrentLayoutInstance,
 	]);
 
-	useEffect(() => {
-		if (isTauri()) {
-			return listenShortcutEvent<void>(shortcutEvents.newTab, () => {
-				setNewTabOpen(true);
-			});
-		}
-
-		const handler = (e: KeyboardEvent) => {
+	useShortcut<void>({
+		event: shortcutEvents.newTab,
+		onTrigger: () => {
+			setNewTabOpen(true);
+		},
+		onKeyDown: (e) => {
 			if (e.metaKey && e.key === "t") {
 				e.preventDefault();
 				setNewTabOpen(true);
@@ -488,36 +486,26 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 				e.preventDefault();
 				navigateToNextTab();
 			}
-		};
-		window.addEventListener("keydown", handler);
-		return () => window.removeEventListener("keydown", handler);
-	}, [navigateToPreviousTab, navigateToNextTab]);
-
-	useEffect(() => {
-		return listenShortcutEvent<void>(shortcutEvents.closeTab, () => {
+		},
+	});
+	useShortcut<void>({
+		event: shortcutEvents.closeTab,
+		onTrigger: () => {
 			closeActiveTab();
-		});
-	}, [closeActiveTab]);
-
-	useEffect(() => {
-		if (!isTauri()) {
-			return;
-		}
-
-		return listenShortcutEvent<void>(shortcutEvents.previousTab, () => {
+		},
+	});
+	useShortcut<void>({
+		event: shortcutEvents.previousTab,
+		onTrigger: () => {
 			navigateToPreviousTab();
-		});
-	}, [navigateToPreviousTab]);
-
-	useEffect(() => {
-		if (!isTauri()) {
-			return;
-		}
-
-		return listenShortcutEvent<void>(shortcutEvents.nextTab, () => {
+		},
+	});
+	useShortcut<void>({
+		event: shortcutEvents.nextTab,
+		onTrigger: () => {
 			navigateToNextTab();
-		});
-	}, [navigateToNextTab]);
+		},
+	});
 
 	const TAB_OPTIONS = useMemo(
 		() => [

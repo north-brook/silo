@@ -1,7 +1,6 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ArrowLeft, ArrowRight, RotateCw } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -14,7 +13,8 @@ import {
 	normalizeWorkspaceSession,
 } from "../../../lib/cloud";
 import { invoke } from "../../../lib/invoke";
-import { listenShortcutEvent, shortcutEvents } from "../../../lib/shortcuts";
+import { shortcutEvents } from "../../../lib/shortcuts";
+import { useShortcut } from "../../../lib/use-shortcut";
 import {
 	isTemplateWorkspace,
 	type Workspace,
@@ -188,6 +188,7 @@ function WorkspaceSessionView() {
 	return (
 		<div className="flex-1 min-h-0 bg-surface flex flex-col">
 			<BrowserSessionHeader
+				key={`${activeSession.workspace}:${activeSession.attachmentId}`}
 				session={activeSession}
 				autoFocusAddress={!hasUrl}
 				onChanged={() =>
@@ -217,11 +218,8 @@ function BrowserSessionHeader({
 	onChanged: () => void;
 }) {
 	const inputRef = useRef<HTMLInputElement>(null);
-	const [address, setAddress] = useState(session.url ?? "");
-
-	useEffect(() => {
-		setAddress(session.url ?? "");
-	}, [session.url]);
+	const [addressDraft, setAddressDraft] = useState(session.url ?? "");
+	const [isEditingAddress, setIsEditingAddress] = useState(autoFocusAddress);
 
 	useEffect(() => {
 		if (autoFocusAddress) {
@@ -245,6 +243,11 @@ function BrowserSessionHeader({
 			});
 		},
 	});
+	const address = isEditingAddress
+		? addressDraft
+		: navigate.isPending
+			? (navigate.variables ?? session.url ?? "")
+			: (session.url ?? "");
 
 	const goBack = useMutation({
 		mutationFn: () =>
@@ -262,17 +265,14 @@ function BrowserSessionHeader({
 		},
 	});
 
-	useEffect(() => {
-		if (!isTauri()) {
-			return;
-		}
-
-		return listenShortcutEvent<void>(shortcutEvents.goBackBrowser, () => {
+	useShortcut<void>({
+		event: shortcutEvents.goBackBrowser,
+		onTrigger: () => {
 			if (session.canGoBack !== false && !goBack.isPending) {
 				goBack.mutate();
 			}
-		});
-	}, [goBack, session.canGoBack]);
+		},
+	});
 
 	const goForward = useMutation({
 		mutationFn: () =>
@@ -290,17 +290,14 @@ function BrowserSessionHeader({
 		},
 	});
 
-	useEffect(() => {
-		if (!isTauri()) {
-			return;
-		}
-
-		return listenShortcutEvent<void>(shortcutEvents.goForwardBrowser, () => {
+	useShortcut<void>({
+		event: shortcutEvents.goForwardBrowser,
+		onTrigger: () => {
 			if (session.canGoForward !== false && !goForward.isPending) {
 				goForward.mutate();
 			}
-		});
-	}, [goForward, session.canGoForward]);
+		},
+	});
 
 	const refresh = useMutation({
 		mutationFn: () =>
@@ -318,17 +315,14 @@ function BrowserSessionHeader({
 		},
 	});
 
-	useEffect(() => {
-		if (!isTauri()) {
-			return;
-		}
-
-		return listenShortcutEvent<void>(shortcutEvents.refreshBrowser, () => {
+	useShortcut<void>({
+		event: shortcutEvents.refreshBrowser,
+		onTrigger: () => {
 			if (!refresh.isPending) {
 				refresh.mutate();
 			}
-		});
-	}, [refresh]);
+		},
+	});
 
 	const busy =
 		navigate.isPending ||
@@ -340,6 +334,7 @@ function BrowserSessionHeader({
 		<form
 			onSubmit={(event) => {
 				event.preventDefault();
+				setIsEditingAddress(false);
 				navigate.mutate(address);
 			}}
 			className="h-9 shrink-0 bg-surface px-1.5 flex items-center gap-0.5"
@@ -374,7 +369,17 @@ function BrowserSessionHeader({
 			<input
 				ref={inputRef}
 				value={address}
-				onChange={(event) => setAddress(event.target.value)}
+				onBlur={() => {
+					setIsEditingAddress(false);
+					setAddressDraft(session.url ?? "");
+				}}
+				onChange={(event) => {
+					setAddressDraft(event.target.value);
+				}}
+				onFocus={() => {
+					setAddressDraft(session.url ?? "");
+					setIsEditingAddress(true);
+				}}
 				placeholder="Enter URL"
 				spellCheck={false}
 				autoCorrect="off"

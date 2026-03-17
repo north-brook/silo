@@ -1,7 +1,6 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { isTauri } from "@tauri-apps/api/core";
 import {
 	ArrowUpFromLine,
 	Ban,
@@ -25,8 +24,6 @@ import {
 	type ReactNode,
 	Suspense,
 	useContext,
-	useEffect,
-	useRef,
 	useState,
 } from "react";
 import { cloudSessionHref } from "../lib/cloud";
@@ -47,9 +44,16 @@ import {
 	type PullRequestStatus,
 } from "../lib/git";
 import { invoke } from "../lib/invoke";
-import { listenShortcutEvent, shortcutEvents } from "../lib/shortcuts";
+import { shortcutEvents } from "../lib/shortcuts";
+import { useShortcut } from "../lib/use-shortcut";
 import { isTemplateWorkspace, type Workspace } from "../lib/workspaces";
-import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from "./dialog";
+import {
+	Dialog,
+	DialogClose,
+	DialogContent,
+	DialogHeader,
+	DialogTitle,
+} from "./dialog";
 import { Loader } from "./loader";
 import { toast } from "./toaster";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
@@ -150,82 +154,65 @@ function GitBarProviderInner({ children }: { children: ReactNode }) {
 
 	const [isOpen, setIsOpen] = useState(false);
 	const [activeTab, setActiveTab] = useState<"diff" | "checks">("diff");
+	const visibleTab = hasPr ? activeTab : "diff";
 
-	useEffect(() => {
-		if (activeTab === "checks" && !hasPr) {
-			setActiveTab("diff");
-		}
-	}, [activeTab, hasPr]);
-
-	useEffect(() => {
-		if (isTauri()) {
-			return listenShortcutEvent<void>(shortcutEvents.toggleGitBar, () => {
-				setIsOpen((open) => !open);
-			});
-		}
-
-		const handler = (e: KeyboardEvent) => {
+	useShortcut<void>({
+		event: shortcutEvents.toggleGitBar,
+		onTrigger: () => {
+			setIsOpen((open) => !open);
+		},
+		onKeyDown: (e) => {
 			if (e.metaKey && e.shiftKey && e.key === "b") {
 				e.preventDefault();
 				setIsOpen((o) => !o);
 			}
-		};
-		window.addEventListener("keydown", handler);
-		return () => window.removeEventListener("keydown", handler);
-	}, []);
+		},
+	});
 
-	useEffect(() => {
-		const openTab = (tab: "diff" | "checks") => {
-			if (tab === "diff") {
-				if (!hasChanges) {
-					return;
-				}
-			} else if (!hasPr) {
+	const openTab = (tab: "diff" | "checks") => {
+		if (tab === "diff") {
+			if (!hasChanges) {
 				return;
 			}
-
-			setActiveTab(tab);
-			setIsOpen(true);
-		};
-
-		if (isTauri()) {
-			const unlistenDiff = listenShortcutEvent<void>(
-				shortcutEvents.openGitDiff,
-				() => {
-					openTab("diff");
-				},
-			);
-			const unlistenChecks = listenShortcutEvent<void>(
-				shortcutEvents.openGitChecks,
-				() => {
-					openTab("checks");
-				},
-			);
-			return () => {
-				unlistenDiff();
-				unlistenChecks();
-			};
+		} else if (!hasPr) {
+			return;
 		}
 
-		const handler = (e: KeyboardEvent) => {
+		setActiveTab(tab);
+		setIsOpen(true);
+	};
+
+	useShortcut<void>({
+		event: shortcutEvents.openGitDiff,
+		onTrigger: () => {
+			openTab("diff");
+		},
+		onKeyDown: (e) => {
 			if (!e.metaKey || !e.shiftKey || e.altKey || e.ctrlKey) return;
 			if (e.key.toLowerCase() === "d") {
 				e.preventDefault();
 				openTab("diff");
 			}
+		},
+	});
+	useShortcut<void>({
+		event: shortcutEvents.openGitChecks,
+		onTrigger: () => {
+			openTab("checks");
+		},
+		onKeyDown: (e) => {
+			if (!e.metaKey || !e.shiftKey || e.altKey || e.ctrlKey) return;
 			if (e.key.toLowerCase() === "c") {
 				e.preventDefault();
 				openTab("checks");
 			}
-		};
-		window.addEventListener("keydown", handler);
-		return () => window.removeEventListener("keydown", handler);
-	}, [hasChanges, hasPr]);
+		},
+	});
 
 	const value: GitBarContextValue = {
 		isOpen,
 		toggle: () => setIsOpen((o) => !o),
-		activeTab,
+		activeTab: visibleTab,
 		openTab: (tab) => {
 			if (tab === "checks" && !hasPr) {
 				return;
@@ -478,58 +465,47 @@ function GitBarHeader() {
 		}
 	};
 
-	const handleMergeRef = useRef(handleMerge);
-	handleMergeRef.current = handleMerge;
-
-	useEffect(() => {
-		const runCreatePushOrMerge = (action: "create_or_push" | "merge") => {
-			if (action === "create_or_push") {
-				if (showCreatePr && !createPr.isPending) {
-					createPr.mutate();
-				} else if (showPush && !push.isPending) {
-					push.mutate();
-				}
-				return;
+	const runCreatePushOrMerge = (action: "create_or_push" | "merge") => {
+		if (action === "create_or_push") {
+			if (showCreatePr && !createPr.isPending) {
+				createPr.mutate();
+			} else if (showPush && !push.isPending) {
+				push.mutate();
 			}
-
-			if (showMerge && !merge.isPending) {
-				handleMergeRef.current();
-			}
-		};
-
-		if (isTauri()) {
-			const unlistenCreateOrPush = listenShortcutEvent<void>(
-				shortcutEvents.gitCreateOrPushPr,
-				() => {
-					runCreatePushOrMerge("create_or_push");
-				},
-			);
-			const unlistenMerge = listenShortcutEvent<void>(
-				shortcutEvents.gitMergePr,
-				() => {
-					runCreatePushOrMerge("merge");
-				},
-			);
-			return () => {
-				unlistenCreateOrPush();
-				unlistenMerge();
-			};
+			return;
 		}
 
-		const handler = (e: KeyboardEvent) => {
+		if (showMerge && !merge.isPending) {
+			handleMerge();
+		}
+	};
+
+	useShortcut<void>({
+		event: shortcutEvents.gitCreateOrPushPr,
+		onTrigger: () => {
+			runCreatePushOrMerge("create_or_push");
+		},
+		onKeyDown: (e) => {
 			if (!e.metaKey || !e.shiftKey) return;
 			if (e.key === "p") {
 				e.preventDefault();
 				runCreatePushOrMerge("create_or_push");
 			}
+		},
+	});
+	useShortcut<void>({
+		event: shortcutEvents.gitMergePr,
+		onTrigger: () => {
+			runCreatePushOrMerge("merge");
+		},
+		onKeyDown: (e) => {
+			if (!e.metaKey || !e.shiftKey) return;
 			if (e.key === "m") {
 				e.preventDefault();
 				runCreatePushOrMerge("merge");
 			}
-		};
-		window.addEventListener("keydown", handler);
-		return () => window.removeEventListener("keydown", handler);
-	}, [showCreatePr, showPush, showMerge, createPr, push, merge]);
+		},
+	});
 
 	const hotkeyKbd = hotkeyKbdHelper;
 
