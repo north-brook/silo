@@ -3,7 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo } from "react";
-import { SiloIcon } from "../../components/icons/silo";
+import { Loader } from "../../components/loader";
 import { cloudSessionHref } from "../../lib/cloud";
 import { invoke } from "../../lib/invoke";
 import {
@@ -82,19 +82,8 @@ function WorkspaceView() {
 
 	if (!workspace.data) {
 		return (
-			<div className="flex-1 flex flex-col items-center justify-center p-6">
-				<div className="w-full max-w-2xl">
-					<div className="flex justify-center mb-6">
-						<SiloIcon height={32} />
-					</div>
-					<div className="rounded-lg border border-border-light bg-surface overflow-hidden">
-						<div className="px-4 pt-4 pb-2 min-h-[6rem]" />
-						<div className="flex items-center justify-between px-3 pb-3">
-							<div className="h-5 w-16 rounded bg-border-light/50 animate-pulse" />
-							<div className="w-7 h-7 rounded-md bg-border-light/50 animate-pulse" />
-						</div>
-					</div>
-				</div>
+			<div className="flex-1 flex items-center justify-center">
+				<Loader />
 			</div>
 		);
 	}
