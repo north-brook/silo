@@ -6,10 +6,10 @@ import {
 	useQuery,
 	useQueryClient,
 } from "@tanstack/react-query";
+import { isTauri } from "@tauri-apps/api/core";
 import { Globe, Plus, Terminal, X } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { useCloud } from "../../components/cloud";
 import {
 	Dialog,
@@ -29,6 +29,7 @@ import {
 import { TopBar } from "../../components/top-bar";
 import { cloudSessionHref, normalizeWorkspaceSession } from "../../lib/cloud";
 import { invoke } from "../../lib/invoke";
+import { listenShortcutEvent, shortcutEvents } from "../../lib/shortcuts";
 import {
 	isTemplateWorkspace,
 	type Workspace,
@@ -307,8 +308,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 			status: "pending",
 		},
 		select: (mutation) =>
-			(mutation.state.variables as WorkspaceSession | undefined)
-				?.attachment_id,
+			(mutation.state.variables as WorkspaceSession | undefined)?.attachment_id,
 	});
 	const deletingIds = useMemo(
 		() => new Set(pendingKills.filter((id): id is string => !!id)),
@@ -429,6 +429,12 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 	]);
 
 	useEffect(() => {
+		if (isTauri()) {
+			return listenShortcutEvent<void>(shortcutEvents.newTab, () => {
+				setNewTabOpen(true);
+			});
+		}
+
 		const handler = (e: KeyboardEvent) => {
 			if (e.metaKey && e.key === "t") {
 				e.preventDefault();
@@ -448,13 +454,30 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 	}, [navigateToPreviousTab, navigateToNextTab]);
 
 	useEffect(() => {
-		const unlisten = listen("silo://close-tab", () => {
+		return listenShortcutEvent<void>(shortcutEvents.closeTab, () => {
 			closeActiveTab();
 		});
-		return () => {
-			unlisten.then((fn) => fn());
-		};
 	}, [closeActiveTab]);
+
+	useEffect(() => {
+		if (!isTauri()) {
+			return;
+		}
+
+		return listenShortcutEvent<void>(shortcutEvents.previousTab, () => {
+			navigateToPreviousTab();
+		});
+	}, [navigateToPreviousTab]);
+
+	useEffect(() => {
+		if (!isTauri()) {
+			return;
+		}
+
+		return listenShortcutEvent<void>(shortcutEvents.nextTab, () => {
+			navigateToNextTab();
+		});
+	}, [navigateToNextTab]);
 
 	const TAB_OPTIONS = useMemo(
 		() => [
@@ -469,16 +492,14 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 				icon: <CodexIcon height={12} />,
 				action: () => createAssistant.mutate("codex"),
 				pending:
-					createAssistant.isPending &&
-					createAssistant.variables === "codex",
+					createAssistant.isPending && createAssistant.variables === "codex",
 			},
 			{
 				label: "Claude",
 				icon: <ClaudeIcon height={12} />,
 				action: () => createAssistant.mutate("claude"),
 				pending:
-					createAssistant.isPending &&
-					createAssistant.variables === "claude",
+					createAssistant.isPending && createAssistant.variables === "claude",
 			},
 			{
 				label: "Browser",
