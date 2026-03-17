@@ -1,6 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { isTauri } from "@tauri-apps/api/core";
 import {
 	ArrowUpFromLine,
 	Ban,
@@ -27,13 +28,12 @@ import {
 	useEffect,
 	useState,
 } from "react";
+import { cloudSessionHref } from "../lib/cloud";
 import {
 	type CheckState,
 	type Diff,
 	type DiffFile,
 	type DiffSection,
-	type PullRequestObservation,
-	type PullRequestStatus,
 	gitCreatePr,
 	gitDiff,
 	gitMergePr,
@@ -42,9 +42,11 @@ import {
 	gitPush,
 	gitRerunFailedChecks,
 	gitTreeDirty,
+	type PullRequestObservation,
+	type PullRequestStatus,
 } from "../lib/git";
-import { cloudSessionHref } from "../lib/cloud";
 import { invoke } from "../lib/invoke";
+import { listenShortcutEvent, shortcutEvents } from "../lib/shortcuts";
 import { isTemplateWorkspace, type Workspace } from "../lib/workspaces";
 import { Loader } from "./loader";
 import { toast } from "./toaster";
@@ -143,6 +145,12 @@ function GitBarProviderInner({ children }: { children: ReactNode }) {
 	const [isOpen, setIsOpen] = useState(false);
 
 	useEffect(() => {
+		if (isTauri()) {
+			return listenShortcutEvent<void>(shortcutEvents.toggleGitBar, () => {
+				setIsOpen((open) => !open);
+			});
+		}
+
 		const handler = (e: KeyboardEvent) => {
 			if (e.metaKey && e.shiftKey && e.key === "b") {
 				e.preventDefault();
@@ -269,20 +277,20 @@ function GitBarHeader() {
 
 	const createPr = useMutation({
 		mutationFn: () => gitCreatePr(workspace),
-			onSuccess: (result) => {
-				queryClient.invalidateQueries({
-					queryKey: ["git_pr_status", workspace],
+		onSuccess: (result) => {
+			queryClient.invalidateQueries({
+				queryKey: ["git_pr_status", workspace],
 			});
 			queryClient.invalidateQueries({
 				queryKey: ["git_pr_observe", workspace],
 			});
-				queryClient.invalidateQueries({
-					queryKey: ["terminal_list_terminals", workspace],
-				});
-				queryClient.invalidateQueries({
-					queryKey: ["workspaces_get_workspace", workspace],
-				});
-				router.push(
+			queryClient.invalidateQueries({
+				queryKey: ["terminal_list_terminals", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_get_workspace", workspace],
+			});
+			router.push(
 				cloudSessionHref({
 					project,
 					workspace,
@@ -303,7 +311,7 @@ function GitBarHeader() {
 
 	const push = useMutation({
 		mutationFn: () => gitPush(workspace),
-			onSuccess: (result) => {
+		onSuccess: (result) => {
 			queryClient.invalidateQueries({
 				queryKey: ["git_diff", workspace],
 			});
@@ -313,13 +321,13 @@ function GitBarHeader() {
 			queryClient.invalidateQueries({
 				queryKey: ["git_pr_observe", workspace],
 			});
-				queryClient.invalidateQueries({
-					queryKey: ["terminal_list_terminals", workspace],
-				});
-				queryClient.invalidateQueries({
-					queryKey: ["workspaces_get_workspace", workspace],
-				});
-				router.push(
+			queryClient.invalidateQueries({
+				queryKey: ["terminal_list_terminals", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_get_workspace", workspace],
+			});
+			router.push(
 				cloudSessionHref({
 					project,
 					workspace,
@@ -381,9 +389,7 @@ function GitBarHeader() {
 	const checksRunning = checks.some((c) =>
 		pendingCheckStates.includes(c.state),
 	);
-	const checksFailing = checks.some((c) =>
-		failCheckStates.includes(c.state),
-	);
+	const checksFailing = checks.some((c) => failCheckStates.includes(c.state));
 	const mergeColor = checksRunning
 		? "bg-btn text-text hover:bg-btn-hover"
 		: checksFailing
@@ -391,16 +397,49 @@ function GitBarHeader() {
 			: "bg-green-600 text-white hover:bg-green-500";
 
 	useEffect(() => {
+		const runCreatePushOrMerge = (action: "create_or_push" | "merge") => {
+			if (action === "create_or_push") {
+				if (showCreatePr && !createPr.isPending) {
+					createPr.mutate();
+				} else if (showPush && !push.isPending) {
+					push.mutate();
+				}
+				return;
+			}
+
+			if (showMerge && !merge.isPending) {
+				merge.mutate();
+			}
+		};
+
+		if (isTauri()) {
+			const unlistenCreateOrPush = listenShortcutEvent<void>(
+				shortcutEvents.gitCreateOrPushPr,
+				() => {
+					runCreatePushOrMerge("create_or_push");
+				},
+			);
+			const unlistenMerge = listenShortcutEvent<void>(
+				shortcutEvents.gitMergePr,
+				() => {
+					runCreatePushOrMerge("merge");
+				},
+			);
+			return () => {
+				unlistenCreateOrPush();
+				unlistenMerge();
+			};
+		}
+
 		const handler = (e: KeyboardEvent) => {
 			if (!e.metaKey || !e.shiftKey) return;
 			if (e.key === "p") {
 				e.preventDefault();
-				if (showCreatePr && !createPr.isPending) createPr.mutate();
-				else if (showPush && !push.isPending) push.mutate();
+				runCreatePushOrMerge("create_or_push");
 			}
 			if (e.key === "m") {
 				e.preventDefault();
-				if (showMerge && !merge.isPending) merge.mutate();
+				runCreatePushOrMerge("merge");
 			}
 		};
 		window.addEventListener("keydown", handler);
@@ -722,11 +761,7 @@ function ChecksTab({
 		"waiting",
 		"requested",
 	];
-	const failStates: CheckState[] = [
-		"failure",
-		"startup_failure",
-		"timed_out",
-	];
+	const failStates: CheckState[] = ["failure", "startup_failure", "timed_out"];
 	const allResolved =
 		data.checks.length > 0 &&
 		!data.checks.some((c) => pendingStates.includes(c.state));
@@ -801,32 +836,30 @@ function ChecksTab({
 										onClick={() => rerunFailed.mutate()}
 										className="flex items-center text-text-muted hover:text-text transition-colors disabled:opacity-50"
 									>
-										{rerunFailed.isPending ? (
-											<Loader />
-										) : (
-											<RotateCw size={9} />
-										)}
+										{rerunFailed.isPending ? <Loader /> : <RotateCw size={9} />}
 									</button>
 								</TooltipTrigger>
 								<TooltipContent side="left">Rerun failed</TooltipContent>
 							</Tooltip>
 						)}
 					</div>
-					{[...data.checks].sort((a, b) => a.name.localeCompare(b.name)).map((c) => (
-						<button
-							key={c.id}
-							type="button"
-							onClick={async () => {
-								if (!c.link) return;
-								const { openUrl } = await import("@tauri-apps/plugin-opener");
-								openUrl(c.link);
-							}}
-							className="flex items-center gap-2 px-3 py-1 -mx-3 text-[11px] hover:bg-btn-hover transition-colors text-left"
-						>
-							<CheckStateIcon state={c.state} />
-							<span className="text-text truncate">{c.name}</span>
-						</button>
-					))}
+					{[...data.checks]
+						.sort((a, b) => a.name.localeCompare(b.name))
+						.map((c) => (
+							<button
+								key={c.id}
+								type="button"
+								onClick={async () => {
+									if (!c.link) return;
+									const { openUrl } = await import("@tauri-apps/plugin-opener");
+									openUrl(c.link);
+								}}
+								className="flex items-center gap-2 px-3 py-1 -mx-3 text-[11px] hover:bg-btn-hover transition-colors text-left"
+							>
+								<CheckStateIcon state={c.state} />
+								<span className="text-text truncate">{c.name}</span>
+							</button>
+						))}
 				</div>
 			)}
 
