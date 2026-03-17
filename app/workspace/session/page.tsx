@@ -1,6 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ArrowLeft, ArrowRight, RotateCw, Wrench } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -18,6 +19,7 @@ import {
 	normalizeWorkspaceSession,
 } from "../../../lib/cloud";
 import { invoke } from "../../../lib/invoke";
+import { listenShortcutEvent, shortcutEvents } from "../../../lib/shortcuts";
 import {
 	isTemplateWorkspace,
 	type Workspace,
@@ -236,6 +238,18 @@ function BrowserSessionHeader({
 		},
 	});
 
+	useEffect(() => {
+		if (!isTauri()) {
+			return;
+		}
+
+		return listenShortcutEvent<void>(shortcutEvents.goBackBrowser, () => {
+			if (session.canGoBack !== false && !goBack.isPending) {
+				goBack.mutate();
+			}
+		});
+	}, [goBack, session.canGoBack]);
+
 	const goForward = useMutation({
 		mutationFn: () =>
 			invoke("browser_go_forward", {
@@ -252,6 +266,18 @@ function BrowserSessionHeader({
 		},
 	});
 
+	useEffect(() => {
+		if (!isTauri()) {
+			return;
+		}
+
+		return listenShortcutEvent<void>(shortcutEvents.goForwardBrowser, () => {
+			if (session.canGoForward !== false && !goForward.isPending) {
+				goForward.mutate();
+			}
+		});
+	}, [goForward, session.canGoForward]);
+
 	const refresh = useMutation({
 		mutationFn: () =>
 			invoke("browser_refresh_page", {
@@ -267,6 +293,18 @@ function BrowserSessionHeader({
 			});
 		},
 	});
+
+	useEffect(() => {
+		if (!isTauri()) {
+			return;
+		}
+
+		return listenShortcutEvent<void>(shortcutEvents.refreshBrowser, () => {
+			if (!refresh.isPending) {
+				refresh.mutate();
+			}
+		});
+	}, [refresh]);
 
 	const devtools = useMutation({
 		mutationFn: () =>
