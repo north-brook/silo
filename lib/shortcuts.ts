@@ -3,6 +3,13 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+const WINDOW_SHORTCUT_EVENT = "__silo_native_shortcut__";
+
+type WindowShortcutDetail = {
+	event: string;
+	payload?: unknown;
+};
+
 export const shortcutEvents = {
 	newWorkspace: "silo://new-workspace",
 	openProject: "silo://open-project",
@@ -26,12 +33,22 @@ export function listenShortcutEvent<T>(
 	event: string,
 	handler: (payload: T) => void,
 ) {
-	if (!isTauri()) {
-		return () => {};
-	}
-
 	let disposed = false;
 	let unlisten: null | (() => void | Promise<void>) = null;
+	const windowShortcutHandler = (windowEvent: Event) => {
+		const detail = (windowEvent as CustomEvent<WindowShortcutDetail>).detail;
+		if (!detail || detail.event !== event) {
+			return;
+		}
+		handler(detail.payload as T);
+	};
+
+	if (typeof window !== "undefined") {
+		window.addEventListener(
+			WINDOW_SHORTCUT_EVENT,
+			windowShortcutHandler as EventListener,
+		);
+	}
 
 	const disposeListener = (nextUnlisten: null | (() => void | Promise<void>)) => {
 		if (!nextUnlisten) {
@@ -43,20 +60,28 @@ export function listenShortcutEvent<T>(
 		});
 	};
 
-	void listen<T>(event, ({ payload }) => {
-		handler(payload);
-	})
-		.then((nextUnlisten) => {
-			if (disposed) {
-				disposeListener(nextUnlisten);
-				return;
-			}
-			unlisten = nextUnlisten;
+	if (isTauri()) {
+		void listen<T>(event, ({ payload }) => {
+			handler(payload);
 		})
-		.catch(() => {});
+			.then((nextUnlisten) => {
+				if (disposed) {
+					disposeListener(nextUnlisten);
+					return;
+				}
+				unlisten = nextUnlisten;
+			})
+			.catch(() => {});
+	}
 
 	return () => {
 		disposed = true;
+		if (typeof window !== "undefined") {
+			window.removeEventListener(
+				WINDOW_SHORTCUT_EVENT,
+				windowShortcutHandler as EventListener,
+			);
+		}
 		disposeListener(unlisten);
 	};
 }
