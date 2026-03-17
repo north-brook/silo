@@ -8,7 +8,7 @@ import {
 } from "@tanstack/react-query";
 import { isTauri } from "@tauri-apps/api/core";
 import { Globe, Plus, Terminal, X } from "lucide-react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useCloud } from "../../components/cloud";
 import {
@@ -123,6 +123,7 @@ function findLiveNeighbor(
 
 function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 	const searchParams = useSearchParams();
+	const pathname = usePathname();
 	const router = useRouter();
 	const queryClient = useQueryClient();
 	const { ensureWorkspaceSessions, removeSession } = useCloud();
@@ -157,6 +158,34 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 		}
 		return `/workspace?${params.toString()}`;
 	}, [project, workspaceName]);
+
+	const isCurrentLayoutInstance = useCallback(() => {
+		if (typeof window === "undefined") {
+			return true;
+		}
+		const currentUrl = new URL(window.location.href);
+		const currentWorkspace =
+			currentUrl.searchParams.get("name") ??
+			currentUrl.searchParams.get("workspace") ??
+			"";
+		const currentProject = currentUrl.searchParams.get("project") ?? "";
+		const currentKind = currentUrl.searchParams.get("kind");
+		const currentAttachmentId = currentUrl.searchParams.get("attachment_id");
+
+		if (currentUrl.pathname !== pathname) {
+			return false;
+		}
+		if (currentWorkspace !== workspaceName || currentProject !== project) {
+			return false;
+		}
+		if (activeKind !== currentKind) {
+			return false;
+		}
+		if ((activeAttachmentId ?? null) !== currentAttachmentId) {
+			return false;
+		}
+		return true;
+	}, [activeAttachmentId, activeKind, pathname, project, workspaceName]);
 
 	const sessions = useMemo<WorkspaceSession[]>(
 		() =>
@@ -360,15 +389,23 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 	);
 
 	const closeActiveTab = useCallback(() => {
+		if (!isCurrentLayoutInstance()) return;
 		if (!activeKind || !activeAttachmentId) return;
 		const session = sessions.find(
 			(s) => s.type === activeKind && s.attachment_id === activeAttachmentId,
 		);
 		if (!session) return;
 		closeTab(session);
-	}, [sessions, activeKind, activeAttachmentId, closeTab]);
+	}, [
+		sessions,
+		activeKind,
+		activeAttachmentId,
+		closeTab,
+		isCurrentLayoutInstance,
+	]);
 
 	const navigateToPreviousTab = useCallback(() => {
+		if (!isCurrentLayoutInstance()) return;
 		const liveSessions = sessions.filter(
 			(s) => !deletingIds.has(s.attachment_id),
 		);
@@ -396,9 +433,11 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 		router,
 		project,
 		workspaceName,
+		isCurrentLayoutInstance,
 	]);
 
 	const navigateToNextTab = useCallback(() => {
+		if (!isCurrentLayoutInstance()) return;
 		const liveSessions = sessions.filter(
 			(s) => !deletingIds.has(s.attachment_id),
 		);
@@ -426,6 +465,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 		router,
 		project,
 		workspaceName,
+		isCurrentLayoutInstance,
 	]);
 
 	useEffect(() => {
