@@ -2512,14 +2512,14 @@ mod application {
       #[unsafe(method(sendEvent:))]
       unsafe fn send_event(&self, event: &NSEvent) {
         // CEF workaround - reevaluate when CEF is stable.
-        // Chromium consumes Cmd+Shift+[ and Cmd+Shift+] inside child browser views
+        // Chromium consumes some Command-based shortcuts inside child browser views
         // before Tauri menu accelerators see them. Give the native menu first shot
-        // at just those reserved tab-navigation shortcuts.
-        if should_route_reserved_menu_shortcut(event)
+        // at Command-key equivalents so app-owned shortcuts still work reliably.
+        if should_route_menu_shortcut(event)
           && let Some(main_menu) = self.mainMenu()
           && main_menu.performKeyEquivalent(event)
         {
-          log::info!("cef macos routed reserved shortcut through main menu");
+          log::info!("cef macos routed command shortcut through main menu");
           return;
         }
 
@@ -2528,42 +2528,20 @@ mod application {
     }
   );
 
-  fn should_route_reserved_menu_shortcut(event: &NSEvent) -> bool {
+  fn should_route_menu_shortcut(event: &NSEvent) -> bool {
     if event.r#type() != NSEventType::KeyDown {
       return false;
     }
 
     let modifiers = event.modifierFlags();
-    let required = NSEventModifierFlags::Command | NSEventModifierFlags::Shift;
-    if !modifiers.contains(required) {
+    if !modifiers.contains(NSEventModifierFlags::Command) {
       return false;
     }
 
-    if modifiers.intersects(
-      NSEventModifierFlags::Control
-        | NSEventModifierFlags::Option
-        | NSEventModifierFlags::Function,
-    ) {
+    if modifiers.intersects(NSEventModifierFlags::Control | NSEventModifierFlags::Function) {
       return false;
     }
 
-    let characters = event
-      .characters()
-      .map(|value| value.to_string())
-      .unwrap_or_default();
-    let characters_ignoring_modifiers = event
-      .charactersIgnoringModifiers()
-      .map(|value| value.to_string())
-      .unwrap_or_default();
-
-    matches!(
-      (characters.as_str(), characters_ignoring_modifiers.as_str()),
-      ("{", _)
-        | ("}", _)
-        | (_, "[")
-        | (_, "]")
-        | (_, "{")
-        | (_, "}")
-    )
+    event.charactersIgnoringModifiers().is_some() || event.characters().is_some()
   }
 }
