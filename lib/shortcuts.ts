@@ -31,18 +31,16 @@ export function listenShortcutEvent<T>(
 	}
 
 	let disposed = false;
-	let unlisten: null | (() => void) = null;
+	let unlisten: null | (() => void | Promise<void>) = null;
 
-	const disposeListener = (nextUnlisten: null | (() => void)) => {
+	const disposeListener = (nextUnlisten: null | (() => void | Promise<void>)) => {
 		if (!nextUnlisten) {
 			return;
 		}
 
-		try {
-			nextUnlisten();
-		} catch {
+		void Promise.resolve(nextUnlisten()).catch(() => {
 			// Tauri can race listener registration and component teardown on fast route changes.
-		}
+		});
 	};
 
 	void listen<T>(event, ({ payload }) => {

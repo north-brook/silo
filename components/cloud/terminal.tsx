@@ -218,8 +218,8 @@ export function CloudTerminalHost({
 		});
 
 		let disposed = false;
-		let unlistenExit: (() => void) | null = null;
-		let unlistenError: (() => void) | null = null;
+		let unlistenExit: (() => void | Promise<void>) | null = null;
+		let unlistenError: (() => void | Promise<void>) | null = null;
 
 		const term = new Terminal({
 			theme: THEME,
@@ -272,7 +272,7 @@ export function CloudTerminalHost({
 			})
 			.then((unlisten) => {
 				if (disposed) {
-					void unlisten();
+					void Promise.resolve(unlisten()).catch(() => {});
 					return;
 				}
 				unlistenExit = unlisten;
@@ -286,7 +286,7 @@ export function CloudTerminalHost({
 			})
 			.then((unlisten) => {
 				if (disposed) {
-					void unlisten();
+					void Promise.resolve(unlisten()).catch(() => {});
 					return;
 				}
 				unlistenError = unlisten;
@@ -389,10 +389,10 @@ export function CloudTerminalHost({
 			termRef.current = null;
 			fitAddonRef.current = null;
 			if (unlistenExit) {
-				void unlistenExit();
+				void Promise.resolve(unlistenExit()).catch(() => {});
 			}
 			if (unlistenError) {
-				void unlistenError();
+				void Promise.resolve(unlistenError()).catch(() => {});
 			}
 			if (terminalIdRef.current) {
 				void invoke("terminal_detach_terminal", {

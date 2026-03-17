@@ -55,7 +55,16 @@ function WorkspaceSessionView() {
 		}
 
 		let disposed = false;
-		let unlisten: (() => void) | null = null;
+		let unlisten: (() => void | Promise<void>) | null = null;
+		const disposeListener = (
+			nextUnlisten: (() => void | Promise<void>) | null,
+		) => {
+			if (!nextUnlisten) {
+				return;
+			}
+
+			void Promise.resolve(nextUnlisten()).catch(() => {});
+		};
 		void listen<{ workspace: string }>("browser://state", (event) => {
 			if (disposed || event.payload.workspace !== workspace) {
 				return;
@@ -65,7 +74,7 @@ function WorkspaceSessionView() {
 			});
 		}).then((nextUnlisten) => {
 			if (disposed) {
-				nextUnlisten();
+				disposeListener(nextUnlisten);
 				return;
 			}
 			unlisten = nextUnlisten;
@@ -73,7 +82,7 @@ function WorkspaceSessionView() {
 
 		return () => {
 			disposed = true;
-			unlisten?.();
+			disposeListener(unlisten);
 		};
 	}, [queryClient, workspace]);
 
