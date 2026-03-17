@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import {
 	Box,
 	ChevronDown,
@@ -27,6 +27,7 @@ import {
 } from "react";
 import { invoke } from "../lib/invoke";
 import type { ListedProject } from "../lib/projects";
+import { listenShortcutEvent, shortcutEvents } from "../lib/shortcuts";
 import type { SnapshotTemplate } from "../lib/templates";
 import {
 	createWorkspace as createWorkspaceCommand,
@@ -69,6 +70,12 @@ function ProjectsBarProviderInner({ children }: { children: ReactNode }) {
 	const [isOpen, setIsOpen] = useState(true);
 
 	useEffect(() => {
+		if (isTauri()) {
+			return listenShortcutEvent<void>(shortcutEvents.toggleProjectsBar, () => {
+				setIsOpen((open) => !open);
+			});
+		}
+
 		const handler = (e: KeyboardEvent) => {
 			if (e.metaKey && !e.shiftKey && e.key === "b") {
 				e.preventDefault();
@@ -328,7 +335,10 @@ function ProjectRow({
 function WorkspaceRow({
 	workspace,
 	hotkeyNumber,
-}: { workspace: Workspace; hotkeyNumber?: number }) {
+}: {
+	workspace: Workspace;
+	hotkeyNumber?: number;
+}) {
 	const router = useRouter();
 	const searchParams = useSearchParams();
 	const queryClient = useQueryClient();
@@ -544,155 +554,155 @@ function WorkspaceRow({
 					{hotkeyNumber}
 				</span>
 			) : (
-			<Popover open={menuOpen} onOpenChange={setMenuOpen}>
-				<PopoverTrigger asChild>
-					<button
-						type="button"
-						onClick={(e) => e.stopPropagation()}
-						className={`group/action shrink-0 ml-auto p-1 -mr-1 w-5 h-5 flex items-center justify-center text-text-placeholder hover:text-text-bright transition-opacity ${
-							(
-								isRunning &&
-									!isTemplate &&
-									(workspace.working || workspace.unread)
-							) || (isSuspended && !isTemplate)
-								? ""
-								: "opacity-0 group-hover:opacity-100"
-						}`}
-					>
-						{isRunning && !isTemplate && workspace.working ? (
-							<Loader className="text-blue-400" />
-						) : isRunning && !isTemplate && workspace.unread ? (
+				<Popover open={menuOpen} onOpenChange={setMenuOpen}>
+					<PopoverTrigger asChild>
+						<button
+							type="button"
+							onClick={(e) => e.stopPropagation()}
+							className={`group/action shrink-0 ml-auto p-1 -mr-1 w-5 h-5 flex items-center justify-center text-text-placeholder hover:text-text-bright transition-opacity ${
+								(
+									isRunning &&
+										!isTemplate &&
+										(workspace.working || workspace.unread)
+								) || (isSuspended && !isTemplate)
+									? ""
+									: "opacity-0 group-hover:opacity-100"
+							}`}
+						>
+							{isRunning && !isTemplate && workspace.working ? (
+								<Loader className="text-blue-400" />
+							) : isRunning && !isTemplate && workspace.unread ? (
+								<>
+									<span className="block w-2 h-2 rounded-full bg-blue-400 group-hover/action:hidden" />
+									<EllipsisVertical
+										size={12}
+										className="hidden group-hover/action:block"
+									/>
+								</>
+							) : isSuspended && !isTemplate ? (
+								<>
+									<span className="block w-2 h-2 rounded-full bg-yellow-400 group-hover/action:hidden" />
+									<EllipsisVertical
+										size={12}
+										className="hidden group-hover/action:block"
+									/>
+								</>
+							) : (
+								<EllipsisVertical size={12} />
+							)}
+						</button>
+					</PopoverTrigger>
+					<PopoverContent side="right" align="start" className="w-36 p-1">
+						{isTemplate ? (
 							<>
-								<span className="block w-2 h-2 rounded-full bg-blue-400 group-hover/action:hidden" />
-								<EllipsisVertical
-									size={12}
-									className="hidden group-hover/action:block"
-								/>
-							</>
-						) : isSuspended && !isTemplate ? (
-							<>
-								<span className="block w-2 h-2 rounded-full bg-yellow-400 group-hover/action:hidden" />
-								<EllipsisVertical
-									size={12}
-									className="hidden group-hover/action:block"
-								/>
-							</>
-						) : (
-							<EllipsisVertical size={12} />
-						)}
-					</button>
-				</PopoverTrigger>
-				<PopoverContent side="right" align="start" className="w-36 p-1">
-					{isTemplate ? (
-						<>
-							{workspace.ready && (
-								<button
-									type="button"
-									onClick={(e) => {
-										e.stopPropagation();
-										setMenuOpen(false);
-										saveTemplateMut.mutate();
-									}}
-									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
-								>
-									{saveTemplateMut.isPending ? (
-										<Loader className="text-text-bright" />
-									) : (
-										<Save size={12} />
-									)}
-									Save
-								</button>
-							)}
-							<button
-								type="button"
-								onClick={(e) => {
-									e.stopPropagation();
-									setMenuOpen(false);
-									if (isActive) router.push("/");
-									deleteTemplateMut.mutate();
-								}}
-								className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
-							>
-								<Trash2 size={12} />
-								Delete
-							</button>
-						</>
-					) : (
-						<>
-							{isStopped && (
-								<button
-									type="button"
-									onClick={(e) => {
-										e.stopPropagation();
-										start.mutate();
-										setMenuOpen(false);
-									}}
-									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
-								>
-									<Play size={12} />
-									Start
-								</button>
-							)}
-							{isSuspended && (
-								<button
-									type="button"
-									onClick={(e) => {
-										e.stopPropagation();
-										setMenuOpen(false);
-										resume.mutate();
-									}}
-									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
-								>
-									<Play size={12} />
-									Resume
-								</button>
-							)}
-							{isRunning && (
-								<button
-									type="button"
-									onClick={(e) => {
-										e.stopPropagation();
-										setMenuOpen(false);
-										suspend.mutate();
-									}}
-									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
-								>
-									<Pause size={12} />
-									Suspend
-								</button>
-							)}
-							{isRunning && (
+								{workspace.ready && (
+									<button
+										type="button"
+										onClick={(e) => {
+											e.stopPropagation();
+											setMenuOpen(false);
+											saveTemplateMut.mutate();
+										}}
+										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+									>
+										{saveTemplateMut.isPending ? (
+											<Loader className="text-text-bright" />
+										) : (
+											<Save size={12} />
+										)}
+										Save
+									</button>
+								)}
 								<button
 									type="button"
 									onClick={(e) => {
 										e.stopPropagation();
 										setMenuOpen(false);
 										if (isActive) router.push("/");
-										stop.mutate();
+										deleteTemplateMut.mutate();
 									}}
-									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
 								>
-									<Square size={12} />
-									Stop
+									<Trash2 size={12} />
+									Delete
 								</button>
-							)}
-							<button
-								type="button"
-								onClick={(e) => {
-									e.stopPropagation();
-									setMenuOpen(false);
-									if (isActive) router.push("/");
-									remove.mutate();
-								}}
-								className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
-							>
-								<Trash2 size={12} />
-								Delete
-							</button>
-						</>
-					)}
-				</PopoverContent>
-			</Popover>
+							</>
+						) : (
+							<>
+								{isStopped && (
+									<button
+										type="button"
+										onClick={(e) => {
+											e.stopPropagation();
+											start.mutate();
+											setMenuOpen(false);
+										}}
+										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+									>
+										<Play size={12} />
+										Start
+									</button>
+								)}
+								{isSuspended && (
+									<button
+										type="button"
+										onClick={(e) => {
+											e.stopPropagation();
+											setMenuOpen(false);
+											resume.mutate();
+										}}
+										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+									>
+										<Play size={12} />
+										Resume
+									</button>
+								)}
+								{isRunning && (
+									<button
+										type="button"
+										onClick={(e) => {
+											e.stopPropagation();
+											setMenuOpen(false);
+											suspend.mutate();
+										}}
+										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+									>
+										<Pause size={12} />
+										Suspend
+									</button>
+								)}
+								{isRunning && (
+									<button
+										type="button"
+										onClick={(e) => {
+											e.stopPropagation();
+											setMenuOpen(false);
+											if (isActive) router.push("/");
+											stop.mutate();
+										}}
+										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+									>
+										<Square size={12} />
+										Stop
+									</button>
+								)}
+								<button
+									type="button"
+									onClick={(e) => {
+										e.stopPropagation();
+										setMenuOpen(false);
+										if (isActive) router.push("/");
+										remove.mutate();
+									}}
+									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
+								>
+									<Trash2 size={12} />
+									Delete
+								</button>
+							</>
+						)}
+					</PopoverContent>
+				</Popover>
 			)}
 		</div>
 	);
@@ -798,14 +808,16 @@ export function ProjectsBar() {
 	}, [workspaces.data]);
 
 	useEffect(() => {
-		const handler = (e: KeyboardEvent) => {
-			if (!e.metaKey || e.shiftKey || e.altKey || e.ctrlKey) return;
-			const digit = Number.parseInt(e.key, 10);
-			if (digit < 1 || digit > 9 || Number.isNaN(digit)) return;
+		const openWorkspaceByHotkey = (digit: number) => {
+			if (digit < 1 || digit > 9 || Number.isNaN(digit)) {
+				return;
+			}
 
 			const p = projects.data;
 			const w = workspaces.data;
-			if (!p || !w) return;
+			if (!p || !w) {
+				return;
+			}
 
 			// Build flat workspace list matching sidebar order:
 			// projects in order, workspaces sorted by created_at within each project
@@ -818,9 +830,9 @@ export function ProjectsBar() {
 			}
 
 			const target = flatWorkspaces[digit - 1];
-			if (!target) return;
-
-			e.preventDefault();
+			if (!target) {
+				return;
+			}
 
 			const isSuspended = target.status === "SUSPENDED";
 			const isTemplate = isTemplateWorkspace(target);
@@ -829,18 +841,37 @@ export function ProjectsBar() {
 				router.push(
 					`/workspace/resuming?project=${encodeURIComponent(target.project ?? "")}&workspace=${encodeURIComponent(target.name)}`,
 				);
-				invoke("workspaces_resume_workspace", {
+				void invoke("workspaces_resume_workspace", {
 					workspace: target.name,
 				}).then(() => {
 					queryClient.invalidateQueries({
 						queryKey: ["workspaces_list_workspaces"],
 					});
 				});
-			} else {
-				router.push(
-					`/workspace?project=${encodeURIComponent(target.project ?? "")}&name=${encodeURIComponent(target.name)}`,
-				);
+				return;
 			}
+
+			router.push(
+				`/workspace?project=${encodeURIComponent(target.project ?? "")}&name=${encodeURIComponent(target.name)}`,
+			);
+		};
+
+		if (isTauri()) {
+			return listenShortcutEvent<number>(
+				shortcutEvents.jumpToWorkspace,
+				(digit) => {
+					openWorkspaceByHotkey(digit);
+				},
+			);
+		}
+
+		const handler = (e: KeyboardEvent) => {
+			if (!e.metaKey || e.shiftKey || e.altKey || e.ctrlKey) return;
+			const digit = Number.parseInt(e.key, 10);
+			if (digit < 1 || digit > 9 || Number.isNaN(digit)) return;
+
+			e.preventDefault();
+			openWorkspaceByHotkey(digit);
 		};
 
 		window.addEventListener("keydown", handler);
