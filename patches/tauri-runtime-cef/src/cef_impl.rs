@@ -436,6 +436,7 @@ wrap_browser_process_handler! {
 
 wrap_load_handler! {
   struct BrowserLoadHandler {
+    webview_label: String,
     initialization_scripts: Arc<Vec<CefInitScript>>,
     on_page_load_handler: Option<Arc<tauri_runtime::webview::OnPageLoadHandler>>,
     custom_scheme_domain_names: Vec<String>,
@@ -459,6 +460,11 @@ wrap_load_handler! {
 
       let url = frame.url();
       let url_str = cef::CefString::from(&url).to_string();
+      log::info!(
+        "cef load start webview_label={} url={}",
+        self.webview_label,
+        url_str
+      );
       if let Ok(url) = url::Url::parse(&url_str) {
         handler(url, tauri_runtime::webview::PageLoadEvent::Started);
       }
@@ -476,6 +482,12 @@ wrap_load_handler! {
         && frame.is_main() == 1 {
           let url = frame.url();
           let url_str = cef::CefString::from(&url).to_string();
+          log::info!(
+            "cef load end webview_label={} url={} http_status_code={}",
+            self.webview_label,
+            url_str,
+            http_status_code
+          );
           if let Ok(url) = url::Url::parse(&url_str) {
             handler(url, tauri_runtime::webview::PageLoadEvent::Finished);
           }
@@ -533,6 +545,7 @@ wrap_load_handler! {
 
 wrap_display_handler! {
   struct BrowserDisplayHandler {
+    webview_label: String,
     document_title_changed_handler: Option<Arc<tauri_runtime::webview::DocumentTitleChangedHandler>>,
     address_changed_handler: Option<Arc<AddressChangedHandler>>,
   }
@@ -559,10 +572,15 @@ wrap_display_handler! {
       if let Some(frame) = frame
         && frame.is_main() == 0 {
           return;
-        }
+      }
       let Some(handler) = &self.address_changed_handler else { return };
       let Some(url) = url else { return };
       let url_str = url.to_string();
+      log::info!(
+        "cef address change webview_label={} url={}",
+        self.webview_label,
+        url_str
+      );
       let Ok(parsed) = url::Url::parse(&url_str) else { return };
       handler(&parsed);
     }
@@ -666,8 +684,9 @@ fn add_dev_tools_observer(
 }
 
 wrap_keyboard_handler! {
-  struct BrowserKeyboardHandler {
+  struct BrowserKeyboardHandler<T: UserEvent> {
     devtools_enabled: bool,
+    context: Context<T>,
   }
 
   impl KeyboardHandler {
@@ -676,19 +695,35 @@ wrap_keyboard_handler! {
       _browser: Option<&mut Browser>,
       event: Option<&KeyEvent>,
       _os_event: CefOsEvent,
-      _is_keyboard_shortcut: Option<&mut ::std::os::raw::c_int>,
+      is_keyboard_shortcut: Option<&mut ::std::os::raw::c_int>,
     ) -> ::std::os::raw::c_int {
+      let Some(event) = event else { return 0; };
+
+      use cef::sys::cef_key_event_type_t;
+      let keydown_type: cef::KeyEventType = cef_key_event_type_t::KEYEVENT_RAWKEYDOWN.into();
+      if event.type_ != keydown_type {
+        return 0;
+      }
+
+      if let Some(shortcut) = shortcut_from_key_event(event) {
+        if let Some(browser) = _browser.as_deref()
+          && dispatch_shortcut_to_main_shell(&self.context, &shortcut) {
+            log::info!(
+              "cef intercepted shortcut webview_url={} shortcut={}",
+              browser
+                .main_frame()
+                .and_then(|frame| Some(cef::CefString::from(&frame.url()).to_string()))
+                .unwrap_or_else(|| "unavailable".to_string()),
+              shortcut.event,
+            );
+            if let Some(is_keyboard_shortcut) = is_keyboard_shortcut {
+              *is_keyboard_shortcut = 1;
+            }
+            return 1;
+          }
+      }
       // If devtools is disabled, block devtools keyboard shortcuts
       if !self.devtools_enabled {
-        let Some(event) = event else { return 0; };
-
-        // Check if this is a keydown event
-        use cef::sys::cef_key_event_type_t;
-        let keydown_type: cef::KeyEventType = cef_key_event_type_t::KEYEVENT_RAWKEYDOWN.into();
-        if event.type_ != keydown_type {
-          return 0;
-        }
-
         // Get modifier keys
         use cef::sys::cef_event_flags_t;
         #[cfg(windows)]
@@ -705,7 +740,7 @@ wrap_keyboard_handler! {
 
         // Block F12 (key code 123)
         if key_code == 123 {
-          if let Some(is_keyboard_shortcut) = _is_keyboard_shortcut {
+          if let Some(is_keyboard_shortcut) = is_keyboard_shortcut {
             *is_keyboard_shortcut = 1;
           }
           return 1;
@@ -714,7 +749,7 @@ wrap_keyboard_handler! {
         // Block Ctrl+Shift+I (key code 73 = 'I') on Linux/Windows
         #[cfg(not(target_os = "macos"))]
         if key_code == 73 && ctrl && shift {
-          if let Some(is_keyboard_shortcut) = _is_keyboard_shortcut {
+          if let Some(is_keyboard_shortcut) = is_keyboard_shortcut {
             *is_keyboard_shortcut = 1;
           }
           return 1;
@@ -726,7 +761,7 @@ wrap_keyboard_handler! {
           let meta = (modifiers & cef_event_flags_t::EVENTFLAG_COMMAND_DOWN.0) != 0;
           let alt = (modifiers & cef_event_flags_t::EVENTFLAG_ALT_DOWN.0) != 0;
           if key_code == 73 && meta && alt {
-            if let Some(is_keyboard_shortcut) = _is_keyboard_shortcut {
+            if let Some(is_keyboard_shortcut) = is_keyboard_shortcut {
               *is_keyboard_shortcut = 1;
             }
             return 1;
@@ -737,6 +772,157 @@ wrap_keyboard_handler! {
       0
     }
   }
+}
+
+struct ShortcutDispatch<'a> {
+  event: &'a str,
+  payload_json: &'a str,
+}
+
+fn shortcut_from_key_event(event: &KeyEvent) -> Option<ShortcutDispatch<'static>> {
+  use cef::sys::cef_event_flags_t;
+
+  #[cfg(windows)]
+  let modifiers = event.modifiers as i32;
+  #[cfg(not(windows))]
+  let modifiers = event.modifiers;
+
+  #[cfg(target_os = "macos")]
+  let primary = (modifiers & cef_event_flags_t::EVENTFLAG_COMMAND_DOWN.0) != 0;
+  #[cfg(not(target_os = "macos"))]
+  let primary = (modifiers & cef_event_flags_t::EVENTFLAG_CONTROL_DOWN.0) != 0;
+
+  let shift = (modifiers & cef_event_flags_t::EVENTFLAG_SHIFT_DOWN.0) != 0;
+  let alt = (modifiers & cef_event_flags_t::EVENTFLAG_ALT_DOWN.0) != 0;
+  #[cfg(target_os = "macos")]
+  let ctrl = (modifiers & cef_event_flags_t::EVENTFLAG_CONTROL_DOWN.0) != 0;
+  #[cfg(not(target_os = "macos"))]
+  let ctrl = false;
+
+  if !primary || alt || ctrl {
+    return None;
+  }
+
+  let key_code = event.windows_key_code;
+  let character = char::from_u32(event.character as u32);
+  let unmodified_character = char::from_u32(event.unmodified_character as u32);
+
+  match (key_code, shift) {
+    (48, false) => Some(ShortcutDispatch {
+      event: "silo://jump-to-workspace",
+      payload_json: "0",
+    }),
+    (49, false) => Some(ShortcutDispatch {
+      event: "silo://jump-to-workspace",
+      payload_json: "1",
+    }),
+    (50, false) => Some(ShortcutDispatch {
+      event: "silo://jump-to-workspace",
+      payload_json: "2",
+    }),
+    (51, false) => Some(ShortcutDispatch {
+      event: "silo://jump-to-workspace",
+      payload_json: "3",
+    }),
+    (52, false) => Some(ShortcutDispatch {
+      event: "silo://jump-to-workspace",
+      payload_json: "4",
+    }),
+    (53, false) => Some(ShortcutDispatch {
+      event: "silo://jump-to-workspace",
+      payload_json: "5",
+    }),
+    (54, false) => Some(ShortcutDispatch {
+      event: "silo://jump-to-workspace",
+      payload_json: "6",
+    }),
+    (55, false) => Some(ShortcutDispatch {
+      event: "silo://jump-to-workspace",
+      payload_json: "7",
+    }),
+    (56, false) => Some(ShortcutDispatch {
+      event: "silo://jump-to-workspace",
+      payload_json: "8",
+    }),
+    (57, false) => Some(ShortcutDispatch {
+      event: "silo://jump-to-workspace",
+      payload_json: "9",
+    }),
+    (219, true) => Some(ShortcutDispatch {
+      event: "silo://previous-tab",
+      payload_json: "null",
+    }),
+    (221, true) => Some(ShortcutDispatch {
+      event: "silo://next-tab",
+      payload_json: "null",
+    }),
+    _ => {
+      if shift && matches_shortcut_char([character, unmodified_character], &['[', '{']) {
+        return Some(ShortcutDispatch {
+          event: "silo://previous-tab",
+          payload_json: "null",
+        });
+      }
+      if shift && matches_shortcut_char([character, unmodified_character], &[']', '}']) {
+        return Some(ShortcutDispatch {
+          event: "silo://next-tab",
+          payload_json: "null",
+        });
+      }
+      if shift && matches_shortcut_char([character, unmodified_character], &['c', 'C']) {
+        return Some(ShortcutDispatch {
+          event: "silo://open-git-checks",
+          payload_json: "null",
+        });
+      }
+      None
+    }
+  }
+}
+
+fn matches_shortcut_char(chars: [Option<char>; 2], expected: &[char]) -> bool {
+  chars
+    .into_iter()
+    .flatten()
+    .any(|value| expected.contains(&value))
+}
+
+fn dispatch_shortcut_to_main_shell<T: UserEvent>(
+  context: &Context<T>,
+  shortcut: &ShortcutDispatch<'_>,
+) -> bool {
+  let Some(frame) = main_shell_frame(context) else {
+    return false;
+  };
+
+  let script = format!(
+    "window.dispatchEvent(new CustomEvent('__silo_native_shortcut__', {{ detail: {{ event: {}, payload: {} }} }}));",
+    serde_json::to_string(shortcut.event).unwrap_or_else(|_| "\"\"".to_string()),
+    shortcut.payload_json,
+  );
+  frame.execute_java_script(
+    Some(&cef::CefString::from(script.as_str())),
+    Some(&cef::CefString::from("http://tauri.localhost/__silo_native_shortcut__")),
+    0,
+  );
+  true
+}
+
+fn main_shell_frame<T: UserEvent>(context: &Context<T>) -> Option<Frame> {
+  context
+    .windows
+    .borrow()
+    .values()
+    .find(|window| window.label == "main")
+    .and_then(|window| {
+      window
+        .webviews
+        .iter()
+        .find(|webview| webview.label == "main")
+        .or_else(|| window.webviews.first())
+        .and_then(|webview| webview.inner.browser())
+        .and_then(|browser| browser.main_frame())
+    })
 }
 
 wrap_permission_handler! {
@@ -1078,6 +1264,7 @@ wrap_client! {
 
     fn load_handler(&self) -> Option<LoadHandler> {
       Some(BrowserLoadHandler::new(
+        self.webview_label.clone(),
         self.initialization_scripts.clone(),
         self.on_page_load_handler.clone(),
         self.custom_scheme_domain_names.clone(),
@@ -1087,6 +1274,7 @@ wrap_client! {
 
     fn display_handler(&self) -> Option<DisplayHandler> {
       Some(BrowserDisplayHandler::new(
+        self.webview_label.clone(),
         self.document_title_changed_handler.clone(),
         self.address_changed_handler.clone(),
       ))
@@ -1101,7 +1289,7 @@ wrap_client! {
     }
 
     fn keyboard_handler(&self) -> Option<KeyboardHandler> {
-      Some(BrowserKeyboardHandler::new(self.devtools_enabled))
+      Some(BrowserKeyboardHandler::new(self.devtools_enabled, self.context.clone()))
     }
 
     fn permission_handler(&self) -> Option<PermissionHandler> {

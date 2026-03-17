@@ -2409,7 +2409,10 @@ mod application {
     rc::Retained,
     runtime::{Bool, NSObject, NSObjectProtocol},
   };
-  use objc2_app_kit::{NSApplication, NSApplicationDelegate, NSApplicationTerminateReply};
+  use objc2_app_kit::{
+    NSApplication, NSApplicationDelegate, NSApplicationTerminateReply, NSEvent,
+    NSEventModifierFlags, NSEventType,
+  };
   use objc2_foundation::{NSArray, NSURL};
 
   pub enum AppDelegateEvent {
@@ -2504,5 +2507,63 @@ mod application {
     }
 
     unsafe impl CefAppProtocol for SimpleApplication {}
+
+    impl SimpleApplication {
+      #[unsafe(method(sendEvent:))]
+      unsafe fn send_event(&self, event: &NSEvent) {
+        // CEF workaround - reevaluate when CEF is stable.
+        // Chromium consumes Cmd+Shift+[ and Cmd+Shift+] inside child browser views
+        // before Tauri menu accelerators see them. Give the native menu first shot
+        // at just those reserved tab-navigation shortcuts.
+        if should_route_reserved_menu_shortcut(event)
+          && let Some(main_menu) = self.mainMenu()
+          && main_menu.performKeyEquivalent(event)
+        {
+          log::info!("cef macos routed reserved shortcut through main menu");
+          return;
+        }
+
+        unsafe { msg_send![super(self), sendEvent: event] }
+      }
+    }
   );
+
+  fn should_route_reserved_menu_shortcut(event: &NSEvent) -> bool {
+    if event.r#type() != NSEventType::KeyDown {
+      return false;
+    }
+
+    let modifiers = event.modifierFlags();
+    let required = NSEventModifierFlags::Command | NSEventModifierFlags::Shift;
+    if !modifiers.contains(required) {
+      return false;
+    }
+
+    if modifiers.intersects(
+      NSEventModifierFlags::Control
+        | NSEventModifierFlags::Option
+        | NSEventModifierFlags::Function,
+    ) {
+      return false;
+    }
+
+    let characters = event
+      .characters()
+      .map(|value| value.to_string())
+      .unwrap_or_default();
+    let characters_ignoring_modifiers = event
+      .charactersIgnoringModifiers()
+      .map(|value| value.to_string())
+      .unwrap_or_default();
+
+    matches!(
+      (characters.as_str(), characters_ignoring_modifiers.as_str()),
+      ("{", _)
+        | ("}", _)
+        | (_, "[")
+        | (_, "]")
+        | (_, "{")
+        | (_, "}")
+    )
+  }
 }
