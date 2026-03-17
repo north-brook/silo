@@ -33,6 +33,9 @@ export function listenShortcutEvent<T>(
 	event: string,
 	handler: (payload: T) => void,
 ) {
+	// Frontend shortcut consumers listen in one place and should not care whether
+	// the source was the normal Tauri menu event or a CEF-specific fallback.
+	// New shortcuts should usually be added in the native menu/backend first.
 	let disposed = false;
 	let unlisten: null | (() => void | Promise<void>) = null;
 	const windowShortcutHandler = (windowEvent: Event) => {
