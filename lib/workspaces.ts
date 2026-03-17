@@ -4,10 +4,16 @@ export interface WorkspaceBase {
 	name: string;
 	project: string | null;
 	last_active: string | null;
+	active_session?: WorkspaceActiveSession | null;
 	created_at: string;
 	status: string;
 	zone: string;
 	ready: boolean;
+}
+
+export interface WorkspaceActiveSession {
+	type: string;
+	attachment_id: string;
 }
 
 export interface WorkspaceSession {
