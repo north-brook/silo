@@ -259,7 +259,8 @@ pub async fn terminal_create_assistant(
         other => return Err(format!("unsupported assistant model: {other}")),
     };
     let attachment_id = start_terminal_command(state.inner(), &workspace, command).await?;
-    workspace_state.upsert_workspace_session(&workspace, session_for_command(&attachment_id, command));
+    workspace_state
+        .upsert_workspace_session(&workspace, session_for_command(&attachment_id, command));
     Ok(TerminalCreateResult { attachment_id })
 }
 

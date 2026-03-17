@@ -1018,11 +1018,9 @@ fn create_workspace_args(
         format!("project={}", sanitize_label_value(project_label)),
         "ready=false".to_string(),
     ];
-    let metadata = workspace_metadata_arg(&[
-        ("branch", branch_label),
-        ("target_branch", target_branch),
-    ])
-    .expect("workspace metadata values must fit supported gcloud metadata delimiters");
+    let metadata =
+        workspace_metadata_arg(&[("branch", branch_label), ("target_branch", target_branch)])
+            .expect("workspace metadata values must fit supported gcloud metadata delimiters");
 
     let mut args = vec![
         "compute".to_string(),
@@ -1672,11 +1670,10 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         ready,
     };
 
-    let unread = parse_optional_bool(&metadata, TERMINAL_UNREAD_METADATA_KEY, "unread")?
-        .unwrap_or(false);
+    let unread =
+        parse_optional_bool(&metadata, TERMINAL_UNREAD_METADATA_KEY, "unread")?.unwrap_or(false);
     let working = parse_optional_bool(&metadata, TERMINAL_WORKING_METADATA_KEY, "working")?;
-    let terminals =
-        parse_prefixed_workspace_sessions(&metadata, TERMINAL_SESSION_METADATA_PREFIX);
+    let terminals = parse_prefixed_workspace_sessions(&metadata, TERMINAL_SESSION_METADATA_PREFIX);
     let browsers = parse_prefixed_workspace_sessions(&metadata, BROWSER_SESSION_METADATA_PREFIX);
 
     if template {
@@ -1847,11 +1844,14 @@ fn parse_prefixed_workspace_sessions(
 }
 
 fn resolve_workspace_last_active(metadata: &HashMap<String, String>) -> Option<String> {
-    [metadata.get(BROWSER_LAST_ACTIVE_METADATA_KEY), metadata.get(TERMINAL_LAST_ACTIVE_METADATA_KEY)]
-        .into_iter()
-        .flatten()
-        .cloned()
-        .max()
+    [
+        metadata.get(BROWSER_LAST_ACTIVE_METADATA_KEY),
+        metadata.get(TERMINAL_LAST_ACTIVE_METADATA_KEY),
+    ]
+    .into_iter()
+    .flatten()
+    .cloned()
+    .max()
 }
 
 fn resolve_workspace_last_working(metadata: &HashMap<String, String>) -> Option<String> {
@@ -2312,9 +2312,7 @@ mod tests {
         assert!(args.contains(&"--image-project=ubuntu-os-cloud".to_string()));
         assert!(args.contains(&"--async".to_string()));
         assert!(args.contains(&"--labels=project=demo-project,ready=false".to_string()));
-        assert!(args.contains(
-            &"--metadata=^|^branch=Aare|target_branch=Feature/Inbox".to_string()
-        ));
+        assert!(args.contains(&"--metadata=^|^branch=Aare|target_branch=Feature/Inbox".to_string()));
         assert!(args.contains(
             &"--service-account=silo-workspaces@proj.iam.gserviceaccount.com".to_string()
         ));
@@ -2349,9 +2347,7 @@ mod tests {
         assert!(!args.iter().any(|arg| arg.starts_with("--image-family=")));
         assert!(!args.iter().any(|arg| arg.starts_with("--image-project=")));
         assert!(args.contains(&"--labels=project=demo-project,ready=false".to_string()));
-        assert!(args.contains(
-            &"--metadata=^|^branch=Aare".to_string()
-        ));
+        assert!(args.contains(&"--metadata=^|^branch=Aare".to_string()));
     }
 
     #[test]
@@ -2382,9 +2378,7 @@ mod tests {
         assert!(args.contains(&"--no-service-account".to_string()));
         assert!(args.contains(&"--no-scopes".to_string()));
         assert!(args.contains(&"--labels=project=demo-project,ready=false".to_string()));
-        assert!(args.contains(
-            &"--metadata=^|^branch=Aare".to_string()
-        ));
+        assert!(args.contains(&"--metadata=^|^branch=Aare".to_string()));
     }
 
     #[test]
@@ -2492,8 +2486,10 @@ mod tests {
 
     #[test]
     fn remove_workspace_metadata_args_removes_metadata_when_value_empty() {
-        let args =
-            remove_workspace_metadata_args(&test_branch_workspace("ws-demo-123", None), &["branch"]);
+        let args = remove_workspace_metadata_args(
+            &test_branch_workspace("ws-demo-123", None),
+            &["branch"],
+        );
 
         assert_eq!(
             args,

@@ -184,13 +184,10 @@ impl WorkspaceMetadataManager {
         let Ok(mut sessions) = self.sessions.lock() else {
             return;
         };
-        sessions
-            .entry(workspace.to_string())
-            .or_default()
-            .insert(
-                workspace_session_key(&session.kind, &session.attachment_id),
-                Some(session),
-            );
+        sessions.entry(workspace.to_string()).or_default().insert(
+            workspace_session_key(&session.kind, &session.attachment_id),
+            Some(session),
+        );
     }
 
     pub(crate) fn mark_workspace_session_read(

@@ -8,7 +8,7 @@ use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -966,12 +966,10 @@ fn enqueue_browser_metadata_remove(
     metadata.enqueue(
         workspace,
         lookup,
-        vec![
-            WorkspaceMetadataEntry {
-                key: browser_session_metadata_key(attachment_id),
-                value: None,
-            },
-        ],
+        vec![WorkspaceMetadataEntry {
+            key: browser_session_metadata_key(attachment_id),
+            value: None,
+        }],
     );
 }
 
@@ -1126,13 +1124,10 @@ fn normalize_browser_url(value: Option<&str>) -> Result<BrowserUrlTarget, String
         || trimmed.starts_with("chrome://")
     {
         trimmed.to_string()
-    } else if trimmed.starts_with("localhost")
-        || trimmed.starts_with("127.0.0.1")
-        || trimmed.starts_with("[::1]")
-    {
-        format!("http://{trimmed}")
+    } else if looks_like_browser_address(trimmed) {
+        browser_address_with_default_scheme(trimmed)
     } else {
-        format!("https://{trimmed}")
+        browser_google_search_url(trimmed)
     };
 
     if candidate == BROWSER_DEFAULT_URL || candidate.starts_with("chrome://") {
@@ -1149,6 +1144,88 @@ fn normalize_browser_url(value: Option<&str>) -> Result<BrowserUrlTarget, String
         logical_url,
         resolved_url: parsed.to_string(),
     })
+}
+
+fn looks_like_browser_address(value: &str) -> bool {
+    if value.chars().any(char::is_whitespace) {
+        return false;
+    }
+
+    let authority = value.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.is_empty() {
+        return false;
+    }
+
+    let Some((host, port)) = split_browser_host_and_port(authority) else {
+        return false;
+    };
+    if let Some(port) = port {
+        if port.is_empty() || !port.chars().all(|character| character.is_ascii_digit()) {
+            return false;
+        }
+    }
+
+    if host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+
+    if !host
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '.')
+    {
+        return false;
+    }
+
+    let valid_labels = host
+        .split('.')
+        .all(|label| !label.is_empty() && !label.starts_with('-') && !label.ends_with('-'));
+    if !valid_labels {
+        return false;
+    }
+
+    host.contains('.') || port.is_some()
+}
+
+fn split_browser_host_and_port(authority: &str) -> Option<(&str, Option<&str>)> {
+    if authority.starts_with('[') {
+        let closing = authority.find(']')?;
+        let host = &authority[1..closing];
+        let remainder = &authority[(closing + 1)..];
+        if remainder.is_empty() {
+            return Some((host, None));
+        }
+        return remainder.strip_prefix(':').map(|port| (host, Some(port)));
+    }
+
+    if authority.matches(':').count() > 1 {
+        return None;
+    }
+
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        if !host.is_empty() {
+            return Some((host, Some(port)));
+        }
+    }
+
+    Some((authority, None))
+}
+
+fn browser_address_with_default_scheme(value: &str) -> String {
+    if value.starts_with("localhost")
+        || value.starts_with("127.0.0.1")
+        || value.starts_with("[::1]")
+    {
+        return format!("http://{value}");
+    }
+
+    format!("https://{value}")
+}
+
+fn browser_google_search_url(query: &str) -> String {
+    format!(
+        "https://www.google.com/search?q={}",
+        urlencoding::encode(query)
+    )
 }
 
 fn logical_browser_url(resolved_url: &str) -> String {
@@ -1395,4 +1472,58 @@ fn browser_state_sync_script(workspace: &str, attachment_id: &str) -> String {
 }})();
 "#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_browser_url_uses_https_for_domains() {
+        let normalized = normalize_browser_url(Some("example.com/docs")).expect("should parse");
+        assert_eq!(normalized.logical_url, "https://example.com/docs");
+        assert_eq!(normalized.resolved_url, "https://example.com/docs");
+    }
+
+    #[test]
+    fn normalize_browser_url_keeps_localhost_on_http() {
+        let normalized = normalize_browser_url(Some("localhost:3000")).expect("should parse");
+        assert_eq!(normalized.logical_url, "http://localhost:3000/");
+        assert_eq!(normalized.resolved_url, "http://localhost:3000/");
+    }
+
+    #[test]
+    fn normalize_browser_url_treats_host_and_port_as_address() {
+        let normalized = normalize_browser_url(Some("devbox:8080")).expect("should parse");
+        assert_eq!(normalized.logical_url, "https://devbox:8080/");
+        assert_eq!(normalized.resolved_url, "https://devbox:8080/");
+    }
+
+    #[test]
+    fn normalize_browser_url_searches_google_for_plain_text() {
+        let normalized =
+            normalize_browser_url(Some("rust ownership")).expect("search url should parse");
+        assert_eq!(
+            normalized.logical_url,
+            "https://www.google.com/search?q=rust%20ownership"
+        );
+        assert_eq!(
+            normalized.resolved_url,
+            "https://www.google.com/search?q=rust%20ownership"
+        );
+    }
+
+    #[test]
+    fn normalize_browser_url_searches_google_for_non_domain_paths() {
+        let normalized =
+            normalize_browser_url(Some("notes/today")).expect("search url should parse");
+        assert_eq!(
+            normalized.logical_url,
+            "https://www.google.com/search?q=notes%2Ftoday"
+        );
+        assert_eq!(
+            normalized.resolved_url,
+            "https://www.google.com/search?q=notes%2Ftoday"
+        );
+    }
 }

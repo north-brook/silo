@@ -16,10 +16,76 @@ mod terminal;
 mod tls;
 mod workspaces;
 
+use tauri::{AppHandle, Emitter, Manager, Wry};
+
+const MENU_ID_NEW_WORKSPACE: &str = "new_workspace";
+const MENU_ID_OPEN_PROJECT: &str = "open_project";
+const MENU_ID_NEW_TAB: &str = "new_tab";
+const MENU_ID_CLOSE_TAB: &str = "close_tab";
+const MENU_ID_PREVIOUS_TAB: &str = "previous_tab";
+const MENU_ID_NEXT_TAB: &str = "next_tab";
+const MENU_ID_TOGGLE_PROJECTS_BAR: &str = "toggle_projects_bar";
+const MENU_ID_TOGGLE_GIT_BAR: &str = "toggle_git_bar";
+const MENU_ID_GIT_CREATE_OR_PUSH_PR: &str = "git_create_or_push_pr";
+const MENU_ID_GIT_MERGE_PR: &str = "git_merge_pr";
+const MENU_ID_CLOSE_WINDOW: &str = "close_window";
+const MENU_ID_JUMP_TO_WORKSPACE_PREFIX: &str = "jump_to_workspace_";
+
+const SHORTCUT_EVENT_NEW_WORKSPACE: &str = "silo://new-workspace";
+const SHORTCUT_EVENT_OPEN_PROJECT: &str = "silo://open-project";
+const SHORTCUT_EVENT_NEW_TAB: &str = "silo://new-tab";
+const SHORTCUT_EVENT_CLOSE_TAB: &str = "silo://close-tab";
+const SHORTCUT_EVENT_PREVIOUS_TAB: &str = "silo://previous-tab";
+const SHORTCUT_EVENT_NEXT_TAB: &str = "silo://next-tab";
+const SHORTCUT_EVENT_TOGGLE_PROJECTS_BAR: &str = "silo://toggle-projects-bar";
+const SHORTCUT_EVENT_TOGGLE_GIT_BAR: &str = "silo://toggle-git-bar";
+const SHORTCUT_EVENT_GIT_CREATE_OR_PUSH_PR: &str = "silo://git-create-or-push-pr";
+const SHORTCUT_EVENT_GIT_MERGE_PR: &str = "silo://git-merge-pr";
+const SHORTCUT_EVENT_JUMP_TO_WORKSPACE: &str = "silo://jump-to-workspace";
+
+fn emit_shortcut_event(app_handle: &AppHandle<Wry>, event: &str) {
+    let _ = app_handle.emit(event, ());
+}
+
+fn emit_workspace_jump_event(app_handle: &AppHandle<Wry>, index: u8) {
+    let _ = app_handle.emit(SHORTCUT_EVENT_JUMP_TO_WORKSPACE, index);
+}
+
+fn handle_shortcut_menu_event(app_handle: &AppHandle<Wry>, menu_id: &str) -> bool {
+    match menu_id {
+        MENU_ID_NEW_WORKSPACE => emit_shortcut_event(app_handle, SHORTCUT_EVENT_NEW_WORKSPACE),
+        MENU_ID_OPEN_PROJECT => emit_shortcut_event(app_handle, SHORTCUT_EVENT_OPEN_PROJECT),
+        MENU_ID_NEW_TAB => emit_shortcut_event(app_handle, SHORTCUT_EVENT_NEW_TAB),
+        MENU_ID_CLOSE_TAB => emit_shortcut_event(app_handle, SHORTCUT_EVENT_CLOSE_TAB),
+        MENU_ID_PREVIOUS_TAB => emit_shortcut_event(app_handle, SHORTCUT_EVENT_PREVIOUS_TAB),
+        MENU_ID_NEXT_TAB => emit_shortcut_event(app_handle, SHORTCUT_EVENT_NEXT_TAB),
+        MENU_ID_TOGGLE_PROJECTS_BAR => {
+            emit_shortcut_event(app_handle, SHORTCUT_EVENT_TOGGLE_PROJECTS_BAR)
+        }
+        MENU_ID_TOGGLE_GIT_BAR => emit_shortcut_event(app_handle, SHORTCUT_EVENT_TOGGLE_GIT_BAR),
+        MENU_ID_GIT_CREATE_OR_PUSH_PR => {
+            emit_shortcut_event(app_handle, SHORTCUT_EVENT_GIT_CREATE_OR_PUSH_PR)
+        }
+        MENU_ID_GIT_MERGE_PR => emit_shortcut_event(app_handle, SHORTCUT_EVENT_GIT_MERGE_PR),
+        _ => {
+            let Some(index) = menu_id.strip_prefix(MENU_ID_JUMP_TO_WORKSPACE_PREFIX) else {
+                return false;
+            };
+            let Ok(index) = index.parse::<u8>() else {
+                return false;
+            };
+            if !(1..=9).contains(&index) {
+                return false;
+            }
+            emit_workspace_jump_event(app_handle, index);
+        }
+    }
+
+    true
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    use tauri::{Emitter, Manager};
-
     let (logging_plugin, session_log) = logging::build_plugin();
 
     tauri::Builder::default()
@@ -44,26 +110,104 @@ pub fn run() {
                 log::warn!("session file logging is unavailable; using stdout only");
             }
 
-            // Custom menu: replace default Cmd+W (Close Window) with Close Tab
+            // Native accelerators ensure app shortcuts still work when focus moves to child webviews.
             {
                 use tauri::menu::*;
                 let handle = app.handle();
 
+                let new_workspace = MenuItem::with_id(
+                    handle,
+                    MENU_ID_NEW_WORKSPACE,
+                    "New Workspace",
+                    true,
+                    Some("CmdOrCtrl+N"),
+                )?;
+                let open_project = MenuItem::with_id(
+                    handle,
+                    MENU_ID_OPEN_PROJECT,
+                    "Open Project…",
+                    true,
+                    Some("CmdOrCtrl+Shift+O"),
+                )?;
+                let new_tab = MenuItem::with_id(
+                    handle,
+                    MENU_ID_NEW_TAB,
+                    "New Tab",
+                    true,
+                    Some("CmdOrCtrl+T"),
+                )?;
                 let close_tab = MenuItem::with_id(
                     handle,
-                    "close_tab",
+                    MENU_ID_CLOSE_TAB,
                     "Close Tab",
                     true,
                     Some("CmdOrCtrl+W"),
                 )?;
-
+                let previous_tab = MenuItem::with_id(
+                    handle,
+                    MENU_ID_PREVIOUS_TAB,
+                    "Previous Tab",
+                    true,
+                    Some("CmdOrCtrl+Shift+["),
+                )?;
+                let next_tab = MenuItem::with_id(
+                    handle,
+                    MENU_ID_NEXT_TAB,
+                    "Next Tab",
+                    true,
+                    Some("CmdOrCtrl+Shift+]"),
+                )?;
+                let toggle_projects_bar = MenuItem::with_id(
+                    handle,
+                    MENU_ID_TOGGLE_PROJECTS_BAR,
+                    "Toggle Projects Bar",
+                    true,
+                    Some("CmdOrCtrl+B"),
+                )?;
+                let toggle_git_bar = MenuItem::with_id(
+                    handle,
+                    MENU_ID_TOGGLE_GIT_BAR,
+                    "Toggle Git Bar",
+                    true,
+                    Some("CmdOrCtrl+Shift+B"),
+                )?;
+                let git_create_or_push_pr = MenuItem::with_id(
+                    handle,
+                    MENU_ID_GIT_CREATE_OR_PUSH_PR,
+                    "Create Or Push PR",
+                    true,
+                    Some("CmdOrCtrl+Shift+P"),
+                )?;
+                let git_merge_pr = MenuItem::with_id(
+                    handle,
+                    MENU_ID_GIT_MERGE_PR,
+                    "Merge PR",
+                    true,
+                    Some("CmdOrCtrl+Shift+M"),
+                )?;
                 let close_window_item = MenuItem::with_id(
                     handle,
-                    "close_window",
+                    MENU_ID_CLOSE_WINDOW,
                     "Close Window",
                     true,
                     None::<&str>,
                 )?;
+
+                let workspace_jump_items = (1..=9)
+                    .map(|index| {
+                        MenuItem::with_id(
+                            handle,
+                            format!("{MENU_ID_JUMP_TO_WORKSPACE_PREFIX}{index}"),
+                            format!("Workspace {index}"),
+                            true,
+                            Some(format!("CmdOrCtrl+{index}")),
+                        )
+                    })
+                    .collect::<tauri::Result<Vec<_>>>()?;
+                let workspace_jump_refs = workspace_jump_items
+                    .iter()
+                    .map(|item| item as &dyn IsMenuItem<Wry>)
+                    .collect::<Vec<_>>();
 
                 let app_submenu = SubmenuBuilder::new(handle, "Silo")
                     .about(None)
@@ -78,7 +222,25 @@ pub fn run() {
                     .build()?;
 
                 let file_submenu = SubmenuBuilder::new(handle, "File")
-                    .item(&close_tab)
+                    .items(&[&new_workspace, &open_project, &new_tab, &close_tab])
+                    .build()?;
+
+                let jump_to_workspace_submenu = SubmenuBuilder::new(handle, "Jump To Workspace")
+                    .items(&workspace_jump_refs)
+                    .build()?;
+
+                let navigate_submenu = SubmenuBuilder::new(handle, "Navigate")
+                    .items(&[&previous_tab, &next_tab])
+                    .separator()
+                    .item(&jump_to_workspace_submenu)
+                    .build()?;
+
+                let view_submenu = SubmenuBuilder::new(handle, "View")
+                    .items(&[&toggle_projects_bar, &toggle_git_bar])
+                    .build()?;
+
+                let git_submenu = SubmenuBuilder::new(handle, "Git")
+                    .items(&[&git_create_or_push_pr, &git_merge_pr])
                     .build()?;
 
                 let edit_submenu = SubmenuBuilder::new(handle, "Edit")
@@ -100,6 +262,9 @@ pub fn run() {
                 let menu = MenuBuilder::new(handle)
                     .item(&app_submenu)
                     .item(&file_submenu)
+                    .item(&navigate_submenu)
+                    .item(&view_submenu)
+                    .item(&git_submenu)
                     .item(&edit_submenu)
                     .item(&window_submenu)
                     .build()?;
@@ -108,9 +273,11 @@ pub fn run() {
             }
 
             app.on_menu_event(|app_handle, event| {
-                if event.id() == "close_tab" {
-                    let _ = app_handle.emit("silo://close-tab", ());
-                } else if event.id() == "close_window" {
+                if handle_shortcut_menu_event(app_handle, event.id().as_ref()) {
+                    return;
+                }
+
+                if event.id() == MENU_ID_CLOSE_WINDOW {
                     if let Some(window) = app_handle.get_webview_window("main") {
                         let _ = window.close();
                     }
