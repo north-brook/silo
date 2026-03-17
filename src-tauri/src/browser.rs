@@ -1,4 +1,5 @@
 use crate::router::RouterManager;
+use crate::AppRuntime;
 use crate::state::{
     browser_session_metadata_key, WorkspaceMetadataEntry, WorkspaceMetadataManager,
     BROWSER_LAST_ACTIVE_METADATA_KEY,
@@ -8,23 +9,19 @@ use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::net::{IpAddr, TcpListener, TcpStream};
+use std::net::IpAddr;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 use tauri::webview::{NewWindowResponse, PageLoadEvent, Url, WebviewBuilder};
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Rect, Size, State,
-    Webview, WebviewUrl, Wry,
+    Webview, WebviewUrl,
 };
 
 const BROWSER_KIND: &str = "browser";
 const MAIN_WINDOW_LABEL: &str = "main";
 const BROWSER_EVENT_NAME: &str = "browser://state";
 const BROWSER_DEFAULT_URL: &str = "about:blank";
-const BROWSER_SOCKS_ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
-const BROWSER_SOCKS_ATTACH_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BrowserCreateResult {
     pub(crate) attachment_id: String,
@@ -72,7 +69,6 @@ pub struct BrowserViewport {
 
 #[derive(Debug, Clone)]
 struct BrowserWebviewState {
-    label: String,
     resolved_url: String,
     viewport: BrowserViewport,
     visible: bool,
@@ -81,11 +77,6 @@ struct BrowserWebviewState {
 struct BrowserUrlTarget {
     logical_url: String,
     resolved_url: String,
-}
-
-struct WorkspaceSocksTunnel {
-    local_port: u16,
-    child: Child,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,7 +89,6 @@ struct BrowserStateEvent {
 #[derive(Clone, Default)]
 pub struct BrowserManager {
     webviews: Arc<Mutex<HashMap<String, BrowserWebviewState>>>,
-    socks_tunnels: Arc<Mutex<HashMap<String, WorkspaceSocksTunnel>>>,
     sessions: Arc<Mutex<HashMap<String, WorkspaceSession>>>,
     loopback_router: RouterManager,
 }
@@ -149,7 +139,7 @@ async fn create_browser_tab(
 
 #[tauri::command]
 pub async fn browser_mount_tab(
-    app: AppHandle<Wry>,
+    app: AppHandle<AppRuntime>,
     state: State<'_, BrowserManager>,
     metadata: State<'_, WorkspaceMetadataManager>,
     workspace: String,
@@ -171,9 +161,6 @@ pub async fn browser_mount_tab(
             .or(session.url.as_deref())
             .or(session.resolved_url.as_deref()),
     )?;
-    let socks_port = state.ensure_workspace_socks_tunnel(&lookup)?;
-    let proxy_url = Url::parse(&format!("socks5://127.0.0.1:{socks_port}"))
-        .map_err(|error| format!("failed to build browser proxy url: {error}"))?;
     let resolved_url = resolved_target.resolved_url.clone();
 
     if session.resolved_url.as_deref() != Some(resolved_url.as_str()) {
@@ -201,7 +188,6 @@ pub async fn browser_mount_tab(
         &workspace,
         &attachment_id,
         &resolved_url,
-        proxy_url,
         viewport,
         visible,
     )?;
@@ -215,7 +201,7 @@ pub async fn browser_mount_tab(
 
 #[tauri::command]
 pub fn browser_resize_tab(
-    app: AppHandle<Wry>,
+    app: AppHandle<AppRuntime>,
     state: State<'_, BrowserManager>,
     workspace: String,
     attachment_id: String,
@@ -229,7 +215,7 @@ pub fn browser_resize_tab(
 
 #[tauri::command]
 pub fn browser_detach_tab(
-    app: AppHandle<Wry>,
+    app: AppHandle<AppRuntime>,
     state: State<'_, BrowserManager>,
     workspace: String,
     attachment_id: String,
@@ -240,7 +226,7 @@ pub fn browser_detach_tab(
 
 #[tauri::command]
 pub fn browser_unmount_tab(
-    app: AppHandle<Wry>,
+    app: AppHandle<AppRuntime>,
     state: State<'_, BrowserManager>,
     workspace: String,
     attachment_id: String,
@@ -250,7 +236,7 @@ pub fn browser_unmount_tab(
 
 #[tauri::command]
 pub async fn browser_kill_tab(
-    app: AppHandle<Wry>,
+    app: AppHandle<AppRuntime>,
     state: State<'_, BrowserManager>,
     metadata: State<'_, WorkspaceMetadataManager>,
     workspace: String,
@@ -287,13 +273,12 @@ pub async fn browser_kill_tab(
         .loopback_router
         .release_unused_workspace_routes(&workspace, &remaining_sessions)?;
     let _ = state.close_webview(&app, &workspace, &attachment_id)?;
-    state.release_workspace_socks_tunnel_if_unused(&workspace)?;
     Ok(BrowserKillResult { killed: true })
 }
 
 #[tauri::command]
 pub async fn browser_go_to(
-    app: AppHandle<Wry>,
+    app: AppHandle<AppRuntime>,
     state: State<'_, BrowserManager>,
     metadata: State<'_, WorkspaceMetadataManager>,
     workspace: String,
@@ -329,7 +314,7 @@ pub async fn browser_go_to(
 
 #[tauri::command]
 pub async fn browser_report_page_state(
-    app: AppHandle<Wry>,
+    app: AppHandle<AppRuntime>,
     state: State<'_, BrowserManager>,
     metadata: State<'_, WorkspaceMetadataManager>,
     workspace: String,
@@ -374,7 +359,7 @@ pub async fn browser_report_page_state(
 
 #[tauri::command]
 pub async fn browser_go_back(
-    app: AppHandle<Wry>,
+    app: AppHandle<AppRuntime>,
     workspace: String,
     attachment_id: String,
 ) -> Result<BrowserCommandResult, String> {
@@ -390,7 +375,7 @@ pub async fn browser_go_back(
 
 #[tauri::command]
 pub async fn browser_go_forward(
-    app: AppHandle<Wry>,
+    app: AppHandle<AppRuntime>,
     workspace: String,
     attachment_id: String,
 ) -> Result<BrowserCommandResult, String> {
@@ -406,7 +391,7 @@ pub async fn browser_go_forward(
 
 #[tauri::command]
 pub async fn browser_refresh_page(
-    app: AppHandle<Wry>,
+    app: AppHandle<AppRuntime>,
     workspace: String,
     attachment_id: String,
 ) -> Result<BrowserCommandResult, String> {
@@ -419,7 +404,7 @@ pub async fn browser_refresh_page(
 
 #[tauri::command]
 pub async fn browser_open_devtools(
-    app: AppHandle<Wry>,
+    app: AppHandle<AppRuntime>,
     workspace: String,
     attachment_id: String,
 ) -> Result<BrowserCommandResult, String> {
@@ -430,6 +415,14 @@ pub async fn browser_open_devtools(
 }
 
 impl BrowserManager {
+    pub(crate) fn new(loopback_router: RouterManager) -> Self {
+        Self {
+            webviews: Arc::default(),
+            sessions: Arc::default(),
+            loopback_router,
+        }
+    }
+
     fn cache_session(&self, workspace: &str, session: WorkspaceSession) -> Result<(), String> {
         let mut sessions = self
             .sessions
@@ -513,68 +506,12 @@ impl BrowserManager {
         Ok(normalized)
     }
 
-    fn ensure_workspace_socks_tunnel(&self, lookup: &WorkspaceLookup) -> Result<u16, String> {
-        let mut tunnels = self
-            .socks_tunnels
-            .lock()
-            .map_err(|_| "browser socks tunnel lock poisoned".to_string())?;
-
-        if let Some(tunnel) = tunnels.get_mut(lookup.workspace.name()) {
-            if tunnel
-                .child
-                .try_wait()
-                .map_err(|error| format!("failed to inspect browser socks tunnel: {error}"))?
-                .is_none()
-            {
-                return Ok(tunnel.local_port);
-            }
-
-            let _ = tunnel.child.wait();
-            tunnels.remove(lookup.workspace.name());
-        }
-
-        let local_port = find_free_local_port()?;
-        let mut child = spawn_workspace_socks_tunnel(lookup, local_port)?;
-        wait_for_local_socks_tunnel(local_port, &mut child)?;
-        tunnels.insert(
-            lookup.workspace.name().to_string(),
-            WorkspaceSocksTunnel { local_port, child },
-        );
-        Ok(local_port)
-    }
-
-    fn release_workspace_socks_tunnel_if_unused(&self, workspace: &str) -> Result<(), String> {
-        let webviews = self
-            .webviews
-            .lock()
-            .map_err(|_| "browser webview lock poisoned".to_string())?;
-        let still_has_webviews = webviews
-            .values()
-            .any(|state| state.label.starts_with(&format!("browser:{workspace}:")));
-        if still_has_webviews {
-            return Ok(());
-        }
-        drop(webviews);
-
-        let mut tunnels = self
-            .socks_tunnels
-            .lock()
-            .map_err(|_| "browser socks tunnel lock poisoned".to_string())?;
-        let Some(mut tunnel) = tunnels.remove(workspace) else {
-            return Ok(());
-        };
-        let _ = tunnel.child.kill();
-        let _ = tunnel.child.wait();
-        Ok(())
-    }
-
     fn ensure_webview(
         &self,
-        app: &AppHandle<Wry>,
+        app: &AppHandle<AppRuntime>,
         workspace: &str,
         attachment_id: &str,
         resolved_url: &str,
-        proxy_url: Url,
         viewport: BrowserViewport,
         visible: bool,
     ) -> Result<(), String> {
@@ -597,7 +534,6 @@ impl BrowserManager {
                 workspace,
                 attachment_id,
                 BrowserWebviewState {
-                    label,
                     resolved_url: resolved_url.to_string(),
                     viewport,
                     visible,
@@ -625,7 +561,6 @@ impl BrowserManager {
         let builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(destination))
             .devtools(true)
             .data_directory(browser_webview_data_directory(workspace)?)
-            .proxy_url(proxy_url)
             .initialization_script(browser_state_sync_script(workspace, attachment_id))
             .on_page_load(move |webview, payload| {
                 if payload.event() == PageLoadEvent::Finished {
@@ -701,7 +636,6 @@ impl BrowserManager {
         webviews.insert(
             label.clone(),
             BrowserWebviewState {
-                label,
                 resolved_url: resolved_url.to_string(),
                 viewport,
                 visible,
@@ -712,7 +646,7 @@ impl BrowserManager {
 
     fn update_webview_viewport(
         &self,
-        app: &AppHandle<Wry>,
+        app: &AppHandle<AppRuntime>,
         workspace: &str,
         attachment_id: &str,
         viewport: BrowserViewport,
@@ -732,7 +666,7 @@ impl BrowserManager {
 
     fn hide_webview(
         &self,
-        app: &AppHandle<Wry>,
+        app: &AppHandle<AppRuntime>,
         workspace: &str,
         attachment_id: &str,
     ) -> Result<bool, String> {
@@ -749,7 +683,7 @@ impl BrowserManager {
 
     fn close_webview(
         &self,
-        app: &AppHandle<Wry>,
+        app: &AppHandle<AppRuntime>,
         workspace: &str,
         attachment_id: &str,
     ) -> Result<bool, String> {
@@ -866,7 +800,7 @@ fn browser_session_cache_key(workspace: &str, attachment_id: &str) -> String {
 }
 
 fn set_webview_viewport(
-    webview: &Webview<Wry>,
+    webview: &Webview<AppRuntime>,
     viewport: BrowserViewport,
     visible: bool,
 ) -> Result<(), String> {
@@ -897,7 +831,7 @@ fn set_webview_viewport(
 }
 
 fn run_webview_script(
-    app: &AppHandle<Wry>,
+    app: &AppHandle<AppRuntime>,
     workspace: &str,
     attachment_id: &str,
     script: &str,
@@ -910,21 +844,21 @@ fn run_webview_script(
 }
 
 fn resolve_live_webview(
-    app: &AppHandle<Wry>,
+    app: &AppHandle<AppRuntime>,
     workspace: &str,
     attachment_id: &str,
-) -> Result<Webview<Wry>, String> {
+) -> Result<Webview<AppRuntime>, String> {
     let label = browser_webview_label(workspace, attachment_id);
     app.get_webview(&label)
         .ok_or_else(|| format!("browser webview is not mounted: {attachment_id}"))
 }
 
 fn handle_page_load(
-    app: &AppHandle<Wry>,
+    app: &AppHandle<AppRuntime>,
     manager: &BrowserManager,
     workspace: &str,
     attachment_id: &str,
-    webview: &Webview<Wry>,
+    webview: &Webview<AppRuntime>,
     resolved_url: String,
 ) {
     let _ = manager.set_resolved_url(workspace, attachment_id, &resolved_url);
@@ -962,10 +896,10 @@ fn handle_page_load(
 
 fn handle_title_changed(
     manager: &BrowserManager,
-    app: &AppHandle<Wry>,
+    app: &AppHandle<AppRuntime>,
     workspace: &str,
     attachment_id: &str,
-    webview: &Webview<Wry>,
+    webview: &Webview<AppRuntime>,
     title: &str,
 ) {
     reapply_tracked_webview_state(manager, workspace, attachment_id, webview);
@@ -1017,7 +951,7 @@ fn reapply_tracked_webview_state(
     manager: &BrowserManager,
     workspace: &str,
     attachment_id: &str,
-    webview: &Webview<Wry>,
+    webview: &Webview<AppRuntime>,
 ) {
     let Ok(Some(state)) = manager.current_webview_state(workspace, attachment_id) else {
         return;
@@ -1078,7 +1012,7 @@ fn enqueue_browser_metadata_remove(
 }
 
 fn emit_browser_state_changed(
-    app: &AppHandle<Wry>,
+    app: &AppHandle<AppRuntime>,
     workspace: &str,
     attachment_id: &str,
 ) -> Result<(), String> {
@@ -1090,70 +1024,6 @@ fn emit_browser_state_changed(
         },
     )
     .map_err(|error| format!("failed to emit browser state event: {error}"))
-}
-
-fn spawn_workspace_socks_tunnel(
-    lookup: &WorkspaceLookup,
-    local_port: u16,
-) -> Result<Child, String> {
-    let mut command = Command::new("gcloud");
-    command.arg(format!("--account={}", lookup.account));
-    command.arg(format!("--project={}", lookup.gcloud_project));
-    command.arg("compute");
-    command.arg("ssh");
-    command.arg(lookup.workspace.name());
-    command.arg(format!("--zone={}", lookup.workspace.zone()));
-    command.arg("--ssh-flag=-N");
-    command.arg("--ssh-flag=-o");
-    command.arg("--ssh-flag=ExitOnForwardFailure=yes");
-    command.arg("--ssh-flag=-o");
-    command.arg("--ssh-flag=ServerAliveInterval=15");
-    command.arg("--ssh-flag=-D");
-    command.arg(format!("--ssh-flag=127.0.0.1:{local_port}"));
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    command
-        .spawn()
-        .map_err(|error| format!("failed to start browser socks tunnel: {error}"))
-}
-
-fn wait_for_local_socks_tunnel(local_port: u16, child: &mut Child) -> Result<(), String> {
-    let started = Instant::now();
-    while started.elapsed() < BROWSER_SOCKS_ATTACH_TIMEOUT {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("failed to inspect browser socks tunnel: {error}"))?
-        {
-            return Err(format!(
-                "browser socks tunnel exited early with status {status}"
-            ));
-        }
-
-        if TcpStream::connect_timeout(
-            &format!("127.0.0.1:{local_port}")
-                .parse()
-                .map_err(|error| format!("invalid browser tunnel address: {error}"))?,
-            Duration::from_millis(100),
-        )
-        .is_ok()
-        {
-            return Ok(());
-        }
-        std::thread::sleep(BROWSER_SOCKS_ATTACH_RETRY_INTERVAL);
-    }
-
-    Err("timed out waiting for browser socks tunnel".to_string())
-}
-
-fn find_free_local_port() -> Result<u16, String> {
-    let listener = TcpListener::bind(("127.0.0.1", 0))
-        .map_err(|error| format!("failed to allocate browser tunnel port: {error}"))?;
-    listener
-        .local_addr()
-        .map(|address| address.port())
-        .map_err(|error| format!("failed to read browser tunnel port: {error}"))
 }
 
 fn browser_webview_data_directory(workspace: &str) -> Result<PathBuf, String> {

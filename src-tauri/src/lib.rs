@@ -1,4 +1,5 @@
 mod browser;
+mod browser_loopback;
 mod claude;
 mod codex;
 mod config;
@@ -16,7 +17,9 @@ mod terminal;
 mod tls;
 mod workspaces;
 
-use tauri::{AppHandle, Emitter, Manager, Wry};
+use tauri::{AppHandle, Cef, Emitter, Manager};
+
+pub type AppRuntime = Cef;
 
 const MENU_ID_NEW_WORKSPACE: &str = "new_workspace";
 const MENU_ID_OPEN_PROJECT: &str = "open_project";
@@ -34,6 +37,7 @@ const MENU_ID_OPEN_GIT_CHECKS: &str = "open_git_checks";
 const MENU_ID_GIT_CREATE_OR_PUSH_PR: &str = "git_create_or_push_pr";
 const MENU_ID_GIT_MERGE_PR: &str = "git_merge_pr";
 const MENU_ID_CLOSE_WINDOW: &str = "close_window";
+const MENU_ID_QUIT_APP: &str = "quit_app";
 const MENU_ID_JUMP_TO_WORKSPACE_PREFIX: &str = "jump_to_workspace_";
 
 const SHORTCUT_EVENT_NEW_WORKSPACE: &str = "silo://new-workspace";
@@ -53,15 +57,16 @@ const SHORTCUT_EVENT_GIT_CREATE_OR_PUSH_PR: &str = "silo://git-create-or-push-pr
 const SHORTCUT_EVENT_GIT_MERGE_PR: &str = "silo://git-merge-pr";
 const SHORTCUT_EVENT_JUMP_TO_WORKSPACE: &str = "silo://jump-to-workspace";
 
-fn emit_shortcut_event(app_handle: &AppHandle<Wry>, event: &str) {
+fn emit_shortcut_event(app_handle: &AppHandle<AppRuntime>, event: &str) {
     let _ = app_handle.emit(event, ());
 }
 
-fn emit_workspace_jump_event(app_handle: &AppHandle<Wry>, index: u8) {
+fn emit_workspace_jump_event(app_handle: &AppHandle<AppRuntime>, index: u8) {
     let _ = app_handle.emit(SHORTCUT_EVENT_JUMP_TO_WORKSPACE, index);
 }
 
-fn handle_shortcut_menu_event(app_handle: &AppHandle<Wry>, menu_id: &str) -> bool {
+fn handle_shortcut_menu_event(app_handle: &AppHandle<AppRuntime>, menu_id: &str) -> bool {
+    log::info!("received native menu event menu_id={menu_id}");
     match menu_id {
         MENU_ID_NEW_WORKSPACE => emit_shortcut_event(app_handle, SHORTCUT_EVENT_NEW_WORKSPACE),
         MENU_ID_OPEN_PROJECT => emit_shortcut_event(app_handle, SHORTCUT_EVENT_OPEN_PROJECT),
@@ -104,9 +109,14 @@ fn handle_shortcut_menu_event(app_handle: &AppHandle<Wry>, menu_id: &str) -> boo
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let (logging_plugin, session_log) = logging::build_plugin();
+    let cef_command_line_args = cef_command_line_args();
+    let loopback_router = router::RouterManager::default();
+    let browser_manager = browser::BrowserManager::new(loopback_router.clone());
+    let browser_loopback_manager = browser_loopback::BrowserLoopbackManager::new(loopback_router);
 
-    tauri::Builder::default()
-        .manage(browser::BrowserManager::default())
+    tauri::Builder::<AppRuntime>::new()
+        .command_line_args(cef_command_line_args)
+        .manage(browser_manager)
         .manage(state::WorkspaceMetadataManager::default())
         .manage(terminal::TerminalManager::default())
         .plugin(logging_plugin)
@@ -114,6 +124,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .setup(move |app| {
+            browser_loopback_manager.ensure_started()?;
             if let Err(error) = config::initialize_on_start() {
                 log::error!("failed to initialize silo config: {error}");
             }
@@ -244,6 +255,13 @@ pub fn run() {
                     true,
                     None::<&str>,
                 )?;
+                let quit_app_item = MenuItem::with_id(
+                    handle,
+                    MENU_ID_QUIT_APP,
+                    "Quit Silo",
+                    true,
+                    Some("CmdOrCtrl+Q"),
+                )?;
 
                 let dashboard_jump = MenuItem::with_id(
                     handle,
@@ -266,7 +284,7 @@ pub fn run() {
                     .collect::<tauri::Result<Vec<_>>>()?;
                 let workspace_jump_refs = workspace_jump_items
                     .iter()
-                    .map(|item| item as &dyn IsMenuItem<Wry>)
+                    .map(|item| item as &dyn IsMenuItem<AppRuntime>)
                     .collect::<Vec<_>>();
 
                 let app_submenu = SubmenuBuilder::new(handle, "Silo")
@@ -278,7 +296,7 @@ pub fn run() {
                     .hide_others()
                     .show_all()
                     .separator()
-                    .quit()
+                    .item(&quit_app_item)
                     .build()?;
 
                 let file_submenu = SubmenuBuilder::new(handle, "File")
@@ -353,6 +371,8 @@ pub fn run() {
                     if let Some(window) = app_handle.get_webview_window("main") {
                         let _ = window.close();
                     }
+                } else if event.id() == MENU_ID_QUIT_APP {
+                    quit_application(app_handle);
                 }
             });
 
@@ -429,4 +449,40 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn cef_command_line_args() -> Vec<(String, Option<String>)> {
+    let mut args = Vec::new();
+
+    if cfg!(debug_assertions) && std::env::var("SILO_CEF_USE_MOCK_KEYCHAIN").as_deref() != Ok("0") {
+        // CEF workaround - reevaluate when CEF is stable.
+        args.push(("--use-mock-keychain".to_string(), None));
+    }
+
+    if let Ok(remote_debugging_port) = std::env::var("SILO_CEF_REMOTE_DEBUGGING_PORT") {
+        let remote_debugging_port = remote_debugging_port.trim();
+        if !remote_debugging_port.is_empty() {
+            args.push((
+                "remote-debugging-port".to_string(),
+                Some(remote_debugging_port.to_string()),
+            ));
+        }
+    }
+
+    args
+}
+
+fn quit_application(app_handle: &tauri::AppHandle<AppRuntime>) {
+    #[cfg(target_os = "macos")]
+    {
+        // CEF workaround - reevaluate when CEF is stable.
+        log::info!("quitting Silo via hard exit workaround for CEF on macOS");
+        app_handle.cleanup_before_exit();
+        std::process::exit(0);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        app_handle.exit(0);
+    }
 }

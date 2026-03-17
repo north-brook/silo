@@ -1,3 +1,4 @@
+use crate::AppRuntime;
 use crate::config::ConfigStore;
 use crate::state::WorkspaceMetadataManager;
 use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
@@ -101,7 +102,7 @@ struct AttachmentKey {
 }
 
 struct Attachment {
-    app: Option<AppHandle>,
+    app: Option<AppHandle<AppRuntime>>,
     id: String,
     key: AttachmentKey,
     master: Mutex<Box<dyn MasterPty + Send>>,
@@ -270,8 +271,8 @@ pub async fn terminal_list_terminals(workspace: String) -> Result<Vec<WorkspaceS
 
 #[tauri::command]
 pub async fn terminal_attach_terminal(
-    app: AppHandle,
-    window: Window,
+    app: AppHandle<AppRuntime>,
+    window: Window<AppRuntime>,
     state: State<'_, TerminalManager>,
     workspace: String,
     attachment_id: String,
@@ -545,7 +546,7 @@ pub fn terminal_resize_terminal(
 }
 
 fn spawn_terminal_attachment(
-    app: AppHandle,
+    app: AppHandle<AppRuntime>,
     manager: TerminalManager,
     lookup: WorkspaceLookup,
     key: AttachmentKey,
@@ -648,7 +649,7 @@ fn spawn_reader_loop(mut reader: Box<dyn Read + Send>, attachment: Arc<Attachmen
 }
 
 fn spawn_waiter_loop(
-    app: AppHandle,
+    app: AppHandle<AppRuntime>,
     manager: TerminalManager,
     attachment: Arc<Attachment>,
     mut child: Box<dyn Child + Send + Sync>,
@@ -707,7 +708,11 @@ fn emit_terminal_error(attachment: &Attachment, message: String) {
     }
 }
 
-fn emit_terminal_error_with_app(app: &AppHandle, attachment: &Attachment, message: String) {
+fn emit_terminal_error_with_app(
+    app: &AppHandle<AppRuntime>,
+    attachment: &Attachment,
+    message: String,
+) {
     log::warn!("{message}");
     if let Some(window_label) = current_window_label(attachment) {
         let _ = app.emit_to(
@@ -767,7 +772,7 @@ async fn attach_existing_terminal(
     lookup: &WorkspaceLookup,
     name: &str,
     scrollback_mode: AttachScrollbackMode,
-    window: &Window,
+    window: &Window<AppRuntime>,
     output: Channel<Vec<u8>>,
     command: Option<String>,
     attach_started: Instant,
