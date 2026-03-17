@@ -705,6 +705,11 @@ wrap_keyboard_handler! {
         return 0;
       }
 
+      // Secondary shortcut shim for the small set of accelerators that still reach
+      // CEF key handling but do not reliably arrive as native menu events.
+      // This is not the primary place to register new shortcuts; prefer the native
+      // menu path in `src-tauri/src/lib.rs`, and only add cases here when an
+      // existing menu shortcut is demonstrably swallowed before the menu layer.
       if let Some(shortcut) = shortcut_from_key_event(event) {
         if let Some(browser) = _browser.as_deref()
           && dispatch_shortcut_to_main_shell(&self.context, &shortcut) {
@@ -891,6 +896,9 @@ fn dispatch_shortcut_to_main_shell<T: UserEvent>(
   context: &Context<T>,
   shortcut: &ShortcutDispatch<'_>,
 ) -> bool {
+  // This bridges CEF-rescued shortcuts back into the same frontend event surface
+  // used by native menu shortcuts. Frontend code should not need to know whether
+  // a shortcut arrived through the menu path or this fallback path.
   let Some(frame) = main_shell_frame(context) else {
     return false;
   };

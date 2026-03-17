@@ -66,6 +66,10 @@ fn emit_workspace_jump_event(app_handle: &AppHandle<AppRuntime>, index: u8) {
 }
 
 fn handle_shortcut_menu_event(app_handle: &AppHandle<AppRuntime>, menu_id: &str) -> bool {
+    // Canonical shortcut routing lives in the native menu.
+    // Add new app-level shortcuts here first, then listen for the emitted
+    // `silo://...` event in the frontend. Only touch the CEF/AppKit shims when
+    // Chromium prevents a registered menu shortcut from reaching this path.
     log::info!("received native menu event menu_id={menu_id}");
     match menu_id {
         MENU_ID_NEW_WORKSPACE => emit_shortcut_event(app_handle, SHORTCUT_EVENT_NEW_WORKSPACE),

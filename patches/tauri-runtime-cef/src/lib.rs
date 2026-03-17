@@ -2515,6 +2515,9 @@ mod application {
         // Chromium consumes some Command-based shortcuts inside child browser views
         // before Tauri menu accelerators see them. Give the native menu first shot
         // at Command-key equivalents so app-owned shortcuts still work reliably.
+        // Do not add new shortcuts here by default. Register them in the Tauri menu
+        // first and only widen this shim if Chromium steals an already-registered
+        // menu accelerator before the menu event fires.
         if should_route_menu_shortcut(event)
           && let Some(main_menu) = self.mainMenu()
           && main_menu.performKeyEquivalent(event)
@@ -2529,6 +2532,9 @@ mod application {
   );
 
   fn should_route_menu_shortcut(event: &NSEvent) -> bool {
+    // Keep this broad enough to restore normal menu precedence for Command-based
+    // accelerators inside Chromium child views, but narrow enough that plain typing
+    // and non-menu key handling still flows through AppKit/Chromium unchanged.
     if event.r#type() != NSEventType::KeyDown {
       return false;
     }
