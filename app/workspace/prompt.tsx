@@ -6,10 +6,6 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { ClaudeIcon } from "../../components/icons/claude";
 import { CodexIcon } from "../../components/icons/codex";
-import {
-	type PromptProviderId,
-	usePromptDraft,
-} from "../../components/prompt-context";
 import { SiloIcon } from "../../components/icons/silo";
 import { Loader } from "../../components/loader";
 import {
@@ -17,6 +13,10 @@ import {
 	PopoverContent,
 	PopoverTrigger,
 } from "../../components/popover";
+import {
+	type PromptProviderId,
+	usePromptDraft,
+} from "../../components/prompt-context";
 import { toast } from "../../components/toaster";
 import {
 	Tooltip,
@@ -79,13 +79,21 @@ export function PromptWorkspace({
 	const router = useRouter();
 	const queryClient = useQueryClient();
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-	useEffect(() => {
-		textareaRef.current?.focus();
-	}, []);
-	const [providerOpen, setProviderOpen] = useState(false);
 	const { clearDraft, prompt, providerId, setPrompt, setProviderId } =
 		usePromptDraft(workspace);
+
+	useEffect(() => {
+		const textarea = textareaRef.current;
+		if (!textarea) {
+			return;
+		}
+
+		textarea.dataset.workspace = workspace;
+		textarea.focus();
+		const caret = textarea.value.length;
+		textarea.setSelectionRange(caret, caret);
+	}, [workspace]);
+	const [providerOpen, setProviderOpen] = useState(false);
 	const provider =
 		PROVIDERS.find((candidate) => candidate.id === providerId) ?? PROVIDERS[0];
 
@@ -94,14 +102,14 @@ export function PromptWorkspace({
 			invoke<{ attachment_id: string }>("terminal_create_terminal", {
 				workspace,
 			}),
-			onSuccess: (result) => {
-				queryClient.invalidateQueries({
-					queryKey: ["terminal_list_terminals", workspace],
-				});
-				queryClient.invalidateQueries({
-					queryKey: ["workspaces_get_workspace", workspace],
-				});
-				router.push(
+		onSuccess: (result) => {
+			queryClient.invalidateQueries({
+				queryKey: ["terminal_list_terminals", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_get_workspace", workspace],
+			});
+			router.push(
 				cloudSessionHref({
 					project: project ?? "",
 					workspace,
@@ -121,15 +129,15 @@ export function PromptWorkspace({
 	});
 	const submitPrompt = useMutation({
 		mutationFn: () => submitWorkspacePrompt(workspace, prompt, provider.id),
-			onSuccess: (result) => {
-				clearDraft();
-				queryClient.invalidateQueries({
-					queryKey: ["terminal_list_terminals", workspace],
-				});
-				queryClient.invalidateQueries({
-					queryKey: ["workspaces_get_workspace", workspace],
-				});
-				router.push(
+		onSuccess: (result) => {
+			clearDraft();
+			queryClient.invalidateQueries({
+				queryKey: ["terminal_list_terminals", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_get_workspace", workspace],
+			});
+			router.push(
 				cloudSessionHref({
 					project: project ?? "",
 					workspace,
