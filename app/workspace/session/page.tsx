@@ -3,17 +3,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { ArrowLeft, ArrowRight, RotateCw, Wrench } from "lucide-react";
+import { ArrowLeft, ArrowRight, RotateCw } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { CloudDeck } from "../../../components/cloud";
 import { Loader } from "../../../components/loader";
 import { toast } from "../../../components/toaster";
-import {
-	Tooltip,
-	TooltipContent,
-	TooltipTrigger,
-} from "../../../components/tooltip";
 import {
 	type CloudSession,
 	normalizeWorkspaceSession,
@@ -104,6 +99,14 @@ function WorkspaceSessionView() {
 				: [],
 		[workspaceQuery.data],
 	);
+	const hasLiveSession = useMemo(
+		() =>
+			sessions.some(
+				(session) =>
+					session.type === kind && session.attachment_id === attachmentId,
+			),
+		[attachmentId, kind, sessions],
+	);
 	const cloudSessions = useMemo(
 		() =>
 			sessions.map((session) => normalizeWorkspaceSession(workspace, session)),
@@ -134,6 +137,18 @@ function WorkspaceSessionView() {
 			}
 		);
 	}, [attachmentId, cloudSessions, kind, workspace]);
+
+	useEffect(() => {
+		if (!workspace || !kind || !attachmentId || !hasLiveSession) {
+			return;
+		}
+
+		void invoke("workspaces_set_active_session", {
+			workspace,
+			kind,
+			attachmentId,
+		});
+	}, [attachmentId, hasLiveSession, kind, workspace]);
 
 	if (!workspace || !attachmentId || !kind || !activeSession) {
 		return null;
@@ -306,27 +321,11 @@ function BrowserSessionHeader({
 		});
 	}, [refresh]);
 
-	const devtools = useMutation({
-		mutationFn: () =>
-			invoke("browser_open_devtools", {
-				workspace: session.workspace,
-				attachmentId: session.attachmentId,
-			}),
-		onError: (error) => {
-			toast({
-				variant: "error",
-				title: "Failed to open devtools",
-				description: error.message,
-			});
-		},
-	});
-
 	const busy =
 		navigate.isPending ||
 		goBack.isPending ||
 		goForward.isPending ||
-		refresh.isPending ||
-		devtools.isPending;
+		refresh.isPending;
 
 	return (
 		<form
@@ -373,20 +372,6 @@ function BrowserSessionHeader({
 				autoCapitalize="off"
 				className="flex-1 min-w-0 h-7 rounded-md bg-bg px-2.5 text-[12px] text-text-bright outline-none border border-border-light focus:border-text-muted transition-colors"
 			/>
-			<Tooltip>
-				<TooltipTrigger asChild>
-					<button
-						type="button"
-						disabled={busy}
-						onClick={() => devtools.mutate()}
-						aria-label="Developer Tools"
-						className="h-7 w-7 rounded-md flex items-center justify-center text-text-muted hover:text-text-bright hover:bg-btn-hover disabled:opacity-40 disabled:hover:bg-transparent transition-colors"
-					>
-						<Wrench size={12} />
-					</button>
-				</TooltipTrigger>
-				<TooltipContent side="left">Developer Tools</TooltipContent>
-			</Tooltip>
 		</form>
 	);
 }
