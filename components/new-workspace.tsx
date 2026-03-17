@@ -1,12 +1,13 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { createContext, useContext, useEffect, useState } from "react";
 import { invoke } from "../lib/invoke";
 import type { ListedProject } from "../lib/projects";
+import { listenShortcutEvent, shortcutEvents } from "../lib/shortcuts";
 import type { SnapshotTemplate } from "../lib/templates";
 import { createWorkspace as createWorkspaceCommand } from "../lib/workspaces";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./dialog";
@@ -44,6 +45,12 @@ export function NewWorkspaceProvider({
 	});
 
 	useEffect(() => {
+		if (isTauri()) {
+			return listenShortcutEvent<void>(shortcutEvents.newWorkspace, () => {
+				setIsOpen(true);
+			});
+		}
+
 		const handler = (e: KeyboardEvent) => {
 			if (e.metaKey && e.key === "n") {
 				e.preventDefault();
