@@ -22,8 +22,10 @@ interface InvokeOptions<T> {
 
 const PATCHED_CONSOLE_KEY = "__siloLoggingPatched";
 const MAX_LOG_MESSAGE_LENGTH = 8_000;
+const FRONTEND_BOOT_ID = createBootId();
 
 let frontendLoggingInitialized = false;
+let frontendLoggingSuppressed = false;
 const lastInvokeResults = new Map<string, unknown>();
 
 const pluginWriters: Record<LogLevel, (message: string) => Promise<void>> = {
@@ -40,7 +42,25 @@ export function initializeFrontendLogging() {
 	patchConsole();
 	window.addEventListener("error", handleWindowError);
 	window.addEventListener("unhandledrejection", handleUnhandledRejection);
-	void writeLog("info", "frontend logging initialized");
+	window.addEventListener("beforeunload", () => {
+		frontendLoggingSuppressed = true;
+	});
+	window.addEventListener("pagehide", (event) => {
+		if (!event.persisted) {
+			frontendLoggingSuppressed = true;
+		}
+	});
+	window.addEventListener("pageshow", (event) => {
+		frontendLoggingSuppressed = false;
+		void writeLog(
+			"info",
+			`frontend pageshow boot_id=${FRONTEND_BOOT_ID} persisted=${event.persisted} href=${window.location.href}`,
+		);
+	});
+	void writeLog(
+		"info",
+		`frontend logging initialized boot_id=${FRONTEND_BOOT_ID} ${formatIpcDiagnostics()}`,
+	);
 }
 
 export function invoke<T>(command: string): Promise<T>;
@@ -85,6 +105,12 @@ export async function invoke<T>(
 			"error",
 			`invoke ${command} failed duration_ms=${Math.round(performance.now() - startedAt)} error=${formatLogArg(error)}`,
 		);
+		if (isFailedToFetchError(error)) {
+			await writeLog(
+				"error",
+				`invoke ${command} failed-to-fetch diagnostics boot_id=${FRONTEND_BOOT_ID} ${formatIpcDiagnostics(command)}`,
+			);
+		}
 		throw normalizeError(error);
 	}
 }
@@ -186,6 +212,12 @@ function patchConsole() {
 		console[method] = (...args: unknown[]) => {
 			original(...args);
 			void writeLog(level, `${method}: ${formatLogArgs(args)}`);
+			if (shouldLogIpcDiagnostics(args)) {
+				void writeLog(
+					level,
+					`${method}: ipc diagnostics boot_id=${FRONTEND_BOOT_ID} ${formatIpcDiagnostics()}`,
+				);
+			}
 		};
 	}
 }
@@ -216,6 +248,9 @@ function handleUnhandledRejection(event: PromiseRejectionEvent) {
 }
 
 async function writeLog(level: LogLevel, message: string) {
+	if (frontendLoggingSuppressed) {
+		return;
+	}
 	try {
 		await pluginWriters[level](truncate(message));
 	} catch {
@@ -287,6 +322,67 @@ function safeStringify(value: object): string {
 
 function normalizeError(error: unknown): Error {
 	return error instanceof Error ? error : new Error(String(error));
+}
+
+function shouldLogIpcDiagnostics(args: unknown[]): boolean {
+	const combined = formatLogArgs(args);
+	return (
+		combined.includes("IPC custom protocol failed") ||
+		combined.includes("Failed to fetch") ||
+		combined.includes("Couldn't find callback id")
+	);
+}
+
+function isFailedToFetchError(error: unknown): boolean {
+	return formatLogArg(error).includes("Failed to fetch");
+}
+
+function formatIpcDiagnostics(command?: string): string {
+	if (typeof window === "undefined") {
+		return "ipc_diagnostics=unavailable";
+	}
+
+	const tauriInternals = (window as Window & {
+		__TAURI_INTERNALS__?: {
+			convertFileSrc?: (path: string, protocol?: string) => string;
+		};
+		ipc?: {
+			postMessage?: unknown;
+		};
+	}).__TAURI_INTERNALS__;
+	const ipcBridge = (window as Window & {
+		ipc?: {
+			postMessage?: unknown;
+		};
+	}).ipc;
+
+	let ipcUrl = "unavailable";
+	if (command && tauriInternals?.convertFileSrc) {
+		try {
+			ipcUrl = tauriInternals.convertFileSrc(command, "ipc");
+		} catch (error) {
+			ipcUrl = `error:${formatLogArg(error)}`;
+		}
+	}
+
+	return [
+		`href=${window.location.href}`,
+		`ready_state=${document.readyState}`,
+		`visibility=${document.visibilityState}`,
+		`has_tauri_internals=${Boolean(tauriInternals)}`,
+		`has_convert_file_src=${typeof tauriInternals?.convertFileSrc === "function"}`,
+		`window_ipc_type=${typeof ipcBridge}`,
+		`window_ipc_post_message_type=${typeof ipcBridge?.postMessage}`,
+		`ipc_url=${ipcUrl}`,
+	].join(" ");
+}
+
+function createBootId(): string {
+	if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+		return crypto.randomUUID();
+	}
+
+	return `boot-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function truncate(message: string): string {
