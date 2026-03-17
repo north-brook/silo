@@ -6,16 +6,17 @@ Review the current branch carefully before making changes:
 - Inspect git status, staged changes, unstaged changes, and recent commits.
 - Review the diff against the target branch.
 
+Staging:
+- Stage ALL changes in the working tree — modified, deleted, and untracked files. Use `git add -A` to ensure nothing is missed.
+- The only exception: do not stage secrets, credentials, API keys, tokens, .env files, or other sensitive material. Do not stage large binaries, build artifacts, or generated files that should be in .gitignore. If you discover such material, leave it unstaged and flag it in your summary.
+- After staging, verify with `git status` that no intended changes remain unstaged. If anything was left out unintentionally, stage it before committing.
+
 Committing:
-- Each commit should represent one logical unit of work — a single bug fix, a single feature addition, a single refactor. If a change touches unrelated things, split it into separate commits.
+- Organize staged changes into commits where each commit represents one logical unit of work — a single bug fix, a single feature addition, a single refactor. If the changes touch unrelated things, split them into separate commits. If the changes are cohesive, a single commit is fine.
 - Write commit messages in imperative mood ("Add search endpoint", not "Added search endpoint"). The subject line should complete the sentence "This commit will ___".
 - Keep the subject line under 72 characters. If more context is needed, add a blank line followed by a body that explains *why* the change was made, not *what* changed (the diff shows that).
 - Look at the recent commit history to match the style and conventions of the repository.
 - Run focused validation (tests, linting, type checking) when appropriate and mention what you ran in your final summary.
-
-Safety:
-- Before staging files, review what you are about to commit. Do not commit secrets, credentials, API keys, tokens, .env files, or other sensitive material. Do not commit large binaries, build artifacts, or generated files that should be in .gitignore.
-- If you discover sensitive material in the working tree, leave it unstaged and flag it in your summary.
 
 Push the branch to origin without force pushing.
 
