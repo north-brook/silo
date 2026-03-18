@@ -233,16 +233,6 @@ pub fn browser_detach_tab(
 }
 
 #[tauri::command]
-pub fn browser_unmount_tab(
-    app: AppHandle<AppRuntime>,
-    state: State<'_, BrowserManager>,
-    workspace: String,
-    attachment_id: String,
-) -> Result<BrowserDetachResult, String> {
-    browser_detach_tab(app, state, workspace, attachment_id)
-}
-
-#[tauri::command]
 pub async fn browser_kill_tab(
     app: AppHandle<AppRuntime>,
     state: State<'_, BrowserManager>,
