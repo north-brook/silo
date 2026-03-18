@@ -20,6 +20,7 @@ mod workspaces;
 use tauri::{AppHandle, Cef, Emitter, Manager};
 
 pub type AppRuntime = Cef;
+const MAIN_SHELL_LABEL: &str = "main";
 
 const MENU_ID_NEW_WORKSPACE: &str = "new_workspace";
 const MENU_ID_OPEN_PROJECT: &str = "open_project";
@@ -67,12 +68,65 @@ fn emit_workspace_jump_event(app_handle: &AppHandle<AppRuntime>, index: u8) {
     let _ = app_handle.emit(SHORTCUT_EVENT_JUMP_TO_WORKSPACE, index);
 }
 
+fn shortcut_targets_main_shell(menu_id: &str) -> bool {
+    matches!(
+        menu_id,
+        MENU_ID_NEW_WORKSPACE
+            | MENU_ID_OPEN_PROJECT
+            | MENU_ID_NEW_TAB
+            | MENU_ID_CLOSE_TAB
+            | MENU_ID_PREVIOUS_TAB
+            | MENU_ID_NEXT_TAB
+            | MENU_ID_TOGGLE_PROJECTS_BAR
+            | MENU_ID_TOGGLE_GIT_BAR
+            | MENU_ID_OPEN_GIT_DIFF
+            | MENU_ID_OPEN_GIT_CHECKS
+            | MENU_ID_GIT_CREATE_OR_PUSH_PR
+            | MENU_ID_GIT_MERGE_PR
+    ) || menu_id.starts_with(MENU_ID_JUMP_TO_WORKSPACE_PREFIX)
+}
+
+fn restore_main_shell_focus(app_handle: &AppHandle<AppRuntime>, menu_id: &str) {
+    if let Some(window) = app_handle.get_window(MAIN_SHELL_LABEL) {
+        match window.set_focus() {
+            Ok(()) => {
+                log::info!("requested main window focus for native menu event menu_id={menu_id}");
+            }
+            Err(error) => {
+                log::warn!(
+                    "failed to focus main window for native menu event menu_id={menu_id}: {error}"
+                );
+            }
+        }
+    } else {
+        log::warn!("main window missing for native menu event menu_id={menu_id}");
+    }
+
+    if let Some(webview) = app_handle.get_webview(MAIN_SHELL_LABEL) {
+        match webview.set_focus() {
+            Ok(()) => {
+                log::info!("requested main webview focus for native menu event menu_id={menu_id}");
+            }
+            Err(error) => {
+                log::warn!(
+                    "failed to focus main webview for native menu event menu_id={menu_id}: {error}"
+                );
+            }
+        }
+    } else {
+        log::warn!("main webview missing for native menu event menu_id={menu_id}");
+    }
+}
+
 fn handle_shortcut_menu_event(app_handle: &AppHandle<AppRuntime>, menu_id: &str) -> bool {
     // Canonical shortcut routing lives in the native menu.
     // Add new app-level shortcuts here first, then listen for the emitted
     // `silo://...` event in the frontend. Only touch the CEF/AppKit shims when
     // Chromium prevents a registered menu shortcut from reaching this path.
     log::info!("received native menu event menu_id={menu_id}");
+    if shortcut_targets_main_shell(menu_id) {
+        restore_main_shell_focus(app_handle, menu_id);
+    }
     match menu_id {
         MENU_ID_NEW_WORKSPACE => emit_shortcut_event(app_handle, SHORTCUT_EVENT_NEW_WORKSPACE),
         MENU_ID_OPEN_PROJECT => emit_shortcut_event(app_handle, SHORTCUT_EVENT_OPEN_PROJECT),
@@ -455,7 +509,7 @@ pub fn run() {
             browser::browser_create_tab,
             browser::browser_mount_tab,
             browser::browser_resize_tab,
-            browser::browser_unmount_tab,
+            browser::browser_detach_tab,
             browser::browser_kill_tab,
             browser::browser_go_to,
             browser::browser_report_page_state,
@@ -473,6 +527,7 @@ pub fn run() {
             terminal::terminal_kill_terminal,
             terminal::terminal_read_terminal,
             terminal::terminal_write_terminal,
+            terminal::terminal_finish_attach,
             terminal::terminal_resize_terminal,
             system::system_memory_usage
         ])
