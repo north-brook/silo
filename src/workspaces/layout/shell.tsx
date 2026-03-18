@@ -1,16 +1,10 @@
-"use client";
-
 import { useMutation, useMutationState } from "@tanstack/react-query";
 import { Globe, Plus, Terminal, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-	Outlet,
-	useLocation,
-	useNavigate,
-	useSearchParams,
-} from "react-router-dom";
+import { Outlet, useLocation, useMatch, useNavigate } from "react-router-dom";
 import { useSessionHosts } from "@/workspaces/hosts/provider";
-import { GitSidebar, GitSidebarProvider } from "@/workspaces/git/sidebar";
+import { GitSidebarProvider } from "@/workspaces/git/context";
+import { GitSidebar } from "@/workspaces/git/sidebar";
 import {
 	Dialog,
 	DialogContent,
@@ -24,23 +18,39 @@ import { toast } from "@/shared/ui/toaster";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { TopBar } from "@/workspaces/layout/top-bar";
 import { PromptDraftProvider } from "@/workspaces/prompt/draft";
-import { useWorkspaceState } from "@/workspaces/state";
-import { WorkspaceStateProvider } from "@/workspaces/state";
-import { cloudSessionHref } from "@/workspaces/routes/paths";
+import {
+	RouteWorkspaceStateProvider,
+	useCloudSessions,
+	useWorkspaceProject,
+	useWorkspaceReady,
+	useWorkspaceSessions,
+	useWorkspaceState,
+} from "@/workspaces/state";
+import {
+	type SessionRouteState,
+	workspaceHref,
+	workspaceSessionHref,
+} from "@/workspaces/routes/paths";
+import { useWorkspaceRouteParams } from "@/workspaces/routes/params";
 import { invoke } from "@/shared/lib/invoke";
 import { shortcutEvents } from "@/shared/lib/shortcuts";
 import { useShortcut } from "@/shared/lib/use-shortcut";
 import type { WorkspaceSession } from "@/workspaces/api";
 
 export function WorkspaceShell() {
+	const { project, workspaceName } = useWorkspaceRouteParams();
+
 	return (
-		<WorkspaceStateProvider>
+		<RouteWorkspaceStateProvider
+			project={project}
+			workspaceName={workspaceName}
+		>
 			<PromptDraftProvider>
 				<GitSidebarProvider>
 					<WorkspaceShellInner />
 				</GitSidebarProvider>
 			</PromptDraftProvider>
-		</WorkspaceStateProvider>
+		</RouteWorkspaceStateProvider>
 	);
 }
 
@@ -104,57 +114,35 @@ function findLiveNeighbor(
 }
 
 function WorkspaceShellInner() {
-	const [searchParams] = useSearchParams();
 	const pathname = useLocation().pathname;
 	const navigate = useNavigate();
+	const browserMatch = useMatch(
+		"/projects/:project/workspaces/:workspace/browser/:attachmentId",
+	);
+	const terminalMatch = useMatch(
+		"/projects/:project/workspaces/:workspace/terminal/:attachmentId",
+	);
 	const { ensureWorkspaceSessions, removeSession } = useSessionHosts();
-	const {
-		cloudSessions,
-		invalidateWorkspace,
-		isWorkspaceReady,
-		project,
-		sessions,
-		workspace,
-		workspaceName,
-	} = useWorkspaceState();
+	const { invalidateWorkspace, workspace, workspaceName } = useWorkspaceState();
+	const project = useWorkspaceProject();
+	const isWorkspaceReady = useWorkspaceReady();
+	const sessions = useWorkspaceSessions();
+	const cloudSessions = useCloudSessions();
 	const [newTabOpen, setNewTabOpen] = useState(false);
-	const activeKind = searchParams.get("kind");
-	const activeAttachmentId = searchParams.get("attachment_id");
-	const workspaceHref = useMemo(() => {
-		const params = new URLSearchParams({ name: workspaceName });
-		if (project) {
-			params.set("project", project);
-		}
-		return `/workspace?${params.toString()}`;
-	}, [project, workspaceName]);
+	const activeKind = browserMatch ? "browser" : terminalMatch ? "terminal" : null;
+	const activeAttachmentId =
+		browserMatch?.params.attachmentId ?? terminalMatch?.params.attachmentId ?? null;
+	const currentWorkspaceHref = useMemo(
+		() => workspaceHref({ project, workspace: workspaceName }),
+		[project, workspaceName],
+	);
 
 	const isCurrentLayoutInstance = useCallback(() => {
 		if (typeof window === "undefined") {
 			return true;
 		}
-		const currentUrl = new URL(window.location.href);
-		const currentWorkspace =
-			currentUrl.searchParams.get("name") ??
-			currentUrl.searchParams.get("workspace") ??
-			"";
-		const currentProject = currentUrl.searchParams.get("project") ?? "";
-		const currentKind = currentUrl.searchParams.get("kind");
-		const currentAttachmentId = currentUrl.searchParams.get("attachment_id");
-
-		if (currentUrl.pathname !== pathname) {
-			return false;
-		}
-		if (currentWorkspace !== workspaceName || currentProject !== project) {
-			return false;
-		}
-		if (activeKind !== currentKind) {
-			return false;
-		}
-		if ((activeAttachmentId ?? null) !== currentAttachmentId) {
-			return false;
-		}
-		return true;
-	}, [activeAttachmentId, activeKind, pathname, project, workspaceName]);
+		return window.location.pathname === pathname;
+	}, [pathname]);
 
 	useEffect(() => {
 		if (!workspaceName || !isWorkspaceReady) {
@@ -172,13 +160,13 @@ function WorkspaceShellInner() {
 			setNewTabOpen(false);
 			invalidateWorkspace();
 			navigate(
-				cloudSessionHref({
+				workspaceSessionHref({
 					project,
 					workspace: workspaceName,
 					kind: "terminal",
 					attachmentId: result.attachment_id,
-					fresh: true,
 				}),
+				{ state: { fresh: true } satisfies SessionRouteState },
 			);
 		},
 		onError: (error) => {
@@ -200,13 +188,13 @@ function WorkspaceShellInner() {
 			setNewTabOpen(false);
 			invalidateWorkspace();
 			navigate(
-				cloudSessionHref({
+				workspaceSessionHref({
 					project,
 					workspace: workspaceName,
 					kind: "terminal",
 					attachmentId: result.attachment_id,
-					fresh: true,
 				}),
+				{ state: { fresh: true } satisfies SessionRouteState },
 			);
 		},
 		onError: (error) => {
@@ -227,13 +215,13 @@ function WorkspaceShellInner() {
 			setNewTabOpen(false);
 			invalidateWorkspace();
 			navigate(
-				cloudSessionHref({
+				workspaceSessionHref({
 					project,
 					workspace: workspaceName,
 					kind: "browser",
 					attachmentId: result.attachment_id,
-					fresh: true,
 				}),
+				{ state: { fresh: true } satisfies SessionRouteState },
 			);
 		},
 		onError: (error) => {
@@ -308,7 +296,7 @@ function WorkspaceShellInner() {
 				const neighbor = findLiveNeighbor(sessions, idx, preview);
 				if (neighbor) {
 					navigate(
-						cloudSessionHref({
+						workspaceSessionHref({
 							project,
 							workspace: workspaceName,
 							kind: neighbor.type,
@@ -317,7 +305,7 @@ function WorkspaceShellInner() {
 						{ replace: true },
 					);
 				} else {
-					navigate(workspaceHref, { replace: true });
+					navigate(currentWorkspaceHref, { replace: true });
 				}
 			}
 
@@ -331,7 +319,7 @@ function WorkspaceShellInner() {
 			navigate,
 			project,
 			workspaceName,
-			workspaceHref,
+			currentWorkspaceHref,
 			killSession,
 		],
 	);
@@ -366,7 +354,7 @@ function WorkspaceShellInner() {
 			activeIndex === 0 ? liveSessions.length - 1 : activeIndex - 1;
 		const prev = liveSessions[prevIndex];
 		navigate(
-			cloudSessionHref({
+			workspaceSessionHref({
 				project,
 				workspace: workspaceName,
 				kind: prev.type,
@@ -398,7 +386,7 @@ function WorkspaceShellInner() {
 			activeIndex === liveSessions.length - 1 ? 0 : activeIndex + 1;
 		const next = liveSessions[nextIndex];
 		navigate(
-			cloudSessionHref({
+			workspaceSessionHref({
 				project,
 				workspace: workspaceName,
 				kind: next.type,
@@ -502,60 +490,6 @@ function WorkspaceShellInner() {
 
 	return (
 		<>
-			{workspace ? (
-				<TopBar workspace={workspace} />
-			) : (
-				<header className="h-9 w-full border-b border-border-light shrink-0 flex items-center relative">
-					<div data-tauri-drag-region className="absolute inset-0" />
-					<div className="relative flex items-center gap-1.5 px-3 z-10">
-						<div className="h-3 w-20 rounded bg-border-light animate-pulse" />
-						<div className="h-3 w-16 rounded bg-border-light animate-pulse" />
-					</div>
-				</header>
-			)}
-			{sessions.length > 0 && (
-				<div className="w-full bg-bg shrink-0 flex items-end overflow-x-auto">
-					{sessions.map((session) => (
-						<WorkspaceTab
-							key={session.attachment_id}
-							session={session}
-							isActive={
-								activeKind === session.type &&
-								activeAttachmentId === session.attachment_id
-							}
-							isDeleting={deletingIds.has(session.attachment_id)}
-							onClose={() => closeTab(session)}
-							workspaceName={workspaceName}
-							project={project}
-						/>
-					))}
-					<Tooltip>
-						<TooltipTrigger asChild>
-							<button
-								type="button"
-								onClick={() => setNewTabOpen(true)}
-								className="h-9 flex items-center px-2.5 border-b border-border-light text-text-muted hover:text-text-bright transition-colors"
-							>
-								<Plus size={12} />
-							</button>
-						</TooltipTrigger>
-						<TooltipContent side="right">
-							<span className="flex items-center gap-1.5">
-								New tab
-								<span className="flex items-center gap-0.5">
-									<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
-										⌘
-									</kbd>
-									<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
-										T
-									</kbd>
-								</span>
-							</span>
-						</TooltipContent>
-					</Tooltip>
-					<div className="flex-1 h-9 border-b border-border-light" />
-				</div>
-			)}
 			<Dialog open={newTabOpen} onOpenChange={setNewTabOpen}>
 				<DialogContent className="max-w-xs p-0 gap-0">
 					<DialogHeader className="p-4 pb-2">
@@ -590,7 +524,63 @@ function WorkspaceShellInner() {
 			</Dialog>
 			<div className="flex-1 min-h-0 flex">
 				<div className="flex-1 min-w-0 overflow-hidden flex flex-col">
-					<Outlet />
+					{workspace ? (
+						<TopBar workspace={workspace} />
+					) : (
+						<header className="h-9 w-full border-b border-border-light shrink-0 flex items-center relative">
+							<div data-tauri-drag-region className="absolute inset-0" />
+							<div className="relative flex items-center gap-1.5 px-3 z-10">
+								<div className="h-3 w-20 rounded bg-border-light animate-pulse" />
+								<div className="h-3 w-16 rounded bg-border-light animate-pulse" />
+							</div>
+						</header>
+					)}
+					{sessions.length > 0 && (
+						<div className="w-full bg-bg shrink-0 flex items-end overflow-x-auto">
+							{sessions.map((session) => (
+								<WorkspaceTab
+									key={session.attachment_id}
+									session={session}
+									isActive={
+										activeKind === session.type &&
+										activeAttachmentId === session.attachment_id
+									}
+									isDeleting={deletingIds.has(session.attachment_id)}
+									onClose={() => closeTab(session)}
+									workspaceName={workspaceName}
+									project={project}
+								/>
+							))}
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<button
+										type="button"
+										onClick={() => setNewTabOpen(true)}
+										className="h-9 flex items-center px-2.5 border-b border-border-light text-text-muted hover:text-text-bright transition-colors"
+									>
+										<Plus size={12} />
+									</button>
+								</TooltipTrigger>
+								<TooltipContent side="right">
+									<span className="flex items-center gap-1.5">
+										New tab
+										<span className="flex items-center gap-0.5">
+											<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+												⌘
+											</kbd>
+											<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+												T
+											</kbd>
+										</span>
+									</span>
+								</TooltipContent>
+							</Tooltip>
+							<div className="flex-1 h-9 border-b border-border-light" />
+						</div>
+					)}
+					<div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+						<Outlet />
+					</div>
 				</div>
 				<GitSidebar />
 			</div>
@@ -628,7 +618,7 @@ function WorkspaceTab({
 			onClick={() => {
 				if (isDeleting) return;
 				navigate(
-					cloudSessionHref({
+					workspaceSessionHref({
 						project,
 						workspace: workspaceName,
 						kind: session.type,
@@ -643,7 +633,7 @@ function WorkspaceTab({
 				if (isDeleting) return;
 				event.preventDefault();
 				navigate(
-					cloudSessionHref({
+					workspaceSessionHref({
 						project,
 						workspace: workspaceName,
 						kind: session.type,

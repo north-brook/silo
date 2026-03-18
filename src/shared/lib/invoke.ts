@@ -1,5 +1,3 @@
-"use client";
-
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import {
 	debug as pluginDebug,

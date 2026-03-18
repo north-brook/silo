@@ -22,7 +22,7 @@ import {
 	useRef,
 	useState,
 } from "react";
-import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { invoke } from "@/shared/lib/invoke";
 import type { ListedProject, SnapshotTemplate } from "@/projects/api";
 import { shortcutEvents } from "@/shared/lib/shortcuts";
@@ -42,6 +42,10 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { toast } from "@/shared/ui/toaster";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { WorkspaceIndicator } from "@/workspaces/layout/status";
+import {
+	type WorkspaceRouteState,
+	workspaceHref,
+} from "@/workspaces/routes/paths";
 
 // ---------------------------------------------------------------------------
 // Context
@@ -151,7 +155,10 @@ function ProjectRow({
 			});
 			toast({ variant: "success", title: "Workspace created" });
 			navigate(
-				`/workspace?project=${encodeURIComponent(project.name)}&name=${encodeURIComponent(workspace.name)}`,
+				workspaceHref({
+					project: project.name,
+					workspace: workspace.name,
+				}),
 			);
 		},
 		onError: (error) => {
@@ -177,7 +184,10 @@ function ProjectRow({
 			});
 			toast({ variant: "success", title: "Template workspace created" });
 			navigate(
-				`/workspace?project=${encodeURIComponent(project.name)}&name=${encodeURIComponent(workspace.name)}`,
+				workspaceHref({
+					project: project.name,
+					workspace: workspace.name,
+				}),
 			);
 		},
 		onError: (error) => {
@@ -203,7 +213,10 @@ function ProjectRow({
 			});
 			toast({ variant: "success", title: "Template workspace created" });
 			navigate(
-				`/workspace?project=${encodeURIComponent(project.name)}&name=${encodeURIComponent(workspace.name)}`,
+				workspaceHref({
+					project: project.name,
+					workspace: workspace.name,
+				}),
 			);
 		},
 		onError: (error) => {
@@ -218,7 +231,10 @@ function ProjectRow({
 	const handleTemplate = () => {
 		if (templateWorkspace) {
 			navigate(
-				`/workspace?project=${encodeURIComponent(templateWorkspace.project ?? "")}&name=${encodeURIComponent(templateWorkspace.name)}`,
+				workspaceHref({
+					project: templateWorkspace.project ?? "",
+					workspace: templateWorkspace.name,
+				}),
 			);
 		} else if (hasTemplate) {
 			editTemplateMut.mutate();
@@ -327,11 +343,9 @@ function WorkspaceRow({
 	hotkeyNumber?: number;
 }) {
 	const navigate = useNavigate();
-	const [searchParams] = useSearchParams();
+	const { workspace: activeWorkspaceName } = useParams();
 	const queryClient = useQueryClient();
-	const isActive =
-		searchParams.get("name") === workspace.name ||
-		searchParams.get("workspace") === workspace.name;
+	const isActive = activeWorkspaceName === workspace.name;
 	const isRunning = workspace.status === "RUNNING";
 	const isStopped =
 		workspace.status === "TERMINATED" || workspace.status === "STOPPED";
@@ -398,7 +412,13 @@ function WorkspaceRow({
 			invoke("workspaces_resume_workspace", { workspace: workspace.name }),
 		onMutate: () => {
 			navigate(
-				`/workspace/resuming?project=${encodeURIComponent(workspace.project ?? "")}&workspace=${encodeURIComponent(workspace.name)}`,
+				workspaceHref({
+					project: workspace.project ?? "",
+					workspace: workspace.name,
+				}),
+				{
+					state: { transition: "resuming" } satisfies WorkspaceRouteState,
+				},
 			);
 		},
 		onSuccess: () => {
@@ -407,6 +427,13 @@ function WorkspaceRow({
 			});
 		},
 		onError: (error) => {
+			navigate(
+				workspaceHref({
+					project: workspace.project ?? "",
+					workspace: workspace.name,
+				}),
+				{ replace: true, state: null },
+			);
 			toast({
 				variant: "error",
 				title: "Failed to resume",
@@ -438,7 +465,13 @@ function WorkspaceRow({
 			invoke("templates_save_template", { project: workspace.project }),
 		onMutate: () => {
 			navigate(
-				`/workspace/saving?project=${encodeURIComponent(workspace.project ?? "")}&workspace=${encodeURIComponent(workspace.name)}`,
+				workspaceHref({
+					project: workspace.project ?? "",
+					workspace: workspace.name,
+				}),
+				{
+					state: { transition: "saving" } satisfies WorkspaceRouteState,
+				},
 			);
 		},
 		onSuccess: () => {
@@ -450,6 +483,13 @@ function WorkspaceRow({
 			});
 		},
 		onError: (error) => {
+			navigate(
+				workspaceHref({
+					project: workspace.project ?? "",
+					workspace: workspace.name,
+				}),
+				{ replace: true, state: null },
+			);
 			toast({
 				variant: "error",
 				title: "Failed to save template",
@@ -489,7 +529,10 @@ function WorkspaceRow({
 
 	const openWorkspace = () =>
 		navigate(
-			`/workspace?project=${encodeURIComponent(workspace.project ?? "")}&name=${encodeURIComponent(workspace.name)}`,
+			workspaceHref({
+				project: workspace.project ?? "",
+				workspace: workspace.name,
+			}),
 		);
 
 	return (
@@ -828,20 +871,42 @@ export function ProjectsSidebar() {
 
 		if (isSuspended && !isTemplate) {
 			navigate(
-				`/workspace/resuming?project=${encodeURIComponent(target.project ?? "")}&workspace=${encodeURIComponent(target.name)}`,
+				workspaceHref({
+					project: target.project ?? "",
+					workspace: target.name,
+				}),
+				{
+					state: { transition: "resuming" } satisfies WorkspaceRouteState,
+				},
 			);
-			void invoke("workspaces_resume_workspace", {
-				workspace: target.name,
-			}).then(() => {
-				queryClient.invalidateQueries({
-					queryKey: ["workspaces_list_workspaces"],
+			void invoke("workspaces_resume_workspace", { workspace: target.name })
+				.then(() => {
+					queryClient.invalidateQueries({
+						queryKey: ["workspaces_list_workspaces"],
+					});
+				})
+				.catch((error: Error) => {
+					navigate(
+						workspaceHref({
+							project: target.project ?? "",
+							workspace: target.name,
+						}),
+						{ replace: true, state: null },
+					);
+					toast({
+						variant: "error",
+						title: "Failed to resume",
+						description: error.message,
+					});
 				});
-			});
 			return;
 		}
 
 		navigate(
-			`/workspace?project=${encodeURIComponent(target.project ?? "")}&name=${encodeURIComponent(target.name)}`,
+			workspaceHref({
+				project: target.project ?? "",
+				workspace: target.name,
+			}),
 		);
 	};
 

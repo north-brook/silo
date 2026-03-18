@@ -1,5 +1,3 @@
-"use client";
-
 import { isTauri } from "@tauri-apps/api/core";
 import { useEffect, useEffectEvent } from "react";
 import { listenShortcutEvent } from "./shortcuts";

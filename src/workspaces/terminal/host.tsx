@@ -1,5 +1,3 @@
-"use client";
-
 import { useQueryClient } from "@tanstack/react-query";
 import { Channel } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";

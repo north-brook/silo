@@ -1,5 +1,3 @@
-"use client";
-
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -10,11 +8,11 @@ import {
 	useEffect,
 	useMemo,
 } from "react";
-import { useLocation, useSearchParams } from "react-router-dom";
 import {
 	type CloudSession,
 	normalizeWorkspaceSession,
 } from "@/workspaces/hosts/model";
+import { useWorkspaceRouteParams } from "@/workspaces/routes/params";
 import { invoke } from "@/shared/lib/invoke";
 import {
 	isTemplateWorkspace,
@@ -25,43 +23,37 @@ import {
 
 interface WorkspaceStateContextValue {
 	workspaceName: string;
-	project: string;
+	routeProject: string;
 	workspace: Workspace | null;
 	isLoading: boolean;
-	isWorkspaceReady: boolean;
-	sessions: WorkspaceSession[];
-	cloudSessions: CloudSession[];
+	isMissing: boolean;
 	invalidateWorkspace: () => void;
 }
 
 const WorkspaceStateContext = createContext<WorkspaceStateContextValue>({
 	workspaceName: "",
-	project: "",
+	routeProject: "",
 	workspace: null,
 	isLoading: false,
-	isWorkspaceReady: false,
-	sessions: [],
-	cloudSessions: [],
+	isMissing: false,
 	invalidateWorkspace: () => {},
 });
 
-function WorkspaceStateProviderInner({ children }: { children: ReactNode }) {
-	const pathname = useLocation().pathname;
-	const [searchParams] = useSearchParams();
+function WorkspaceStateProviderInner({
+	children,
+	projectParam,
+	workspaceName,
+}: {
+	children: ReactNode;
+	projectParam: string;
+	workspaceName: string;
+}) {
 	const queryClient = useQueryClient();
-	const isWorkspaceShellRoute =
-		pathname === "/workspace" || pathname === "/workspace/session";
-	const workspaceName = isWorkspaceShellRoute
-		? (searchParams.get("name") ?? searchParams.get("workspace") ?? "")
-		: "";
-	const projectParam = isWorkspaceShellRoute
-		? (searchParams.get("project") ?? "")
-		: "";
 
 	const workspaceQuery = useQuery({
 		queryKey: ["workspaces_get_workspace", workspaceName],
 		queryFn: () =>
-			invoke<Workspace>(
+			invoke<Workspace | null>(
 				"workspaces_get_workspace",
 				{ workspace: workspaceName },
 				{
@@ -69,7 +61,7 @@ function WorkspaceStateProviderInner({ children }: { children: ReactNode }) {
 					key: `poll:workspaces_get_workspace:${workspaceName}`,
 				},
 			),
-		enabled: isWorkspaceShellRoute && !!workspaceName,
+		enabled: !!workspaceName,
 		refetchInterval: 2000,
 	});
 
@@ -83,7 +75,7 @@ function WorkspaceStateProviderInner({ children }: { children: ReactNode }) {
 	}, [queryClient, workspaceName]);
 
 	useEffect(() => {
-		if (!isWorkspaceShellRoute || !workspaceName) {
+		if (!workspaceName) {
 			return;
 		}
 
@@ -116,42 +108,25 @@ function WorkspaceStateProviderInner({ children }: { children: ReactNode }) {
 			disposed = true;
 			disposeListener(unlisten);
 		};
-	}, [invalidateWorkspace, isWorkspaceShellRoute, workspaceName]);
+	}, [invalidateWorkspace, workspaceName]);
 
 	const workspace = workspaceQuery.data ?? null;
-	const project = projectParam || workspace?.project || "";
-	const sessions = useMemo<WorkspaceSession[]>(
-		() =>
-			workspace && !isTemplateWorkspace(workspace)
-				? workspaceSessions(workspace)
-				: [],
-		[workspace],
-	);
-	const cloudSessions = useMemo(
-		() =>
-			sessions.map((session) =>
-				normalizeWorkspaceSession(workspaceName, session),
-			),
-		[sessions, workspaceName],
-	);
+	const isMissing =
+		workspaceQuery.isError || (workspaceQuery.isSuccess && workspace == null);
 
 	const value = useMemo(
 		() => ({
 			workspaceName,
-			project,
+			routeProject: projectParam,
 			workspace,
 			isLoading: workspaceQuery.isLoading,
-			isWorkspaceReady:
-				workspace?.status === "RUNNING" && workspace.ready === true,
-			sessions,
-			cloudSessions,
+			isMissing,
 			invalidateWorkspace,
 		}),
 		[
-			cloudSessions,
 			invalidateWorkspace,
-			project,
-			sessions,
+			isMissing,
+			projectParam,
 			workspace,
 			workspaceName,
 			workspaceQuery.isLoading,
@@ -165,10 +140,83 @@ function WorkspaceStateProviderInner({ children }: { children: ReactNode }) {
 	);
 }
 
-export function WorkspaceStateProvider({ children }: { children: ReactNode }) {
-	return <WorkspaceStateProviderInner>{children}</WorkspaceStateProviderInner>;
+export function WorkspaceStateProvider({
+	children,
+	project,
+	workspaceName,
+}: {
+	children: ReactNode;
+	project: string;
+	workspaceName: string;
+}) {
+	return (
+		<WorkspaceStateProviderInner
+			projectParam={project}
+			workspaceName={workspaceName}
+		>
+			{children}
+		</WorkspaceStateProviderInner>
+	);
+}
+
+export const RouteWorkspaceStateProvider = WorkspaceStateProvider;
+
+function useWorkspaceStateContext() {
+	return useContext(WorkspaceStateContext);
 }
 
 export function useWorkspaceState() {
-	return useContext(WorkspaceStateContext);
+	const {
+		workspaceName,
+		workspace,
+		isLoading,
+		isMissing,
+		invalidateWorkspace,
+	} = useWorkspaceStateContext();
+
+	return {
+		workspaceName,
+		workspace,
+		isLoading,
+		isMissing,
+		invalidateWorkspace,
+	};
+}
+
+export function useWorkspaceProject() {
+	const { routeProject, workspace } = useWorkspaceStateContext();
+	const { project } = useWorkspaceRouteParams();
+
+	return workspace?.project ?? routeProject ?? project ?? "";
+}
+
+export function useWorkspaceReady() {
+	const { workspace } = useWorkspaceStateContext();
+
+	return workspace?.status === "RUNNING" && workspace.ready === true;
+}
+
+export function useWorkspaceSessions() {
+	const { workspace } = useWorkspaceStateContext();
+
+	return useMemo<WorkspaceSession[]>(
+		() =>
+			workspace && !isTemplateWorkspace(workspace)
+				? workspaceSessions(workspace)
+				: [],
+		[workspace],
+	);
+}
+
+export function useCloudSessions() {
+	const { workspaceName } = useWorkspaceStateContext();
+	const sessions = useWorkspaceSessions();
+
+	return useMemo<CloudSession[]>(
+		() =>
+			sessions.map((session) =>
+				normalizeWorkspaceSession(workspaceName, session),
+			),
+		[sessions, workspaceName],
+	);
 }

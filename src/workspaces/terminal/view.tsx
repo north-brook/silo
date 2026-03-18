@@ -1,5 +1,3 @@
-"use client";
-
 import type { CloudSession } from "@/workspaces/hosts/model";
 import { SessionViewport } from "@/workspaces/hosts/viewport";
 

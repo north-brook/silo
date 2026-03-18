@@ -1,5 +1,3 @@
-"use client";
-
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { createContext, useContext, useEffect, useState } from "react";
@@ -9,6 +7,7 @@ import type { ListedProject, SnapshotTemplate } from "@/projects/api";
 import { shortcutEvents } from "@/shared/lib/shortcuts";
 import { useShortcut } from "@/shared/lib/use-shortcut";
 import { createWorkspace as createWorkspaceCommand } from "@/workspaces/api";
+import { workspaceHref } from "@/workspaces/routes/paths";
 import {
 	Dialog,
 	DialogContent,
@@ -101,7 +100,10 @@ function NewWorkspaceDialog({
 			});
 			toast({ variant: "success", title: "Workspace created" });
 			navigate(
-				`/workspace?project=${encodeURIComponent(workspace.project ?? "")}&name=${encodeURIComponent(workspace.name)}`,
+				workspaceHref({
+					project: workspace.project ?? "",
+					workspace: workspace.name,
+				}),
 			);
 			onOpenChange(false);
 		},

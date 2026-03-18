@@ -1,5 +1,3 @@
-"use client";
-
 import { useEffect, useRef } from "react";
 import { Loader } from "@/shared/ui/loader";
 import type { CloudSession } from "@/workspaces/hosts/model";

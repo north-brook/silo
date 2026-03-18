@@ -1,0 +1,55 @@
+import type { DiffFile, DiffSection } from "@/workspaces/git/api";
+import { useGitSidebar } from "@/workspaces/git/context";
+
+export function GitDiffTab() {
+	const { diff } = useGitSidebar();
+
+	if (!diff) return null;
+
+	return (
+		<div className="flex flex-col gap-2">
+			<DiffSectionView label="Local" section={diff.local} />
+			<DiffSectionView label="Remote" section={diff.remote} />
+		</div>
+	);
+}
+
+function DiffSectionView({
+	label,
+	section,
+}: {
+	label: string;
+	section: DiffSection;
+}) {
+	if (section.files.length === 0) return null;
+
+	return (
+		<div>
+			<div className="flex items-center px-3 py-1.5 text-[11px]">
+				<span className="text-[10px] text-text-muted font-medium uppercase tracking-wide">
+					{label}
+				</span>
+			</div>
+			{section.files.map((file) => (
+				<DiffFileRow key={file.path} file={file} />
+			))}
+		</div>
+	);
+}
+
+function DiffFileRow({ file }: { file: DiffFile }) {
+	return (
+		<div className="flex items-center justify-between px-3 py-1 text-[11px] hover:bg-btn-hover transition-colors">
+			<span className="truncate min-w-0 text-text">{file.path}</span>
+			<span className="shrink-0 ml-2 text-text-muted">
+				{file.additions > 0 && (
+					<span className="text-emerald-400">+{file.additions}</span>
+				)}
+				{file.additions > 0 && file.deletions > 0 && " "}
+				{file.deletions > 0 && (
+					<span className="text-red-400">-{file.deletions}</span>
+				)}
+			</span>
+		</div>
+	);
+}

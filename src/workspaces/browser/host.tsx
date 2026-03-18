@@ -1,5 +1,3 @@
-"use client";
-
 import { useEffect, useRef, useState } from "react";
 import type { CloudSession } from "@/workspaces/hosts/model";
 import { invoke } from "@/shared/lib/invoke";

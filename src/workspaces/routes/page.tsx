@@ -1,24 +1,39 @@
-"use client";
-
-import { useEffect, useMemo } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useRef } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { Loader } from "@/shared/ui/loader";
-import { useWorkspaceState } from "@/workspaces/state";
-import { cloudSessionHref } from "@/workspaces/routes/paths";
-import { isTemplateWorkspace, workspaceSessions } from "@/workspaces/api";
+import {
+	useWorkspaceProject,
+	useWorkspaceState,
+} from "@/workspaces/state";
+import {
+	type WorkspaceRouteState,
+	workspaceSessionHref,
+} from "@/workspaces/routes/paths";
+import {
+	isTemplateWorkspace,
+	workspaceSessions,
+} from "@/workspaces/api";
 import { PromptWorkspace } from "@/workspaces/prompt/screen";
 import { TemplatingWorkspace } from "@/workspaces/template/screen";
+import {
+	WorkspaceResumingScreen,
+	WorkspaceSavingScreen,
+} from "@/workspaces/routes/transition-screens";
 
 export default function WorkspacePage() {
 	return <WorkspaceView />;
 }
 
 function WorkspaceView() {
+	const location = useLocation();
 	const navigate = useNavigate();
-	const { project, workspace } = useWorkspaceState();
+	const savingRoutedRef = useRef(false);
+	const { isLoading, isMissing, workspace } = useWorkspaceState();
+	const project = useWorkspaceProject();
+	const transition = (location.state as WorkspaceRouteState | null)?.transition;
 
 	const redirectHref = useMemo(() => {
-		if (!workspace || isTemplateWorkspace(workspace)) {
+		if (!workspace || isTemplateWorkspace(workspace) || transition) {
 			return null;
 		}
 
@@ -37,27 +52,64 @@ function WorkspaceView() {
 			return null;
 		}
 
-		return cloudSessionHref({
+		return workspaceSessionHref({
 			project,
 			workspace: workspace.name,
 			kind: targetSession.type,
 			attachmentId: targetSession.attachment_id,
 		});
-	}, [project, workspace]);
+	}, [project, transition, workspace]);
 
 	useEffect(() => {
 		if (!redirectHref) {
 			return;
 		}
+
 		navigate(redirectHref, { replace: true });
 	}, [navigate, redirectHref]);
 
-	if (!workspace) {
+	useEffect(() => {
+		if (transition !== "saving" || !isMissing || savingRoutedRef.current) {
+			return;
+		}
+
+		savingRoutedRef.current = true;
+		const timer = window.setTimeout(() => navigate("/", { replace: true }), 1500);
+		return () => {
+			window.clearTimeout(timer);
+		};
+	}, [isMissing, navigate, transition]);
+
+	if (transition === "saving") {
+		return (
+			<WorkspaceSavingScreen
+				status={workspace?.status ?? ""}
+				deleted={isMissing}
+			/>
+		);
+	}
+
+	if (transition === "resuming" && workspace) {
+		if (workspace.status !== "RUNNING" || !workspace.ready) {
+			return (
+				<WorkspaceResumingScreen
+					status={workspace.status}
+					ready={workspace.ready}
+				/>
+			);
+		}
+	}
+
+	if (isLoading || (!workspace && !isMissing)) {
 		return (
 			<div className="flex-1 flex items-center justify-center">
 				<Loader />
 			</div>
 		);
+	}
+
+	if (!workspace || isMissing) {
+		return null;
 	}
 
 	if (redirectHref) {

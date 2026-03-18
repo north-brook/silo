@@ -458,8 +458,22 @@ pub fn run() {
             terminal::terminal_resize_terminal,
             system::system_memory_usage
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(handle_run_event);
+}
+
+fn handle_run_event(app_handle: &tauri::AppHandle<AppRuntime>, event: tauri::RunEvent) {
+    #[cfg(target_os = "macos")]
+    if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+        if code != Some(tauri::RESTART_EXIT_CODE) {
+            log::info!(
+                "routing macOS exit request through hard exit workaround for CEF code={code:?}"
+            );
+            api.prevent_exit();
+            quit_application(app_handle);
+        }
+    }
 }
 
 fn cef_command_line_args() -> Vec<(String, Option<String>)> {

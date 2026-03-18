@@ -1,35 +1,58 @@
-"use client";
-
-import { useEffect, useMemo } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useEffect, useMemo, useRef } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { BrowserSessionView } from "@/workspaces/browser/view";
 import type { CloudSession } from "@/workspaces/hosts/model";
-import { useWorkspaceState } from "@/workspaces/state";
+import {
+	useCloudSessions,
+	useWorkspaceSessions,
+	useWorkspaceState,
+} from "@/workspaces/state";
 import { TerminalSessionView } from "@/workspaces/terminal/view";
 import { invoke } from "@/shared/lib/invoke";
+import {
+	type SessionRouteState,
+	workspaceSessionHref,
+} from "@/workspaces/routes/paths";
+import { useWorkspaceSessionRouteParams } from "@/workspaces/routes/params";
 
-export default function WorkspaceSessionPage() {
-	return <WorkspaceSessionView />;
+export function WorkspaceBrowserSessionPage() {
+	return <WorkspaceSessionView kind="browser" />;
 }
 
-function WorkspaceSessionView() {
+export function WorkspaceTerminalSessionPage() {
+	return <WorkspaceSessionView kind="terminal" />;
+}
+
+function WorkspaceSessionView({ kind }: { kind: "browser" | "terminal" }) {
+	const location = useLocation();
 	const navigate = useNavigate();
-	const [searchParams] = useSearchParams();
-	const { cloudSessions, invalidateWorkspace, sessions } = useWorkspaceState();
-	const workspace = searchParams.get("workspace") ?? "";
-	const attachmentId = searchParams.get("attachment_id") ?? "";
-	const kind = searchParams.get("kind") ?? "";
-	const fresh = searchParams.get("fresh") === "1";
-	const cleanParams = new URLSearchParams(searchParams.toString());
-	cleanParams.delete("fresh");
-	const cleanUrl = `/workspace/session?${cleanParams.toString()}`;
+	const freshRef = useRef(
+		(location.state as SessionRouteState | null)?.fresh === true,
+	);
+	const { invalidateWorkspace } = useWorkspaceState();
+	const sessions = useWorkspaceSessions();
+	const cloudSessions = useCloudSessions();
+	const {
+		attachmentId,
+		project,
+		workspaceName: workspace,
+	} = useWorkspaceSessionRouteParams();
 
 	useEffect(() => {
-		if (!fresh) {
+		if (!freshRef.current) {
 			return;
 		}
-		navigate(cleanUrl, { replace: true });
-	}, [cleanUrl, fresh, navigate]);
+
+		navigate(
+			workspaceSessionHref({
+				project,
+				workspace,
+				kind,
+				attachmentId,
+			}),
+			{ replace: true, state: null },
+		);
+	}, [attachmentId, kind, navigate, project, workspace]);
 
 	const hasLiveSession = useMemo(
 		() =>
@@ -39,10 +62,12 @@ function WorkspaceSessionView() {
 			),
 		[attachmentId, kind, sessions],
 	);
+
 	const activeSession = useMemo<CloudSession | null>(() => {
-		if (!workspace || !attachmentId || !kind) {
+		if (!workspace || !attachmentId) {
 			return null;
 		}
+
 		return (
 			cloudSessions.find(
 				(session) =>
@@ -66,7 +91,7 @@ function WorkspaceSessionView() {
 	}, [attachmentId, cloudSessions, kind, workspace]);
 
 	useEffect(() => {
-		if (!workspace || !kind || !attachmentId || !hasLiveSession) {
+		if (!workspace || !attachmentId || !hasLiveSession) {
 			return;
 		}
 
@@ -83,7 +108,7 @@ function WorkspaceSessionView() {
 		};
 	}, [attachmentId, hasLiveSession, kind, workspace]);
 
-	if (!workspace || !attachmentId || !kind || !activeSession) {
+	if (!workspace || !attachmentId || !activeSession) {
 		return null;
 	}
 
@@ -91,18 +116,8 @@ function WorkspaceSessionView() {
 		return (
 			<TerminalSessionView
 				session={activeSession}
-				skipInitialScrollback={fresh}
+				skipInitialScrollback={freshRef.current}
 			/>
-		);
-	}
-
-	if (kind !== "browser") {
-		return (
-			<div className="flex-1 min-h-0 bg-surface flex items-center justify-center p-6">
-				<div className="text-[11px] text-text-muted">
-					Unsupported session type: {kind}
-				</div>
-			</div>
 		);
 	}
 

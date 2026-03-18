@@ -1,5 +1,3 @@
-"use client";
-
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowUp, ChevronsUpDown, Globe, Terminal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -15,9 +13,12 @@ import {
 } from "@/workspaces/prompt/draft";
 import { toast } from "@/shared/ui/toaster";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import { cloudSessionHref } from "@/workspaces/routes/paths";
 import { invoke } from "@/shared/lib/invoke";
 import { submitWorkspacePrompt } from "@/workspaces/api";
+import {
+	type SessionRouteState,
+	workspaceSessionHref,
+} from "@/workspaces/routes/paths";
 
 type Provider = {
 	id: "codex" | "claude";
@@ -102,13 +103,13 @@ export function PromptWorkspace({
 				queryKey: ["workspaces_get_workspace", workspace],
 			});
 			navigate(
-				cloudSessionHref({
+				workspaceSessionHref({
 					project: project ?? "",
 					workspace,
 					kind: "terminal",
 					attachmentId: result.attachment_id,
-					fresh: true,
 				}),
+				{ state: { fresh: true } satisfies SessionRouteState },
 			);
 		},
 		onError: (error) => {
@@ -130,13 +131,13 @@ export function PromptWorkspace({
 				queryKey: ["workspaces_get_workspace", workspace],
 			});
 			navigate(
-				cloudSessionHref({
+				workspaceSessionHref({
 					project: project ?? "",
 					workspace,
 					kind: "terminal",
 					attachmentId: result.attachment_id,
-					fresh: true,
 				}),
+				{ state: { fresh: true } satisfies SessionRouteState },
 			);
 		},
 		onError: (error) => {

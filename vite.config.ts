@@ -33,10 +33,6 @@ export default defineConfig({
 		rollupOptions: {
 			input: {
 				main: "index.html",
-				workspace: "workspace/index.html",
-				workspaceSession: "workspace/session/index.html",
-				workspaceSaving: "workspace/saving/index.html",
-				workspaceResuming: "workspace/resuming/index.html",
 			},
 		},
 	},

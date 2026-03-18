@@ -1,5 +1,3 @@
-"use client";
-
 import type { WorkspaceSession } from "@/workspaces/api";
 
 export type CloudSessionKind = "terminal" | "browser" | "desktop" | string;

@@ -1,5 +1,3 @@
-"use client";
-
 import { useMutation } from "@tanstack/react-query";
 import { ArrowLeft, ArrowRight, RotateCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";

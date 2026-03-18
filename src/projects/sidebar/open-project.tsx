@@ -1,5 +1,3 @@
-"use client";
-
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
 import { createContext, useContext } from "react";
@@ -8,6 +6,7 @@ import { invoke } from "@/shared/lib/invoke";
 import { shortcutEvents } from "@/shared/lib/shortcuts";
 import { useShortcut } from "@/shared/lib/use-shortcut";
 import type { Workspace } from "@/workspaces/api";
+import { workspaceHref } from "@/workspaces/routes/paths";
 import { toast } from "@/shared/ui/toaster";
 
 const OpenProjectContext = createContext<{
@@ -51,7 +50,10 @@ export function OpenProjectProvider({
 				queryKey: ["templates_list_templates"],
 			});
 			navigate(
-				`/workspace?project=${encodeURIComponent(name)}&name=${encodeURIComponent(workspace.name)}`,
+				workspaceHref({
+					project: name,
+					workspace: workspace.name,
+				}),
 			);
 		},
 		onError: (error) => {

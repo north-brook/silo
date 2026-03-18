@@ -1,5 +1,3 @@
-"use client";
-
 import { useQuery } from "@tanstack/react-query";
 import type { LucideIcon } from "lucide-react";
 import { FolderOpen, Plus } from "lucide-react";

@@ -1,5 +1,3 @@
-"use client";
-
 import { useEffect } from "react";
 import { Outlet } from "react-router-dom";
 import { ProjectsSidebar } from "@/projects/sidebar";

@@ -1,5 +1,3 @@
-"use client";
-
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Check, Globe, Terminal } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
@@ -11,8 +9,11 @@ import { GHIcon } from "@/shared/ui/icons/gh";
 import { SiloIcon } from "@/shared/ui/icons/silo";
 import { Loader } from "@/shared/ui/loader";
 import { toast } from "@/shared/ui/toaster";
-import { cloudSessionHref } from "@/workspaces/routes/paths";
 import { invoke } from "@/shared/lib/invoke";
+import {
+	type SessionRouteState,
+	workspaceSessionHref,
+} from "@/workspaces/routes/paths";
 
 interface Step {
 	label: string;
@@ -186,13 +187,13 @@ export function TemplatingWorkspace({
 				queryKey: ["workspaces_get_workspace", workspace],
 			});
 			navigate(
-				cloudSessionHref({
+				workspaceSessionHref({
 					project: project ?? "",
 					workspace,
 					kind: "terminal",
 					attachmentId: result.attachment_id,
-					fresh: true,
 				}),
+				{ state: { fresh: true } satisfies SessionRouteState },
 			);
 		},
 		onError: (error) => {

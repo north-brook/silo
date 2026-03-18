@@ -1,28 +1,65 @@
 import type { CloudSessionKind } from "@/workspaces/hosts/model";
 
-export function cloudSessionHref({
+export interface WorkspaceRouteState {
+	transition?: "resuming" | "saving";
+}
+
+export interface SessionRouteState extends WorkspaceRouteState {
+	fresh?: boolean;
+}
+
+function encodePathSegment(value: string): string {
+	return encodeURIComponent(value);
+}
+
+export function workspaceHref({
+	project,
+	workspace,
+}: {
+	project: string;
+	workspace: string;
+}): string {
+	return `/projects/${encodePathSegment(project)}/workspaces/${encodePathSegment(workspace)}`;
+}
+
+export function browserSessionHref({
+	project,
+	workspace,
+	attachmentId,
+}: {
+	project: string;
+	workspace: string;
+	attachmentId: string;
+}): string {
+	return `${workspaceHref({ project, workspace })}/browser/${encodePathSegment(attachmentId)}`;
+}
+
+export function terminalSessionHref({
+	project,
+	workspace,
+	attachmentId,
+}: {
+	project: string;
+	workspace: string;
+	attachmentId: string;
+}): string {
+	return `${workspaceHref({ project, workspace })}/terminal/${encodePathSegment(attachmentId)}`;
+}
+
+export function workspaceSessionHref({
 	project,
 	workspace,
 	kind,
 	attachmentId,
-	fresh,
 }: {
 	project: string;
 	workspace: string;
 	kind: CloudSessionKind;
 	attachmentId: string;
-	fresh?: boolean;
 }): string {
-	const params = new URLSearchParams({
-		project,
-		workspace,
-		kind,
-		attachment_id: attachmentId,
-	});
-
-	if (fresh) {
-		params.set("fresh", "1");
+	if (kind === "browser") {
+		return browserSessionHref({ project, workspace, attachmentId });
 	}
 
-	return `/workspace/session?${params.toString()}`;
+	return terminalSessionHref({ project, workspace, attachmentId });
 }

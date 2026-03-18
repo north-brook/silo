@@ -1,5 +1,3 @@
-"use client";
-
 import { invoke } from "@/shared/lib/invoke";
 import type { TemplateWorkspace } from "@/workspaces/api";
 

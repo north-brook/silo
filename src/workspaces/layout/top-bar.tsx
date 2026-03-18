@@ -1,5 +1,3 @@
-"use client";
-
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
@@ -15,8 +13,13 @@ import { useNavigate } from "react-router-dom";
 import { gitUpdateBranch, gitUpdateTargetBranch } from "@/workspaces/git/api";
 import { invoke } from "@/shared/lib/invoke";
 import type { ListedProject } from "@/projects/api";
+import {
+	type WorkspaceRouteState,
+	workspaceHref,
+} from "@/workspaces/routes/paths";
 import { isTemplateWorkspace, type Workspace } from "@/workspaces/api";
-import { GitSidebarToggle, useGitSidebar } from "@/workspaces/git/sidebar";
+import { useGitSidebar } from "@/workspaces/git/context";
+import { GitSidebarToggle } from "@/workspaces/git/toggle";
 import Image from "@/shared/ui/image";
 import { Loader } from "@/shared/ui/loader";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
@@ -83,7 +86,14 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 			invoke("templates_save_template", { project: workspace.project ?? "" }),
 		onMutate: () => {
 			navigate(
-				`/workspace/saving?project=${encodeURIComponent(workspace.project ?? "")}&workspace=${encodeURIComponent(workspace.name)}`,
+				workspaceHref({
+					project: workspace.project ?? "",
+					workspace: workspace.name,
+				}),
+				{
+					replace: true,
+					state: { transition: "saving" } satisfies WorkspaceRouteState,
+				},
 			);
 		},
 		onSuccess: () => {
@@ -95,6 +105,13 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 			});
 		},
 		onError: (error) => {
+			navigate(
+				workspaceHref({
+					project: workspace.project ?? "",
+					workspace: workspace.name,
+				}),
+				{ replace: true, state: null },
+			);
 			toast({
 				variant: "error",
 				title: "Failed to save template",
