@@ -1,5 +1,5 @@
+use crate::bootstrap;
 use crate::config::ConfigStore;
-use crate::terminal;
 use crate::workspaces::{self, SnapshotTemplate, TemplateWorkspace, Workspace};
 
 #[tauri::command]
@@ -11,7 +11,7 @@ pub async fn templates_list_templates() -> Result<Vec<SnapshotTemplate>, String>
 pub async fn templates_create_template(project: String) -> Result<TemplateWorkspace, String> {
     let workspace_name = workspaces::generate_template_workspace_name(&project);
     let workspace = workspaces::create_template_workspace_for_project(&project, None).await?;
-    terminal::start_template_bootstrap(workspace_name);
+    bootstrap::start_template_bootstrap(workspace_name);
     Ok(workspace)
 }
 
@@ -29,7 +29,7 @@ pub async fn templates_edit_template(project: String) -> Result<TemplateWorkspac
     let workspace_name = workspaces::generate_template_workspace_name(&project);
     let workspace =
         workspaces::create_template_workspace_for_project(&project, Some(snapshot_name)).await?;
-    terminal::start_template_bootstrap(workspace_name);
+    bootstrap::start_template_bootstrap(workspace_name);
     Ok(workspace)
 }
 
@@ -51,8 +51,8 @@ pub async fn templates_save_template(project: String) -> Result<(), String> {
         ));
     }
 
-    terminal::wait_for_template_bootstrap(&workspace_name).await?;
-    terminal::clear_template_runtime_state(&workspace_name).await?;
+    bootstrap::wait_for_template_bootstrap(&workspace_name).await?;
+    bootstrap::clear_template_runtime_state(&workspace_name).await?;
 
     let zone = workspace.zone().to_string();
     workspaces::stop_and_snapshot_template_workspace(

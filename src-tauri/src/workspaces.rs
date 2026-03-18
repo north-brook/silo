@@ -1,3 +1,4 @@
+use crate::bootstrap;
 use crate::config::{ConfigStore, ProjectConfig, SiloConfig};
 use crate::river_names::DEFAULT_RIVER_NAMES;
 use crate::state::{
@@ -453,7 +454,7 @@ pub async fn workspaces_create_workspace(project: String) -> Result<Workspace, S
     }
 
     log::info!("workspace {workspace_name} creation started for project {project}");
-    terminal::start_workspace_ssh_readiness(workspace_name.clone());
+    bootstrap::start_workspace_ssh_readiness(workspace_name.clone());
     match describe_workspace_in_project(&workspace_name, &gcloud.account, &gcloud.project).await {
         Ok(workspace) => Ok(workspace),
         Err(error) => {
@@ -496,7 +497,7 @@ pub async fn workspaces_start_workspace(workspace: String) -> Result<(), String>
     }
 
     update_workspace_label_in_lookup(lookup.clone(), "ready", "false").await?;
-    terminal::start_workspace_ssh_readiness(workspace.clone());
+    bootstrap::start_workspace_ssh_readiness(workspace.clone());
 
     log::info!("workspace {} started", lookup.workspace.name());
     Ok(())
@@ -519,7 +520,7 @@ pub async fn workspaces_resume_workspace(workspace: String) -> Result<(), String
     }
 
     update_workspace_label_in_lookup(lookup.clone(), "ready", "false").await?;
-    terminal::start_workspace_ssh_readiness(workspace.clone());
+    bootstrap::start_workspace_ssh_readiness(workspace.clone());
 
     log::info!("workspace {} resume initiated", lookup.workspace.name());
     Ok(())

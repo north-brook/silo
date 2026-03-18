@@ -1,5 +1,9 @@
 use crate::config::{ConfigStore, ProjectConfig};
 use crate::prompts;
+use crate::remote::{
+    run_remote_command, workspace_shell_command_with_credentials,
+    CommandResult as RemoteCommandResult,
+};
 use crate::terminal;
 use crate::terminal::TerminalManager;
 use crate::workspaces::{self, WorkspaceLookup};
@@ -555,9 +559,9 @@ async fn branch_workspace_context(workspace: &str) -> Result<BranchWorkspaceCont
 async fn run_workspace_command(
     context: &BranchWorkspaceContext,
     command: &str,
-) -> Result<terminal::CommandResult, String> {
-    let remote_command = terminal::workspace_shell_command_with_credentials(command);
-    terminal::run_remote_command(&context.lookup, &remote_command).await
+) -> Result<RemoteCommandResult, String> {
+    let remote_command = workspace_shell_command_with_credentials(command);
+    run_remote_command(&context.lookup, &remote_command).await
 }
 
 async fn workspace_tree_dirty(context: &BranchWorkspaceContext) -> Result<bool, String> {

@@ -1,8 +1,11 @@
+use crate::remote::{
+    run_remote_command, run_remote_command_with_stdin, shell_quote, workspace_shell_command,
+    workspace_shell_command_preserving_stdin, REMOTE_WORKSPACE_OBSERVER_BIN,
+};
 use crate::state::{
     active_session_metadata_entries, file_session_metadata_key, WorkspaceMetadataEntry,
     WorkspaceMetadataManager,
 };
-use crate::terminal;
 use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -70,10 +73,7 @@ pub async fn files_read(workspace: String, path: String) -> Result<FileReadResul
     run_observer_json_command(
         &lookup,
         "failed to read workspace file",
-        &observer_remote_command(&format!(
-            "files-read --path {}",
-            terminal::shell_quote(&path)
-        )),
+        &observer_remote_command(&format!("files-read --path {}", shell_quote(&path))),
     )
     .await
 }
@@ -93,8 +93,8 @@ pub async fn files_save(
         "failed to save workspace file",
         &observer_remote_command(&format!(
             "files-write --path {} --expected-revision {}",
-            terminal::shell_quote(&path),
-            terminal::shell_quote(&base_revision),
+            shell_quote(&path),
+            shell_quote(&base_revision),
         )),
         content.into_bytes(),
     )
@@ -111,9 +111,9 @@ pub async fn files_set_watched_paths(workspace: String, paths: Vec<String>) -> R
     normalized.sort();
     normalized.dedup();
 
-    let result = terminal::run_remote_command_with_stdin(
+    let result = run_remote_command_with_stdin(
         &lookup,
-        &terminal::workspace_shell_command(&observer_remote_command("files-sync-watch-set")),
+        &workspace_shell_command_preserving_stdin(&observer_remote_command("files-sync-watch-set")),
         serde_json::to_vec(&normalized).map_err(|error| error.to_string())?,
     )
     .await?;
@@ -235,7 +235,7 @@ fn observer_remote_command(command: &str) -> String {
   exit 1\n\
 fi\n\
 {observer_bin} {command}",
-        observer_bin = terminal::shell_quote(terminal::REMOTE_WORKSPACE_OBSERVER_BIN),
+        observer_bin = shell_quote(REMOTE_WORKSPACE_OBSERVER_BIN),
     )
 }
 
@@ -244,8 +244,7 @@ async fn run_observer_json_command<T: for<'de> Deserialize<'de>>(
     context: &str,
     command: &str,
 ) -> Result<T, String> {
-    let result =
-        terminal::run_remote_command(lookup, &terminal::workspace_shell_command(command)).await?;
+    let result = run_remote_command(lookup, &workspace_shell_command(command)).await?;
     if !result.success {
         return Err(file_command_error(context, &result.stderr));
     }
@@ -258,9 +257,9 @@ async fn run_observer_json_command_with_stdin<T: for<'de> Deserialize<'de>>(
     command: &str,
     stdin_bytes: Vec<u8>,
 ) -> Result<T, String> {
-    let result = terminal::run_remote_command_with_stdin(
+    let result = run_remote_command_with_stdin(
         lookup,
-        &terminal::workspace_shell_command(command),
+        &workspace_shell_command_preserving_stdin(command),
         stdin_bytes,
     )
     .await?;
