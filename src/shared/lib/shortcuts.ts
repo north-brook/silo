@@ -22,6 +22,7 @@ export const shortcutEvents = {
 	toggleProjectsBar: "silo://toggle-projects-bar",
 	toggleGitBar: "silo://toggle-git-bar",
 	openGitDiff: "silo://open-git-diff",
+	openGitFiles: "silo://open-git-files",
 	openGitChecks: "silo://open-git-checks",
 	gitCreateOrPushPr: "silo://git-create-or-push-pr",
 	gitMergePr: "silo://git-merge-pr",
@@ -52,7 +53,9 @@ export function listenShortcutEvent<T>(
 		);
 	}
 
-	const disposeListener = (nextUnlisten: null | (() => void | Promise<void>)) => {
+	const disposeListener = (
+		nextUnlisten: null | (() => void | Promise<void>),
+	) => {
 		if (!nextUnlisten) {
 			return;
 		}
