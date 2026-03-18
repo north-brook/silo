@@ -6,6 +6,7 @@ import { Terminal } from "@xterm/xterm";
 import { useCallback, useEffect, useRef, useState } from "react";
 import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@/shared/lib/invoke";
+import { domFocusSnapshot } from "@/shared/lib/focus-debug";
 import type { WorkspaceSession } from "@/workspaces/api";
 import type { CloudSession } from "@/workspaces/hosts/model";
 import { attachTerminalBindings } from "./bindings";
@@ -17,6 +18,9 @@ import {
 const DELETE_BYTE = 0x7f;
 const BACKSPACE_ERASE_SEQUENCE = [0x08, 0x20, 0x08];
 const MAX_AUTO_RECONNECT_ATTEMPTS = 5;
+const MIN_ATTACH_COLS = 10;
+const MIN_ATTACH_ROWS = 4;
+const MIN_ATTACH_PIXEL_SIZE = 4;
 
 function normalizeTerminalOutput(data: ArrayBuffer): Uint8Array {
 	const bytes = new Uint8Array(data);
@@ -36,11 +40,26 @@ function normalizeTerminalOutput(data: ArrayBuffer): Uint8Array {
 	return Uint8Array.from(normalized);
 }
 
+function writeTerminalChunk(term: Terminal, data: string | Uint8Array) {
+	return new Promise<void>((resolve) => {
+		term.write(data, resolve);
+	});
+}
+
 interface TerminalAttachResult {
 	terminal_id: string;
 	session: WorkspaceSession;
 	scrollback_vt: string;
 	scrollback_truncated: boolean;
+}
+
+interface TerminalSize {
+	cols: number;
+	rows: number;
+}
+
+function isAssistantSession(session: CloudSession) {
+	return session.name === "codex" || session.name === "claude";
 }
 
 interface TerminalExitPayload {
@@ -152,8 +171,9 @@ export function TerminalSessionHost({
 	const reconnectMessageRef = useRef<string | null>(null);
 	const pendingReconnectRef = useRef(false);
 	const attachInFlightRef = useRef(false);
+	const attachQueuedRef = useRef(false);
+	const attachSizeRef = useRef<TerminalSize | null>(null);
 	const retryNonceRef = useRef(retryNonce);
-	const resetTerminalOnNextAttachRef = useRef(false);
 	const [isMountReady, setIsMountReady] = useState(false);
 	const [attachNonce, setAttachNonce] = useState(0);
 	const isPageForeground = usePageIsForeground();
@@ -171,16 +191,32 @@ export function TerminalSessionHost({
 
 	const fitAndResizeTerminal = useCallback(() => {
 		if (!visibleRef.current) {
-			return;
+			return null;
 		}
 
 		const fitAddon = fitAddonRef.current;
 		const terminal = termRef.current;
-		if (!fitAddon || !terminal) {
-			return;
+		const mountElement = mountElementRef.current;
+		if (!fitAddon || !terminal || !mountElement) {
+			return null;
 		}
 
 		fitAddon.fit();
+
+		const bounds = mountElement.getBoundingClientRect();
+		if (
+			bounds.width <= MIN_ATTACH_PIXEL_SIZE ||
+			bounds.height <= MIN_ATTACH_PIXEL_SIZE ||
+			terminal.cols < MIN_ATTACH_COLS ||
+			terminal.rows < MIN_ATTACH_ROWS
+		) {
+			return null;
+		}
+
+		return {
+			cols: terminal.cols,
+			rows: terminal.rows,
+		} satisfies TerminalSize;
 	}, []);
 
 	const scheduleFitAndResize = useCallback(() => {
@@ -216,11 +252,24 @@ export function TerminalSessionHost({
 	}, []);
 
 	const triggerAttach = useCallback(() => {
-		if (!isMountReady || !termRef.current || attachInFlightRef.current) {
+		if (
+			!isMountReady ||
+			!visibleRef.current ||
+			!termRef.current ||
+			attachQueuedRef.current ||
+			attachInFlightRef.current ||
+			terminalIdRef.current
+		) {
 			return;
 		}
+		const size = fitAndResizeTerminal();
+		if (!size) {
+			return;
+		}
+		attachQueuedRef.current = true;
+		attachSizeRef.current = size;
 		setAttachNonce((previous) => previous + 1);
-	}, [isMountReady]);
+	}, [fitAndResizeTerminal, isMountReady]);
 
 	const scheduleReconnectAttempt = useCallback(() => {
 		if (
@@ -263,7 +312,6 @@ export function TerminalSessionHost({
 			terminalIdRef.current = null;
 			pendingReconnectRef.current = true;
 			reconnectMessageRef.current = message;
-			resetTerminalOnNextAttachRef.current = true;
 			onHostStateChangeRef.current({
 				status: "reconnecting",
 				errorMessage: message,
@@ -429,9 +477,11 @@ export function TerminalSessionHost({
 
 		const resizeObserver = new ResizeObserver(() => {
 			scheduleFitAndResize();
+			if (!terminalIdRef.current) {
+				triggerAttach();
+			}
 		});
 		resizeObserver.observe(mountElement);
-		triggerAttach();
 
 		return () => {
 			disposed = true;
@@ -467,16 +517,20 @@ export function TerminalSessionHost({
 		if (!isMountReady || !termRef.current) {
 			return;
 		}
+		const requestedSize = attachSizeRef.current;
+		if (!requestedSize) {
+			return;
+		}
 
 		let disposed = false;
 		let attachedTerminalId: string | null = null;
 		const term = termRef.current;
 		const attachRunKey = attachNonce;
 		const shouldReconnect = pendingReconnectRef.current;
-		const shouldSkipScrollback = shouldReconnect
-			? false
-			: initialSkipScrollbackRef.current;
+		const shouldSkipScrollback =
+			isAssistantSession(session) || (!shouldReconnect && initialSkipScrollbackRef.current);
 
+		attachQueuedRef.current = false;
 		attachInFlightRef.current = true;
 		onHostStateChangeRef.current({
 			status: shouldReconnect ? "reconnecting" : "attaching",
@@ -487,6 +541,8 @@ export function TerminalSessionHost({
 			workspace: session.workspace,
 			attachmentId: session.attachmentId,
 			attachNonce: attachRunKey,
+			cols: requestedSize.cols,
+			rows: requestedSize.rows,
 			skipInitialScrollback: shouldSkipScrollback,
 			reconnectAttempt: reconnectAttemptRef.current,
 		});
@@ -506,6 +562,8 @@ export function TerminalSessionHost({
 					{
 						workspace: session.workspace,
 						attachmentId: session.attachmentId,
+						cols: requestedSize.cols,
+						rows: requestedSize.rows,
 						skipScrollback: shouldSkipScrollback,
 						output,
 					},
@@ -532,14 +590,20 @@ export function TerminalSessionHost({
 					terminalId: result.terminal_id,
 				});
 
-				if (resetTerminalOnNextAttachRef.current) {
-					term.reset();
-					lastResizeRef.current = null;
-					resetTerminalOnNextAttachRef.current = false;
-				}
+				term.reset();
+				lastResizeRef.current = null;
 
 				if (result.scrollback_vt) {
-					term.write(result.scrollback_vt);
+					await writeTerminalChunk(term, result.scrollback_vt);
+					if (disposed) {
+						return;
+					}
+				}
+				await invoke("terminal_finish_attach", {
+					terminal: result.terminal_id,
+				});
+				if (disposed) {
+					return;
 				}
 
 				if (initialSkipScrollbackRef.current) {
@@ -584,6 +648,7 @@ export function TerminalSessionHost({
 
 		return () => {
 			disposed = true;
+			attachQueuedRef.current = false;
 			attachInFlightRef.current = false;
 			if (attachedTerminalId && terminalIdRef.current === attachedTerminalId) {
 				void invoke("terminal_detach_terminal", {
@@ -609,12 +674,31 @@ export function TerminalSessionHost({
 			return;
 		}
 
+		console.info("terminal focus requested", {
+			workspace: session.workspace,
+			attachmentId: session.attachmentId,
+			terminalId: terminalIdRef.current,
+			isPageForeground,
+			...domFocusSnapshot(),
+		});
 		scheduleFitAndResize();
 		termRef.current?.focus();
+		window.requestAnimationFrame(() => {
+			console.info("terminal focus settled", {
+				workspace: session.workspace,
+				attachmentId: session.attachmentId,
+				terminalId: terminalIdRef.current,
+				isPageForeground,
+				...domFocusSnapshot(),
+			});
+		});
+		if (!terminalIdRef.current) {
+			triggerAttach();
+		}
 		if (pendingReconnectRef.current && !terminalIdRef.current) {
 			scheduleReconnectAttempt();
 		}
-	}, [scheduleFitAndResize, scheduleReconnectAttempt, visible]);
+	}, [scheduleFitAndResize, scheduleReconnectAttempt, triggerAttach, visible]);
 
 	useEffect(() => {
 		if (retryNonceRef.current === retryNonce) {
@@ -626,7 +710,6 @@ export function TerminalSessionHost({
 		reconnectAttemptRef.current = 0;
 		reconnectMessageRef.current = null;
 		pendingReconnectRef.current = false;
-		resetTerminalOnNextAttachRef.current = true;
 		terminalIdRef.current = null;
 		triggerAttach();
 	}, [clearReconnectTimer, retryNonce, triggerAttach]);

@@ -423,7 +423,7 @@ export function SessionHostProvider({
 						record.session.workspace === activeWorkspace &&
 						record.key === activeSessionKey;
 					const target = isActive
-						? (workspaceOutlets[record.session.workspace] ?? parkingLotElement)
+						? (workspaceOutlets[record.session.workspace] ?? null)
 						: parkingLotElement;
 
 					if (record.session.kind === "terminal") {

@@ -9,6 +9,7 @@ import {
 } from "@/workspaces/state";
 import { TerminalSessionView } from "@/workspaces/terminal/view";
 import { invoke } from "@/shared/lib/invoke";
+import { domFocusSnapshot } from "@/shared/lib/focus-debug";
 import {
 	type SessionRouteState,
 	workspaceSessionHref,
@@ -26,9 +27,8 @@ export function WorkspaceTerminalSessionPage() {
 function WorkspaceSessionView({ kind }: { kind: "browser" | "terminal" }) {
 	const location = useLocation();
 	const navigate = useNavigate();
-	const freshRef = useRef(
-		(location.state as SessionRouteState | null)?.fresh === true,
-	);
+	const routeState = location.state as SessionRouteState | null;
+	const freshRef = useRef(routeState?.fresh === true);
 	const { invalidateWorkspace } = useWorkspaceState();
 	const sessions = useWorkspaceSessions();
 	const cloudSessions = useCloudSessions();
@@ -95,7 +95,21 @@ function WorkspaceSessionView({ kind }: { kind: "browser" | "terminal" }) {
 			return;
 		}
 
+		console.info("workspace session route active", {
+			workspace,
+			kind,
+			attachmentId,
+			fresh: freshRef.current,
+			...domFocusSnapshot(),
+		});
+
 		const timeout = window.setTimeout(() => {
+			console.info("workspace session set active requested", {
+				workspace,
+				kind,
+				attachmentId,
+				...domFocusSnapshot(),
+			});
 			void invoke("workspaces_set_active_session", {
 				workspace,
 				kind,
@@ -124,6 +138,7 @@ function WorkspaceSessionView({ kind }: { kind: "browser" | "terminal" }) {
 	return (
 		<BrowserSessionView
 			session={activeSession}
+			autoFocusAddress={freshRef.current}
 			onChanged={invalidateWorkspace}
 		/>
 	);

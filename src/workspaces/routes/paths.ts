@@ -1,12 +1,11 @@
 import type { CloudSessionKind } from "@/workspaces/hosts/model";
 
 export interface WorkspaceRouteState {
+	fresh?: boolean;
 	transition?: "resuming" | "saving";
 }
 
-export interface SessionRouteState extends WorkspaceRouteState {
-	fresh?: boolean;
-}
+export interface SessionRouteState extends WorkspaceRouteState {}
 
 function encodePathSegment(value: string): string {
 	return encodeURIComponent(value);

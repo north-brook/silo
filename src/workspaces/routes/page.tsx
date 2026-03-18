@@ -28,9 +28,11 @@ function WorkspaceView() {
 	const location = useLocation();
 	const navigate = useNavigate();
 	const savingRoutedRef = useRef(false);
+	const routeState = location.state as WorkspaceRouteState | null;
+	const freshRef = useRef(routeState?.fresh === true);
 	const { isLoading, isMissing, workspace } = useWorkspaceState();
 	const project = useWorkspaceProject();
-	const transition = (location.state as WorkspaceRouteState | null)?.transition;
+	const transition = routeState?.transition;
 
 	const redirectHref = useMemo(() => {
 		if (!workspace || isTemplateWorkspace(workspace) || transition) {
@@ -59,6 +61,17 @@ function WorkspaceView() {
 			attachmentId: targetSession.attachment_id,
 		});
 	}, [project, transition, workspace]);
+
+	useEffect(() => {
+		if (!freshRef.current) {
+			return;
+		}
+
+		navigate(location.pathname, {
+			replace: true,
+			state: transition ? { transition } satisfies WorkspaceRouteState : null,
+		});
+	}, [location.pathname, navigate, transition]);
 
 	useEffect(() => {
 		if (!redirectHref) {
@@ -132,6 +145,7 @@ function WorkspaceView() {
 
 	return (
 		<PromptWorkspace
+			autoFocusPrompt={freshRef.current}
 			isRunning={isRunning}
 			ready={workspace.ready}
 			status={workspace.status}

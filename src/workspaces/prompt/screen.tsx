@@ -57,12 +57,14 @@ function statusMessage(status: string): string {
 }
 
 export function PromptWorkspace({
+	autoFocusPrompt,
 	isRunning,
 	ready,
 	status,
 	workspace,
 	project,
 }: {
+	autoFocusPrompt: boolean;
 	isRunning: boolean;
 	ready: boolean;
 	status: string;
@@ -76,6 +78,10 @@ export function PromptWorkspace({
 		usePromptDraft(workspace);
 
 	useEffect(() => {
+		if (!autoFocusPrompt && textareaRef.current?.dataset.workspace === workspace) {
+			return;
+		}
+
 		const textarea = textareaRef.current;
 		if (!textarea) {
 			return;
@@ -85,7 +91,7 @@ export function PromptWorkspace({
 		textarea.focus();
 		const caret = textarea.value.length;
 		textarea.setSelectionRange(caret, caret);
-	}, [workspace]);
+	}, [autoFocusPrompt, workspace]);
 	const [providerOpen, setProviderOpen] = useState(false);
 	const provider =
 		PROVIDERS.find((candidate) => candidate.id === providerId) ?? PROVIDERS[0];

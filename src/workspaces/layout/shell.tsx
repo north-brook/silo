@@ -33,6 +33,7 @@ import {
 } from "@/workspaces/routes/paths";
 import { useWorkspaceRouteParams } from "@/workspaces/routes/params";
 import { invoke } from "@/shared/lib/invoke";
+import { domFocusSnapshot } from "@/shared/lib/focus-debug";
 import { shortcutEvents } from "@/shared/lib/shortcuts";
 import { useShortcut } from "@/shared/lib/use-shortcut";
 import type { WorkspaceSession } from "@/workspaces/api";
@@ -407,11 +408,23 @@ function WorkspaceShellInner() {
 	useShortcut<void>({
 		event: shortcutEvents.newTab,
 		onTrigger: () => {
+			console.info("new tab dialog requested", {
+				source: "shortcut-event",
+				activeKind,
+				activeAttachmentId,
+				...domFocusSnapshot(),
+			});
 			setNewTabOpen(true);
 		},
 		onKeyDown: (e) => {
 			if (e.metaKey && e.key === "t") {
 				e.preventDefault();
+				console.info("new tab dialog requested", {
+					source: "keydown",
+					activeKind,
+					activeAttachmentId,
+					...domFocusSnapshot(),
+				});
 				setNewTabOpen(true);
 			}
 			if (e.metaKey && e.shiftKey && e.code === "BracketLeft") {
@@ -477,7 +490,24 @@ function WorkspaceShellInner() {
 
 	useEffect(() => {
 		if (!newTabOpen) return;
+
+		console.info("new tab dialog opened", {
+			activeKind,
+			activeAttachmentId,
+			...domFocusSnapshot(),
+		});
+
 		const handler = (e: KeyboardEvent) => {
+			if (e.key === "Escape" || /^[1-9]$/.test(e.key)) {
+				console.info("new tab dialog keydown", {
+					key: e.key,
+					metaKey: e.metaKey,
+					ctrlKey: e.ctrlKey,
+					altKey: e.altKey,
+					shiftKey: e.shiftKey,
+					...domFocusSnapshot(),
+				});
+			}
 			const num = Number.parseInt(e.key, 10);
 			if (num >= 1 && num <= TAB_OPTIONS.length) {
 				e.preventDefault();
@@ -485,8 +515,15 @@ function WorkspaceShellInner() {
 			}
 		};
 		window.addEventListener("keydown", handler);
-		return () => window.removeEventListener("keydown", handler);
-	}, [newTabOpen, TAB_OPTIONS]);
+		return () => {
+			console.info("new tab dialog closed", {
+				activeKind,
+				activeAttachmentId,
+				...domFocusSnapshot(),
+			});
+			window.removeEventListener("keydown", handler);
+		};
+	}, [activeAttachmentId, activeKind, newTabOpen, TAB_OPTIONS]);
 
 	return (
 		<>
