@@ -1,12 +1,13 @@
 import { Navigate, Route, Routes } from "react-router-dom";
+import { AppShell } from "@/app/shell";
 import HomePage from "@/dashboard/page";
 import { WorkspaceShell } from "@/workspaces/layout/shell";
 import WorkspacePage from "@/workspaces/routes/page";
 import {
 	WorkspaceBrowserSessionPage,
+	WorkspaceFileSessionPage,
 	WorkspaceTerminalSessionPage,
 } from "@/workspaces/routes/session-page";
-import { AppShell } from "@/app/shell";
 
 export function AppRouter() {
 	return (
@@ -25,6 +26,10 @@ export function AppRouter() {
 					<Route
 						path="terminal/:attachmentId"
 						element={<WorkspaceTerminalSessionPage />}
+					/>
+					<Route
+						path="file/:attachmentId"
+						element={<WorkspaceFileSessionPage />}
 					/>
 				</Route>
 				<Route path="*" element={<Navigate to="/" replace />} />
