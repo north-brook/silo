@@ -22,9 +22,11 @@ use uuid::Uuid;
 
 const TERMINAL_EXIT_EVENT: &str = "terminal://exit";
 const TERMINAL_ERROR_EVENT: &str = "terminal://error";
+const TERMINAL_DISCONNECT_EVENT: &str = "terminal://disconnect";
 const DEFAULT_TERMINAL_COLS: u16 = 80;
 const DEFAULT_TERMINAL_ROWS: u16 = 24;
 const MAX_SCROLLBACK_BYTES: usize = 512 * 1024;
+const MAX_ATTACHMENT_RECENT_OUTPUT_BYTES: usize = 16 * 1024;
 const ATTACH_COMMAND_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const ATTACH_RESERVATION_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const ATTACH_RESERVATION_WAIT_INTERVAL: Duration = Duration::from_millis(50);
@@ -95,6 +97,12 @@ struct TerminalErrorPayload {
     message: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct TerminalDisconnectPayload {
+    terminal_id: String,
+    message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct AttachmentKey {
     workspace: String,
@@ -112,6 +120,7 @@ struct Attachment {
     window_label: Mutex<String>,
     connected: Mutex<bool>,
     connected_cv: Condvar,
+    recent_output: Mutex<Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -603,6 +612,7 @@ fn spawn_terminal_attachment(
         window_label: Mutex::new(window_label),
         connected: Mutex::new(false),
         connected_cv: Condvar::new(),
+        recent_output: Mutex::new(Vec::new()),
     });
 
     manager.insert(attachment.clone());
@@ -620,6 +630,7 @@ fn spawn_reader_loop(mut reader: Box<dyn Read + Send>, attachment: Arc<Attachmen
                 Ok(count) => {
                     mark_attachment_connected(&attachment);
                     let chunk = buffer[..count].to_vec();
+                    record_attachment_output(&attachment, &chunk);
                     if let Ok(channel) = attachment.output.lock() {
                         if let Err(error) = channel.send(chunk) {
                             emit_terminal_error(
@@ -660,6 +671,23 @@ fn spawn_waiter_loop(
 
         match status {
             Ok(status) => {
+                let recent_output = recent_attachment_output(&attachment);
+                if !status.success() && is_retryable_terminal_transport_error(&recent_output) {
+                    emit_terminal_disconnect_with_app(
+                        &app,
+                        &attachment,
+                        remote_command_error("terminal transport disconnected", &recent_output),
+                    );
+                    return;
+                }
+                if !status.success() && is_missing_terminal_session_error(&recent_output) {
+                    emit_terminal_error_with_app(
+                        &app,
+                        &attachment,
+                        remote_command_error("terminal session unavailable", &recent_output),
+                    );
+                    return;
+                }
                 let payload = TerminalExitPayload {
                     terminal_id: attachment.id.clone(),
                     exit_code: status.exit_code(),
@@ -726,12 +754,48 @@ fn emit_terminal_error_with_app(
     }
 }
 
+fn emit_terminal_disconnect_with_app(
+    app: &AppHandle<AppRuntime>,
+    attachment: &Attachment,
+    message: String,
+) {
+    log::warn!("{message}");
+    if let Some(window_label) = current_window_label(attachment) {
+        let _ = app.emit_to(
+            EventTarget::webview_window(window_label),
+            TERMINAL_DISCONNECT_EVENT,
+            TerminalDisconnectPayload {
+                terminal_id: attachment.id.clone(),
+                message,
+            },
+        );
+    }
+}
+
 fn current_window_label(attachment: &Attachment) -> Option<String> {
     attachment
         .window_label
         .lock()
         .ok()
         .map(|value| value.clone())
+}
+
+fn record_attachment_output(attachment: &Attachment, chunk: &[u8]) {
+    if let Ok(mut recent_output) = attachment.recent_output.lock() {
+        recent_output.extend_from_slice(chunk);
+        if recent_output.len() > MAX_ATTACHMENT_RECENT_OUTPUT_BYTES {
+            let overflow = recent_output.len() - MAX_ATTACHMENT_RECENT_OUTPUT_BYTES;
+            recent_output.drain(..overflow);
+        }
+    }
+}
+
+fn recent_attachment_output(attachment: &Attachment) -> String {
+    attachment
+        .recent_output
+        .lock()
+        .map(|buffer| String::from_utf8_lossy(&buffer).into_owned())
+        .unwrap_or_default()
 }
 
 fn mark_attachment_connected(attachment: &Attachment) {
@@ -1139,13 +1203,36 @@ pub(crate) async fn clear_template_runtime_state(workspace: &str) -> Result<(), 
 }
 
 fn should_retry_template_bootstrap(error: &str) -> bool {
+    if is_retryable_terminal_transport_error(error) {
+        return true;
+    }
+
     let lower = error.to_ascii_lowercase();
     [
-        "connection refused",
         "system is booting up",
         "not permitted to log in yet",
-        "port 22",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn is_retryable_terminal_transport_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    [
+        "can't assign requested address",
         "broken pipe",
+        "connection refused",
+        "connection reset",
+        "connection reset by peer",
+        "connection timed out",
+        "connection closed",
+        "connection lost",
+        "network is unreachable",
+        "operation timed out",
+        "port 22",
+        "software caused connection abort",
+        "timed out",
+        "transport endpoint is not connected",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
@@ -2371,6 +2458,20 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn transport_retry_detects_local_address_rebind_failure() {
+        assert!(is_retryable_terminal_transport_error(
+            "Read from remote host 35.245.135.222: Can't assign requested address"
+        ));
+    }
+
+    #[test]
+    fn transport_retry_ignores_missing_remote_session_errors() {
+        assert!(!is_retryable_terminal_transport_error(
+            "zmx attach: session not found"
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn stdin_write_error_preserves_remote_stderr_and_forces_failure() {
@@ -2627,6 +2728,7 @@ mod tests {
             window_label: Mutex::new("main".to_string()),
             connected: Mutex::new(false),
             connected_cv: Condvar::new(),
+            recent_output: Mutex::new(Vec::new()),
         });
         manager.insert(attachment.clone());
 
@@ -2681,6 +2783,7 @@ mod tests {
             window_label: Mutex::new("main".to_string()),
             connected: Mutex::new(false),
             connected_cv: Condvar::new(),
+            recent_output: Mutex::new(Vec::new()),
         });
 
         manager.insert(attachment.clone());
