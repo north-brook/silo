@@ -131,6 +131,8 @@ async fn create_browser_tab(
             title: None,
             favicon_url: browser_favicon_for_url(&initial_url.logical_url),
         }),
+        None,
+        None,
     );
     manager.cache_session(&workspace, session.clone())?;
     enqueue_browser_metadata_update(metadata, &workspace, Some(lookup.clone()), session);
@@ -173,6 +175,8 @@ pub async fn browser_mount_tab(
                 title: session.title.clone(),
                 favicon_url: session.favicon_url.clone(),
             }),
+            Some(&session),
+            session.working,
         );
         state.cache_session(&workspace, session.clone())?;
         enqueue_browser_metadata_update(
@@ -289,6 +293,7 @@ pub async fn browser_go_to(
     attachment_id: String,
     url: String,
 ) -> Result<BrowserCommandResult, String> {
+    let existing = find_existing_browser_session(state.inner(), &workspace, &attachment_id).await;
     let lookup = workspaces::find_workspace(&workspace).await?;
     let normalized = state.resolve_browser_url(&lookup, Some(&url))?;
     let session = browser_session_for_url(
@@ -299,6 +304,8 @@ pub async fn browser_go_to(
             title: None,
             favicon_url: browser_favicon_for_url(&normalized.logical_url),
         }),
+        existing.as_ref(),
+        Some(true),
     );
     state.cache_session(&workspace, session.clone())?;
     enqueue_browser_metadata_update(metadata.inner(), &workspace, Some(lookup.clone()), session);
@@ -354,6 +361,8 @@ pub async fn browser_report_page_state(
             title: merged_title,
             favicon_url: merged_favicon,
         }),
+        existing.as_ref(),
+        None,
     );
     state.cache_session(&workspace, session.clone())?;
     enqueue_browser_metadata_update(metadata.inner(), &workspace, None, session);
@@ -364,6 +373,8 @@ pub async fn browser_report_page_state(
 #[tauri::command]
 pub async fn browser_go_back(
     app: AppHandle<AppRuntime>,
+    state: State<'_, BrowserManager>,
+    metadata: State<'_, WorkspaceMetadataManager>,
     workspace: String,
     attachment_id: String,
 ) -> Result<BrowserCommandResult, String> {
@@ -374,12 +385,23 @@ pub async fn browser_go_back(
         "window.history.back();",
         "go back",
     )?;
+    set_existing_browser_session_working(
+        state.inner(),
+        metadata.inner(),
+        &app,
+        &workspace,
+        &attachment_id,
+        true,
+    )
+    .await?;
     Ok(BrowserCommandResult { updated: true })
 }
 
 #[tauri::command]
 pub async fn browser_go_forward(
     app: AppHandle<AppRuntime>,
+    state: State<'_, BrowserManager>,
+    metadata: State<'_, WorkspaceMetadataManager>,
     workspace: String,
     attachment_id: String,
 ) -> Result<BrowserCommandResult, String> {
@@ -390,12 +412,23 @@ pub async fn browser_go_forward(
         "window.history.forward();",
         "go forward",
     )?;
+    set_existing_browser_session_working(
+        state.inner(),
+        metadata.inner(),
+        &app,
+        &workspace,
+        &attachment_id,
+        true,
+    )
+    .await?;
     Ok(BrowserCommandResult { updated: true })
 }
 
 #[tauri::command]
 pub async fn browser_refresh_page(
     app: AppHandle<AppRuntime>,
+    state: State<'_, BrowserManager>,
+    metadata: State<'_, WorkspaceMetadataManager>,
     workspace: String,
     attachment_id: String,
 ) -> Result<BrowserCommandResult, String> {
@@ -403,6 +436,15 @@ pub async fn browser_refresh_page(
     webview
         .reload()
         .map_err(|error| format!("failed to refresh browser tab: {error}"))?;
+    set_existing_browser_session_working(
+        state.inner(),
+        metadata.inner(),
+        &app,
+        &workspace,
+        &attachment_id,
+        true,
+    )
+    .await?;
     Ok(BrowserCommandResult { updated: true })
 }
 
@@ -415,6 +457,25 @@ pub async fn browser_open_devtools(
     let webview = resolve_live_webview(&app, &workspace, &attachment_id)?;
     let _ = webview.set_focus();
     webview.open_devtools();
+    Ok(BrowserCommandResult { updated: true })
+}
+
+#[tauri::command]
+pub async fn browser_toggle_devtools(
+    app: AppHandle<AppRuntime>,
+    workspace: String,
+    attachment_id: String,
+) -> Result<BrowserCommandResult, String> {
+    let webview = resolve_live_webview(&app, &workspace, &attachment_id)?;
+    let devtools_open = webview.is_devtools_open();
+
+    if devtools_open {
+        webview.close_devtools();
+    } else {
+        let _ = webview.set_focus();
+        webview.open_devtools();
+    }
+
     Ok(BrowserCommandResult { updated: true })
 }
 
@@ -554,6 +615,7 @@ impl BrowserManager {
         let workspace_name = workspace.to_string();
         let attachment = attachment_id.to_string();
         let app_handle_for_page_load = app.clone();
+        let metadata_for_page_load = app.state::<WorkspaceMetadataManager>().inner().clone();
         let app_handle_for_title = app.clone();
         let manager_for_page_load = self.clone();
         let manager_for_title = self.clone();
@@ -567,16 +629,16 @@ impl BrowserManager {
             .data_directory(browser_webview_data_directory(workspace)?)
             .initialization_script(browser_state_sync_script(workspace, attachment_id))
             .on_page_load(move |webview, payload| {
-                if payload.event() == PageLoadEvent::Finished {
-                    handle_page_load(
-                        &app_handle_for_page_load,
-                        &manager_for_page_load,
-                        &workspace_name,
-                        &attachment,
-                        &webview,
-                        payload.url().to_string(),
-                    );
-                }
+                handle_page_load(
+                    &app_handle_for_page_load,
+                    &manager_for_page_load,
+                    &metadata_for_page_load,
+                    &workspace_name,
+                    &attachment,
+                    &webview,
+                    payload.event(),
+                    payload.url().to_string(),
+                );
             })
             .on_document_title_changed(move |webview, title| {
                 handle_title_changed(
@@ -860,21 +922,27 @@ fn resolve_live_webview(
 fn handle_page_load(
     app: &AppHandle<AppRuntime>,
     manager: &BrowserManager,
+    metadata: &WorkspaceMetadataManager,
     workspace: &str,
     attachment_id: &str,
     webview: &Webview<AppRuntime>,
+    event: PageLoadEvent,
     resolved_url: String,
 ) {
     let _ = manager.set_resolved_url(workspace, attachment_id, &resolved_url);
-    reapply_tracked_webview_state(manager, workspace, attachment_id, webview);
+    if event == PageLoadEvent::Finished {
+        reapply_tracked_webview_state(manager, workspace, attachment_id, webview);
+        let _ = webview.eval("window.__SILO_BROWSER_SYNC__ && window.__SILO_BROWSER_SYNC__();");
+    }
+
     let logical_url = manager
         .loopback_router
         .logical_url_for_reported_url(workspace, &resolved_url)
         .unwrap_or_else(|| logical_browser_url(&resolved_url));
-    let _ = webview.eval("window.__SILO_BROWSER_SYNC__ && window.__SILO_BROWSER_SYNC__();");
     let workspace = workspace.to_string();
     let attachment_id = attachment_id.to_string();
     let app_handle = app.clone();
+    let metadata_manager = metadata.clone();
     let manager = manager.clone();
     tauri::async_runtime::spawn(async move {
         let existing = find_existing_browser_session(&manager, &workspace, &attachment_id).await;
@@ -890,11 +958,17 @@ fn handle_page_load(
                 title: existing_title,
                 favicon_url: existing_favicon.or_else(|| browser_favicon_for_url(&logical_url)),
             }),
+            existing.as_ref(),
+            Some(event == PageLoadEvent::Started),
         );
-        let _ = manager.cache_session(&workspace, session.clone());
-        let metadata = app_handle.state::<WorkspaceMetadataManager>();
-        enqueue_browser_metadata_update(metadata.inner(), &workspace, None, session);
-        let _ = emit_browser_state_changed(&app_handle, &workspace, &attachment_id);
+        let _ = cache_and_emit_browser_session(
+            &manager,
+            &metadata_manager,
+            &app_handle,
+            &workspace,
+            &attachment_id,
+            session,
+        );
     });
 }
 
@@ -943,11 +1017,18 @@ fn handle_title_changed(
                 title: merged_title,
                 favicon_url: merged_favicon,
             }),
+            existing.as_ref(),
+            None,
         );
-        let _ = manager.cache_session(&workspace, session.clone());
         let metadata = app_handle.state::<WorkspaceMetadataManager>();
-        enqueue_browser_metadata_update(metadata.inner(), &workspace, None, session);
-        let _ = emit_browser_state_changed(&app_handle, &workspace, &attachment_id);
+        let _ = cache_and_emit_browser_session(
+            &manager,
+            metadata.inner(),
+            &app_handle,
+            &workspace,
+            &attachment_id,
+            session,
+        );
     });
 }
 
@@ -1319,6 +1400,8 @@ fn browser_session_for_url(
     attachment_id: &str,
     logical_url: &str,
     metadata: Option<BrowserPageMetadata>,
+    existing: Option<&WorkspaceSession>,
+    working: Option<bool>,
 ) -> WorkspaceSession {
     let normalized = normalize_browser_url(Some(logical_url)).unwrap_or(BrowserUrlTarget {
         logical_url: logical_url.to_string(),
@@ -1345,11 +1428,46 @@ fn browser_session_for_url(
             .then_some(metadata.resolved_url),
         title: Some(title),
         favicon_url: metadata.favicon_url,
-        can_go_back: None,
-        can_go_forward: None,
-        working: None,
-        unread: None,
+        can_go_back: existing.and_then(|session| session.can_go_back),
+        can_go_forward: existing.and_then(|session| session.can_go_forward),
+        working: working.or(existing.and_then(|session| session.working)),
+        unread: existing.and_then(|session| session.unread),
     }
+}
+
+fn cache_and_emit_browser_session(
+    manager: &BrowserManager,
+    metadata: &WorkspaceMetadataManager,
+    app: &AppHandle<AppRuntime>,
+    workspace: &str,
+    attachment_id: &str,
+    session: WorkspaceSession,
+) -> Result<(), String> {
+    manager.cache_session(workspace, session.clone())?;
+    enqueue_browser_metadata_update(metadata, workspace, None, session);
+    emit_browser_state_changed(app, workspace, attachment_id)?;
+    Ok(())
+}
+
+async fn set_existing_browser_session_working(
+    manager: &BrowserManager,
+    metadata: &WorkspaceMetadataManager,
+    app: &AppHandle<AppRuntime>,
+    workspace: &str,
+    attachment_id: &str,
+    working: bool,
+) -> Result<(), String> {
+    let Some(mut session) = find_existing_browser_session(manager, workspace, attachment_id).await
+    else {
+        return Ok(());
+    };
+
+    if session.working == Some(working) {
+        return Ok(());
+    }
+
+    session.working = Some(working);
+    cache_and_emit_browser_session(manager, metadata, app, workspace, attachment_id, session)
 }
 
 fn current_rfc3339_timestamp() -> String {
