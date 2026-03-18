@@ -31,6 +31,7 @@ export function CloudBrowserHost({
 	}) => void;
 }) {
 	const onHostStateChangeRef = useRef(onHostStateChange);
+	const lastViewportRef = useRef<string | null>(null);
 	const [ensured, setEnsured] = useState(false);
 	const ensuredRef = useRef(false);
 	const overlayOpen = useOverlayOpen();
@@ -113,23 +114,29 @@ export function CloudBrowserHost({
 
 		let cancelled = false;
 		let rafId: number | null = null;
+		let unmountTimer: number | null = null;
 		let resizeObserver: ResizeObserver | null = null;
 
 		if (!workspaceActive || !target) {
-			void invoke("browser_unmount_tab", {
-				workspace: session.workspace,
-				attachmentId: session.attachmentId,
-			}).catch((error: Error) => {
-				if (cancelled) {
-					return;
-				}
-				onHostStateChangeRef.current({
-					status: "error",
-					errorMessage: error.message,
+			unmountTimer = window.setTimeout(() => {
+				void invoke("browser_unmount_tab", {
+					workspace: session.workspace,
+					attachmentId: session.attachmentId,
+				}).catch((error: Error) => {
+					if (cancelled) {
+						return;
+					}
+					onHostStateChangeRef.current({
+						status: "error",
+						errorMessage: error.message,
+					});
 				});
-			});
+			}, 150);
 			return () => {
 				cancelled = true;
+				if (unmountTimer !== null) {
+					window.clearTimeout(unmountTimer);
+				}
 			};
 		}
 
@@ -140,20 +147,24 @@ export function CloudBrowserHost({
 				width: 1,
 				height: 1,
 			};
-			void invoke("browser_resize_tab", {
-				workspace: session.workspace,
-				attachmentId: session.attachmentId,
-				viewport,
-				visible: false,
-			}).catch((error: Error) => {
-				if (cancelled) {
-					return;
-				}
-				onHostStateChangeRef.current({
-					status: "error",
-					errorMessage: error.message,
+			const viewportKey = JSON.stringify({ viewport, visible: false });
+			if (lastViewportRef.current !== viewportKey) {
+				lastViewportRef.current = viewportKey;
+				void invoke("browser_resize_tab", {
+					workspace: session.workspace,
+					attachmentId: session.attachmentId,
+					viewport,
+					visible: false,
+				}).catch((error: Error) => {
+					if (cancelled) {
+						return;
+					}
+					onHostStateChangeRef.current({
+						status: "error",
+						errorMessage: error.message,
+					});
 				});
-			});
+			}
 			return () => {
 				cancelled = true;
 			};
@@ -171,6 +182,11 @@ export function CloudBrowserHost({
 				width: rect.width,
 				height: rect.height,
 			};
+			const viewportKey = JSON.stringify({ viewport, visible: effectiveVisible });
+			if (lastViewportRef.current === viewportKey) {
+				return;
+			}
+			lastViewportRef.current = viewportKey;
 			void invoke("browser_resize_tab", {
 				workspace: session.workspace,
 				attachmentId: session.attachmentId,
@@ -206,6 +222,9 @@ export function CloudBrowserHost({
 			cancelled = true;
 			if (rafId !== null) {
 				window.cancelAnimationFrame(rafId);
+			}
+			if (unmountTimer !== null) {
+				window.clearTimeout(unmountTimer);
 			}
 			window.removeEventListener("resize", requestSync);
 			resizeObserver?.disconnect();

@@ -18,7 +18,7 @@ import {
 	X,
 } from "lucide-react";
 import Image from "next/image";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import {
 	createContext,
 	type ReactNode,
@@ -26,6 +26,7 @@ import {
 	useContext,
 	useState,
 } from "react";
+import { useWorkspaceState } from "./workspace-state";
 import { cloudSessionHref } from "../lib/cloud";
 import {
 	type CheckState,
@@ -46,7 +47,7 @@ import {
 import { invoke } from "../lib/invoke";
 import { shortcutEvents } from "../lib/shortcuts";
 import { useShortcut } from "../lib/use-shortcut";
-import { isTemplateWorkspace, type Workspace } from "../lib/workspaces";
+import { isTemplateWorkspace } from "../lib/workspaces";
 import {
 	Dialog,
 	DialogClose,
@@ -103,26 +104,12 @@ export function useGitBar() {
 // ---------------------------------------------------------------------------
 
 function GitBarProviderInner({ children }: { children: ReactNode }) {
-	const searchParams = useSearchParams();
-	const workspaceName =
-		searchParams.get("name") ?? searchParams.get("workspace") ?? "";
-	const project = searchParams.get("project") ?? "";
-
-	const workspaceQuery = useQuery({
-		queryKey: ["workspaces_get_workspace", workspaceName],
-		queryFn: () =>
-			invoke<Workspace>("workspaces_get_workspace", {
-				workspace: workspaceName,
-			}),
-		enabled: !!workspaceName,
-	});
+	const { project, workspace, workspaceName } = useWorkspaceState();
 
 	const isInBranchWorkspace =
-		!!workspaceName &&
-		!!workspaceQuery.data &&
-		!isTemplateWorkspace(workspaceQuery.data);
+		!!workspaceName && !!workspace && !isTemplateWorkspace(workspace);
 	const isReadyBranchWorkspace =
-		isInBranchWorkspace && workspaceQuery.data?.ready === true;
+		isInBranchWorkspace && workspace?.ready === true;
 
 	const diff = useQuery({
 		queryKey: ["git_diff", workspaceName],

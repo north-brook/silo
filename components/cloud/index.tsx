@@ -92,6 +92,7 @@ export function CloudProvider({
 		useState<HTMLDivElement | null>(null);
 	const parkingLotRef = useRef<HTMLDivElement>(null);
 	const workspacePreloadedRef = useRef(workspacePreloaded);
+	const clearActiveSessionTimerRef = useRef<number | null>(null);
 
 	useEffect(() => {
 		workspacePreloadedRef.current = workspacePreloaded;
@@ -99,6 +100,14 @@ export function CloudProvider({
 
 	useEffect(() => {
 		setParkingLotElement(parkingLotRef.current);
+	}, []);
+
+	useEffect(() => {
+		return () => {
+			if (clearActiveSessionTimerRef.current !== null) {
+				window.clearTimeout(clearActiveSessionTimerRef.current);
+			}
+		};
 	}, []);
 
 	const ensureSession = useCallback(
@@ -251,6 +260,20 @@ export function CloudProvider({
 
 	const setActiveSession = useCallback(
 		(workspace: string | null, key: string | null) => {
+			if (clearActiveSessionTimerRef.current !== null) {
+				window.clearTimeout(clearActiveSessionTimerRef.current);
+				clearActiveSessionTimerRef.current = null;
+			}
+			if (workspace === null && key === null) {
+				// Preserve the current active host briefly during same-workspace route
+				// transitions so rapid tab switching does not thrash host visibility.
+				clearActiveSessionTimerRef.current = window.setTimeout(() => {
+					setActiveWorkspace(null);
+					setActiveSessionKey(null);
+					clearActiveSessionTimerRef.current = null;
+				}, 150);
+				return;
+			}
 			setActiveWorkspace((previous) =>
 				previous === workspace ? previous : workspace,
 			);

@@ -128,6 +128,7 @@ export function CloudTerminalHost({
 }) {
 	const queryClient = useQueryClient();
 	const terminalIdRef = useRef<string | null>(null);
+	const lastResizeRef = useRef<{ cols: number; rows: number } | null>(null);
 	const mountElementRef = useRef<HTMLDivElement | null>(null);
 	const termRef = useRef<Terminal | null>(null);
 	const fitAddonRef = useRef<FitAddon | null>(null);
@@ -156,13 +157,6 @@ export function CloudTerminalHost({
 		}
 
 		fitAddon.fit();
-		if (terminalIdRef.current) {
-			void invoke("terminal_resize_terminal", {
-				terminal: terminalIdRef.current,
-				cols: terminal.cols,
-				rows: terminal.rows,
-			});
-		}
 	};
 
 	const scheduleFitAndResize = () => {
@@ -365,6 +359,11 @@ export function CloudTerminalHost({
 			if (!terminalIdRef.current) {
 				return;
 			}
+			const lastResize = lastResizeRef.current;
+			if (lastResize && lastResize.cols === cols && lastResize.rows === rows) {
+				return;
+			}
+			lastResizeRef.current = { cols, rows };
 
 			void invoke("terminal_resize_terminal", {
 				terminal: terminalIdRef.current,
@@ -401,6 +400,7 @@ export function CloudTerminalHost({
 				});
 				terminalIdRef.current = null;
 			}
+			lastResizeRef.current = null;
 			if (mountElement.parentElement) {
 				mountElement.parentElement.removeChild(mountElement);
 			}
