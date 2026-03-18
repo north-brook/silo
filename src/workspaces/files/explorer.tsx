@@ -1,0 +1,258 @@
+import { useQuery } from "@tanstack/react-query";
+import { ChevronRight } from "lucide-react";
+import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { Loader } from "@/shared/ui/loader";
+import { type FileTreeEntry, filesListTree } from "@/workspaces/files/api";
+import { useFileSessions } from "@/workspaces/files/context";
+import {
+	FolderClosedIcon,
+	FolderOpenIcon,
+	fileIconForPath,
+} from "@/workspaces/files/icons";
+import { useGitSidebar } from "@/workspaces/git/context";
+import { useWorkspaceRouteParams } from "@/workspaces/routes/params";
+import { fileSessionHref } from "@/workspaces/routes/paths";
+import { useWorkspaceSessions } from "@/workspaces/state";
+
+interface TreeNode {
+	children: Map<string, TreeNode>;
+	name: string;
+	path: string;
+	type: "directory" | "file";
+}
+
+export function GitFilesTab() {
+	const navigate = useNavigate();
+	const { workspaceName: workspace, project } = useWorkspaceRouteParams();
+	const workspaceSessions = useWorkspaceSessions();
+	const { diff } = useGitSidebar();
+	const { openFileTab } = useFileSessions();
+	const filesQuery = useQuery({
+		queryKey: ["files_list_tree", workspace],
+		queryFn: () => filesListTree(workspace),
+		enabled: !!workspace,
+		refetchInterval: 5000,
+	});
+	const diffByPath = useMemo(() => {
+		const entries = new Map<
+			string,
+			{ additions: number; deletions: number; status: string }
+		>();
+		for (const section of diff ? [diff.local, diff.remote] : []) {
+			for (const file of section.files) {
+				entries.set(file.path, {
+					additions: file.additions,
+					deletions: file.deletions,
+					status: file.status,
+				});
+			}
+		}
+		return entries;
+	}, [diff]);
+	const tree = useMemo(
+		() => buildTree(filesQuery.data ?? []),
+		[filesQuery.data],
+	);
+	const [expandedPaths, setExpandedPaths] = useState<Set<string>>(
+		new Set([""]),
+	);
+
+	if (filesQuery.isLoading && !filesQuery.data) {
+		return (
+			<div className="h-full flex items-center justify-center">
+				<Loader />
+			</div>
+		);
+	}
+
+	if (!filesQuery.data?.length) {
+		return (
+			<div className="h-full flex items-center justify-center px-4 text-center text-[11px] text-text-muted">
+				No tracked or untracked files found.
+			</div>
+		);
+	}
+
+	return (
+		<div className="py-1.5">
+			{Array.from(tree.children.values())
+				.sort(compareTreeNodes)
+				.map((node) => (
+					<TreeRow
+						key={node.path}
+						depth={0}
+						diffByPath={diffByPath}
+						expandedPaths={expandedPaths}
+						node={node}
+						onFileOpen={async (path, persistent) => {
+							const result = await openFileTab({
+								path,
+								persistent,
+								workspace,
+								workspaceSessions,
+							});
+							navigate(
+								fileSessionHref({
+									project,
+									workspace,
+									attachmentId: result.attachmentId,
+								}),
+							);
+						}}
+						onToggleFolder={(path) => {
+							setExpandedPaths((previous) => {
+								const next = new Set(previous);
+								if (next.has(path)) {
+									next.delete(path);
+								} else {
+									next.add(path);
+								}
+								return next;
+							});
+						}}
+					/>
+				))}
+		</div>
+	);
+}
+
+function TreeRow({
+	depth,
+	diffByPath,
+	expandedPaths,
+	node,
+	onFileOpen,
+	onToggleFolder,
+}: {
+	depth: number;
+	diffByPath: Map<
+		string,
+		{ additions: number; deletions: number; status: string }
+	>;
+	expandedPaths: ReadonlySet<string>;
+	node: TreeNode;
+	onFileOpen: (path: string, persistent: boolean) => Promise<void>;
+	onToggleFolder: (path: string) => void;
+}) {
+	if (node.type === "directory") {
+		const open = expandedPaths.has(node.path);
+		const FolderIcon = open ? FolderOpenIcon : FolderClosedIcon;
+		return (
+			<div>
+				<button
+					type="button"
+					onClick={() => onToggleFolder(node.path)}
+					className="w-full flex items-center gap-1.5 px-3 py-1 text-[11px] text-text hover:bg-btn-hover transition-colors"
+					style={{ paddingLeft: `${depth * 14 + 12}px` }}
+				>
+					<ChevronRight
+						size={11}
+						className={`shrink-0 text-text-muted transition-transform ${open ? "rotate-90" : ""}`}
+					/>
+					<FolderIcon size={12} className="shrink-0 text-text-muted" />
+					<span className="truncate">{node.name}</span>
+				</button>
+				{open &&
+					Array.from(node.children.values())
+						.sort(compareTreeNodes)
+						.map((child) => (
+							<TreeRow
+								key={child.path}
+								depth={depth + 1}
+								diffByPath={diffByPath}
+								expandedPaths={expandedPaths}
+								node={child}
+								onFileOpen={onFileOpen}
+								onToggleFolder={onToggleFolder}
+							/>
+						))}
+			</div>
+		);
+	}
+
+	const Icon = fileIconForPath(node.path);
+	const diff = diffByPath.get(node.path) ?? null;
+
+	return (
+		<button
+			type="button"
+			onClick={() => {
+				void onFileOpen(node.path, false);
+			}}
+			onDoubleClick={() => {
+				void onFileOpen(node.path, true);
+			}}
+			className="w-full flex items-center justify-between gap-2 px-3 py-1 text-[11px] text-text hover:bg-btn-hover transition-colors"
+			style={{ paddingLeft: `${depth * 14 + 28}px` }}
+		>
+			<span className="min-w-0 flex items-center gap-2">
+				<span
+					className={`w-1.5 h-1.5 rounded-full ${
+						diff?.status === "added"
+							? "bg-emerald-400"
+							: diff?.status === "deleted"
+								? "bg-red-400"
+								: diff
+									? "bg-amber-300"
+									: "bg-border-hover"
+					}`}
+				/>
+				<Icon size={12} className="shrink-0 text-text-muted" />
+				<span className="truncate">{node.name}</span>
+			</span>
+			{diff && (
+				<span className="shrink-0 flex items-center gap-1 text-[10px] text-text-muted">
+					{diff.additions > 0 && (
+						<span className="text-emerald-400">+{diff.additions}</span>
+					)}
+					{diff.deletions > 0 && (
+						<span className="text-red-400">-{diff.deletions}</span>
+					)}
+				</span>
+			)}
+		</button>
+	);
+}
+
+function buildTree(entries: FileTreeEntry[]) {
+	const root: TreeNode = {
+		children: new Map(),
+		name: "",
+		path: "",
+		type: "directory",
+	};
+
+	for (const entry of entries) {
+		const segments = entry.path.split("/").filter(Boolean);
+		let current = root;
+		let currentPath = "";
+		for (const [index, segment] of segments.entries()) {
+			currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+			const isLeaf = index === segments.length - 1;
+			const existing = current.children.get(segment);
+			if (existing) {
+				current = existing;
+				continue;
+			}
+
+			const next: TreeNode = {
+				children: new Map(),
+				name: segment,
+				path: currentPath,
+				type: isLeaf ? "file" : "directory",
+			};
+			current.children.set(segment, next);
+			current = next;
+		}
+	}
+
+	return root;
+}
+
+function compareTreeNodes(left: TreeNode, right: TreeNode) {
+	if (left.type !== right.type) {
+		return left.type === "directory" ? -1 : 1;
+	}
+	return left.name.localeCompare(right.name);
+}
