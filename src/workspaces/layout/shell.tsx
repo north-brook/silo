@@ -2,9 +2,10 @@ import { useMutation, useMutationState } from "@tanstack/react-query";
 import { Globe, Plus, Terminal, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useMatch, useNavigate } from "react-router-dom";
-import { useSessionHosts } from "@/workspaces/hosts/provider";
-import { GitSidebarProvider } from "@/workspaces/git/context";
-import { GitSidebar } from "@/workspaces/git/sidebar";
+import { domFocusSnapshot } from "@/shared/lib/focus-debug";
+import { invoke } from "@/shared/lib/invoke";
+import { shortcutEvents } from "@/shared/lib/shortcuts";
+import { useShortcut } from "@/shared/lib/use-shortcut";
 import {
 	Dialog,
 	DialogContent,
@@ -16,8 +17,24 @@ import { CodexIcon } from "@/shared/ui/icons/codex";
 import { Loader } from "@/shared/ui/loader";
 import { toast } from "@/shared/ui/toaster";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import type { WorkspaceSession } from "@/workspaces/api";
+import {
+	type DisplayWorkspaceSession,
+	FileSessionsProvider,
+	useFileSessions,
+} from "@/workspaces/files/context";
+import { fileIconForPath } from "@/workspaces/files/icons";
+import { GitSidebarProvider, useGitSidebar } from "@/workspaces/git/context";
+import { GitSidebar } from "@/workspaces/git/sidebar";
+import { useSessionHosts } from "@/workspaces/hosts/provider";
 import { TopBar } from "@/workspaces/layout/top-bar";
 import { PromptDraftProvider } from "@/workspaces/prompt/draft";
+import { useWorkspaceRouteParams } from "@/workspaces/routes/params";
+import {
+	type SessionRouteState,
+	workspaceHref,
+	workspaceSessionHref,
+} from "@/workspaces/routes/paths";
 import {
 	RouteWorkspaceStateProvider,
 	useCloudSessions,
@@ -26,17 +43,6 @@ import {
 	useWorkspaceSessions,
 	useWorkspaceState,
 } from "@/workspaces/state";
-import {
-	type SessionRouteState,
-	workspaceHref,
-	workspaceSessionHref,
-} from "@/workspaces/routes/paths";
-import { useWorkspaceRouteParams } from "@/workspaces/routes/params";
-import { invoke } from "@/shared/lib/invoke";
-import { domFocusSnapshot } from "@/shared/lib/focus-debug";
-import { shortcutEvents } from "@/shared/lib/shortcuts";
-import { useShortcut } from "@/shared/lib/use-shortcut";
-import type { WorkspaceSession } from "@/workspaces/api";
 
 export function WorkspaceShell() {
 	const { project, workspaceName } = useWorkspaceRouteParams();
@@ -47,9 +53,11 @@ export function WorkspaceShell() {
 			workspaceName={workspaceName}
 		>
 			<PromptDraftProvider>
-				<GitSidebarProvider>
-					<WorkspaceShellInner />
-				</GitSidebarProvider>
+				<FileSessionsProvider>
+					<GitSidebarProvider>
+						<WorkspaceShellInner />
+					</GitSidebarProvider>
+				</FileSessionsProvider>
 			</PromptDraftProvider>
 		</RouteWorkspaceStateProvider>
 	);
@@ -100,6 +108,14 @@ function browserTabPresentation(session: WorkspaceSession) {
 	return { icon, label };
 }
 
+function fileTabPresentation(session: WorkspaceSession) {
+	const Icon = fileIconForPath(session.path ?? session.name);
+	return {
+		icon: <Icon size={12} />,
+		label: session.name.trim() || session.path?.trim() || "file",
+	};
+}
+
 function findLiveNeighbor(
 	sessions: WorkspaceSession[],
 	closingIndex: number,
@@ -120,19 +136,36 @@ function WorkspaceShellInner() {
 	const browserMatch = useMatch(
 		"/projects/:project/workspaces/:workspace/browser/:attachmentId",
 	);
+	const fileMatch = useMatch(
+		"/projects/:project/workspaces/:workspace/file/:attachmentId",
+	);
 	const terminalMatch = useMatch(
 		"/projects/:project/workspaces/:workspace/terminal/:attachmentId",
 	);
 	const { ensureWorkspaceSessions, removeSession } = useSessionHosts();
+	const { clearSession, getDisplaySessions } = useFileSessions();
 	const { invalidateWorkspace, workspace, workspaceName } = useWorkspaceState();
 	const project = useWorkspaceProject();
 	const isWorkspaceReady = useWorkspaceReady();
-	const sessions = useWorkspaceSessions();
+	const workspaceSessions = useWorkspaceSessions();
+	const sessions = useMemo(
+		() => getDisplaySessions(workspaceSessions),
+		[getDisplaySessions, workspaceSessions],
+	);
 	const cloudSessions = useCloudSessions();
 	const [newTabOpen, setNewTabOpen] = useState(false);
-	const activeKind = browserMatch ? "browser" : terminalMatch ? "terminal" : null;
+	const activeKind = browserMatch
+		? "browser"
+		: fileMatch
+			? "file"
+			: terminalMatch
+				? "terminal"
+				: null;
 	const activeAttachmentId =
-		browserMatch?.params.attachmentId ?? terminalMatch?.params.attachmentId ?? null;
+		browserMatch?.params.attachmentId ??
+		fileMatch?.params.attachmentId ??
+		terminalMatch?.params.attachmentId ??
+		null;
 	const currentWorkspaceHref = useMemo(
 		() => workspaceHref({ project, workspace: workspaceName }),
 		[project, workspaceName],
@@ -241,19 +274,32 @@ function WorkspaceShellInner() {
 
 	const killSession = useMutation({
 		mutationKey: ["kill-session", workspaceName],
-		mutationFn: (session: WorkspaceSession) =>
+		mutationFn: (session: DisplayWorkspaceSession) =>
 			session.type === "browser"
 				? invoke("browser_kill_tab", {
 						workspace: workspaceName,
 						attachmentId: session.attachment_id,
 					})
-				: invoke("terminal_kill_terminal", {
-						workspace: workspaceName,
-						attachmentId: session.attachment_id,
-					}),
+				: session.type === "file"
+					? invoke("files_close_session", {
+							workspace: workspaceName,
+							attachmentId:
+								session.persistentAttachmentId ?? session.attachment_id,
+						})
+					: invoke("terminal_kill_terminal", {
+							workspace: workspaceName,
+							attachmentId: session.attachment_id,
+						}),
 		onSuccess: (_, session) => {
 			invalidateWorkspace();
-			removeSession(workspaceName, session.type, session.attachment_id);
+			removeSession(
+				workspaceName,
+				session.type,
+				session.type === "file"
+					? (session.persistentAttachmentId ?? session.attachment_id)
+					: session.attachment_id,
+			);
+			clearSession(session.attachment_id);
 		},
 		onError: (error, session) => {
 			toast({
@@ -261,7 +307,9 @@ function WorkspaceShellInner() {
 				title:
 					session.type === "browser"
 						? "Failed to close browser"
-						: "Failed to close terminal",
+						: session.type === "file"
+							? "Failed to close file"
+							: "Failed to close terminal",
 				description: error.message,
 			});
 		},
@@ -273,7 +321,8 @@ function WorkspaceShellInner() {
 			status: "pending",
 		},
 		select: (mutation) =>
-			(mutation.state.variables as WorkspaceSession | undefined)?.attachment_id,
+			(mutation.state.variables as DisplayWorkspaceSession | undefined)
+				?.attachment_id,
 	});
 	const deletingIds = useMemo(
 		() => new Set(pendingKills.filter((id): id is string => !!id)),
@@ -281,7 +330,7 @@ function WorkspaceShellInner() {
 	);
 
 	const closeTab = useCallback(
-		(session: WorkspaceSession) => {
+		(session: DisplayWorkspaceSession) => {
 			if (deletingIds.has(session.attachment_id)) return;
 
 			const isActive =
@@ -310,6 +359,11 @@ function WorkspaceShellInner() {
 				}
 			}
 
+			if (session.preview) {
+				clearSession(session.attachment_id);
+				return;
+			}
+
 			killSession.mutate(session);
 		},
 		[
@@ -321,6 +375,7 @@ function WorkspaceShellInner() {
 			project,
 			workspaceName,
 			currentWorkspaceHref,
+			clearSession,
 			killSession,
 		],
 	);
@@ -633,7 +688,7 @@ function WorkspaceTab({
 	workspaceName,
 	project,
 }: {
-	session: WorkspaceSession;
+	session: DisplayWorkspaceSession;
 	isActive: boolean;
 	isDeleting: boolean;
 	onClose: () => void;
@@ -641,11 +696,22 @@ function WorkspaceTab({
 	project: string;
 }) {
 	const navigate = useNavigate();
+	const { getSessionState } = useFileSessions();
+	const { diff } = useGitSidebar();
+	const fileState = getSessionState(session.attachment_id);
+	const diffInfo =
+		session.type === "file" && session.path
+			? ([...(diff ? [diff.local, diff.remote] : [])]
+					.flatMap((section) => section.files)
+					.find((file) => file.path === session.path) ?? null)
+			: null;
 
 	const { icon, label } =
 		session.type === "browser"
 			? browserTabPresentation(session)
-			: terminalTabPresentation(session.name);
+			: session.type === "file"
+				? fileTabPresentation(session)
+				: terminalTabPresentation(session.name);
 
 	return (
 		<div
@@ -683,13 +749,38 @@ function WorkspaceTab({
 					? "bg-surface text-text-bright border-r-border-light border-b-surface"
 					: "text-text border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text-bright"
 			}`}
+			style={
+				session.type === "file"
+					? {
+							boxShadow: `inset 2px 0 0 ${
+								diffInfo?.status === "added"
+									? "rgba(52, 211, 153, 0.8)"
+									: diffInfo?.status === "deleted"
+										? "rgba(248, 113, 113, 0.8)"
+										: diffInfo
+											? "rgba(252, 211, 77, 0.8)"
+											: "rgba(30, 32, 40, 1)"
+							}`,
+						}
+					: undefined
+			}
 		>
 			{icon}
-			<span className="max-w-36 truncate">{label}</span>
+			<span className={`max-w-36 truncate ${session.preview ? "italic" : ""}`}>
+				{label}
+			</span>
 			{isDeleting ? (
 				<span className="p-0.5">
 					<Loader className="text-error" />
 				</span>
+			) : session.type === "file" && fileState.saving ? (
+				<span className="p-0.5">
+					<Loader className="text-accent" />
+				</span>
+			) : session.type === "file" && fileState.conflicted ? (
+				<span className="shrink-0 w-2 h-2 rounded-full bg-red-400" />
+			) : session.type === "file" && fileState.dirty ? (
+				<span className="shrink-0 w-2 h-2 rounded-full bg-amber-300" />
 			) : session.working ? (
 				<span className="p-0.5">
 					<Loader className="text-blue-400" />
