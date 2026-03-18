@@ -5,6 +5,7 @@ import {
 	info as pluginInfo,
 	warn as pluginWarn,
 } from "@tauri-apps/plugin-log";
+import { domFocusSnapshot } from "./focus-debug";
 
 type LogLevel = "debug" | "info" | "warn" | "error";
 type ConsoleMethod = "log" | "debug" | "info" | "warn" | "error";
@@ -42,10 +43,22 @@ export function initializeFrontendLogging() {
 	patchWebSocket();
 	window.addEventListener("error", handleWindowError);
 	window.addEventListener("unhandledrejection", handleUnhandledRejection);
+	window.addEventListener("focus", () => {
+		void writeLog(
+			"info",
+			`frontend window focus boot_id=${FRONTEND_BOOT_ID} href=${window.location.href} ${formatDomFocusDiagnostics()}`,
+		);
+	});
+	window.addEventListener("blur", () => {
+		void writeLog(
+			"info",
+			`frontend window blur boot_id=${FRONTEND_BOOT_ID} href=${window.location.href} ${formatDomFocusDiagnostics()}`,
+		);
+	});
 	document.addEventListener("visibilitychange", () => {
 		void writeLog(
 			"info",
-			`frontend visibilitychange boot_id=${FRONTEND_BOOT_ID} visibility=${document.visibilityState} href=${window.location.href}`,
+			`frontend visibilitychange boot_id=${FRONTEND_BOOT_ID} visibility=${document.visibilityState} href=${window.location.href} ${formatDomFocusDiagnostics()}`,
 		);
 	});
 	window.addEventListener("popstate", () => {
@@ -149,6 +162,11 @@ function normalizeInvokeParams<T>(
 		args: argsOrOptions as InvokeArgs | undefined,
 		options: {},
 	};
+}
+
+function formatDomFocusDiagnostics() {
+	const snapshot = domFocusSnapshot();
+	return `document_has_focus=${snapshot.documentHasFocus} active_element=${snapshot.activeElement}`;
 }
 
 function isInvokeOptions<T>(
