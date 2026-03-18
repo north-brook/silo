@@ -5,17 +5,22 @@
 use std::{
   borrow::Cow,
   io::{Cursor, Read},
-  sync::Arc,
+  sync::{Arc, OnceLock},
 };
 
 use cef::{rc::*, *};
+use cookie::SameSite;
 use dioxus_debug_cell::RefCell;
 use html5ever::{LocalName, interface::QualName, namespace_url, ns};
 use http::{
   HeaderMap, HeaderName, HeaderValue, Method, StatusCode,
-  header::{ACCEPT_ENCODING, CONNECTION, CONTENT_LENGTH, CONTENT_SECURITY_POLICY, CONTENT_TYPE},
+  header::{
+    ACCEPT_ENCODING, CONNECTION, CONTENT_LENGTH, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HOST,
+  },
 };
 use kuchiki::NodeRef;
+use rayon::ThreadPool;
+use rayon::ThreadPoolBuilder;
 use reqwest::blocking::Client;
 use tauri_runtime::webview::UriSchemeProtocolHandler;
 use tauri_utils::{
@@ -25,9 +30,6 @@ use tauri_utils::{
 use url::Url;
 
 use super::CefInitScript;
-
-const LOOPBACK_RESOLVER_ENV: &str = "SILO_BROWSER_LOOPBACK_RESOLVER_URL";
-
 type HttpResponse = Arc<RefCell<Option<http::Response<Cursor<Vec<u8>>>>>>;
 
 enum LoopbackResolution {
@@ -318,7 +320,7 @@ wrap_resource_handler! {
       response_length: Option<&mut i64>,
       redirect_url: Option<&mut CefString>,
     ) {
-      write_response_headers(&self.response, response, response_length, redirect_url);
+      write_response_headers(&self.response, response, response_length, redirect_url, true);
     }
   }
 }
@@ -335,12 +337,12 @@ wrap_resource_handler! {
       _request: Option<&mut Request>,
       callback: Option<&mut Callback>,
     ) -> ::std::os::raw::c_int {
-      let Some(callback) = callback else { return 0 };
+        let Some(callback) = callback else { return 0 };
 
       if let Some(fetch) = self.fetch.clone() {
         let callback = ThreadSafe(callback.clone());
         let response_store = ThreadSafe(self.response.clone());
-        std::thread::spawn(move || {
+        loopback_fetch_pool().spawn(move || {
           let response = fetch_loopback_response(fetch);
           response_store.into_owned().borrow_mut().replace(response);
           callback.into_owned().cont();
@@ -368,7 +370,7 @@ wrap_resource_handler! {
       response_length: Option<&mut i64>,
       redirect_url: Option<&mut CefString>,
     ) {
-      write_response_headers(&self.response, response, response_length, redirect_url);
+      write_response_headers(&self.response, response, response_length, redirect_url, false);
     }
   }
 }
@@ -433,77 +435,31 @@ fn resolve_loopback_request(webview_label: &str, original_url: &str) -> Loopback
     return LoopbackResolution::NotHandled;
   }
 
-  let Some(resolver_url) = std::env::var(LOOPBACK_RESOLVER_ENV).ok() else {
-    return LoopbackResolution::Error(
-      "browser loopback resolver is not configured".to_string(),
-    );
-  };
-
-  let client = match Client::builder()
-    .redirect(reqwest::redirect::Policy::none())
-    .danger_accept_invalid_certs(true)
-    .no_proxy()
-    .build()
-  {
-    Ok(client) => client,
-    Err(error) => {
-      return LoopbackResolution::Error(format!(
-        "failed to build loopback resolver client: {error}"
-      ));
-    }
-  };
-
-  let response = match client
-    .get(&resolver_url)
-    .query(&[("label", webview_label), ("url", original_url)])
-    .send()
-  {
-    Ok(response) => response,
-    Err(error) => {
-      return LoopbackResolution::Error(format!(
-        "failed to query browser loopback resolver: {error}"
-      ));
-    }
-  };
-
-  if response.status() == reqwest::StatusCode::NO_CONTENT {
-    return LoopbackResolution::NotHandled;
-  }
-
-  if !response.status().is_success() {
-    let status = response.status();
-    let body = response.text().unwrap_or_default();
-    return LoopbackResolution::Error(format!(
-      "browser loopback resolver returned {status}: {body}"
-    ));
-  }
-
-  match response.text() {
-    Ok(rewritten) if !rewritten.trim().is_empty() => LoopbackResolution::Rewritten(rewritten),
+  match crate::resolve_loopback_request_url(webview_label, original_url) {
+    Ok(Some(rewritten)) if !rewritten.trim().is_empty() => LoopbackResolution::Rewritten(rewritten),
     Ok(_) => LoopbackResolution::NotHandled,
-    Err(error) => LoopbackResolution::Error(format!(
-      "failed to read browser loopback resolver response: {error}"
-    )),
+    Err(error) => LoopbackResolution::Error(error),
   }
 }
 
 fn fetch_loopback_response(fetch: LoopbackFetchRequest) -> http::Response<Cursor<Vec<u8>>> {
-  let client = match Client::builder()
-    .redirect(reqwest::redirect::Policy::none())
-    .danger_accept_invalid_certs(true)
-    .no_proxy()
-    .build()
-  {
-    Ok(client) => client,
-    Err(error) => return error_response(format!("failed to build loopback client: {error}")),
-  };
-
   let mut headers = fetch.headers;
   headers.remove(CONTENT_LENGTH);
   headers.remove(ACCEPT_ENCODING);
   headers.remove(CONNECTION);
+  headers.remove(HOST);
+  headers.remove(HeaderName::from_static("forwarded"));
+  headers.remove(HeaderName::from_static("x-forwarded-for"));
+  headers.remove(HeaderName::from_static("x-forwarded-host"));
+  headers.remove(HeaderName::from_static("x-forwarded-port"));
+  headers.remove(HeaderName::from_static("x-forwarded-proto"));
+  headers.remove(HeaderName::from_static("x-forwarded-server"));
 
-  let mut request = client.request(fetch.method, &fetch.rewritten_url);
+  if let Some(host_header) = original_authority_header_value(&fetch.original_url) {
+    headers.insert(HOST, host_header);
+  }
+
+  let mut request = loopback_http_client().request(fetch.method, &fetch.rewritten_url);
   for (name, value) in &headers {
     request = request.header(name, value);
   }
@@ -523,6 +479,7 @@ fn fetch_loopback_response(fetch: LoopbackFetchRequest) -> http::Response<Cursor
 
   let status = upstream_response.status();
   let headers = upstream_response.headers().clone();
+  sync_loopback_response_cookies(&fetch.original_url, &headers);
   let body = match upstream_response.bytes() {
     Ok(body) => body.to_vec(),
     Err(error) => {
@@ -540,6 +497,105 @@ fn fetch_loopback_response(fetch: LoopbackFetchRequest) -> http::Response<Cursor
   response
     .body(Cursor::new(body))
     .unwrap_or_else(|error| error_response(format!("failed to build loopback response: {error}")))
+}
+
+fn loopback_http_client() -> &'static Client {
+  static CLIENT: OnceLock<Client> = OnceLock::new();
+  CLIENT.get_or_init(|| {
+    Client::builder()
+      .redirect(reqwest::redirect::Policy::none())
+      .danger_accept_invalid_certs(true)
+      .no_proxy()
+      .pool_max_idle_per_host(32)
+      .tcp_nodelay(true)
+      .build()
+      .expect("loopback http client should be valid")
+  })
+}
+
+fn loopback_fetch_pool() -> &'static ThreadPool {
+  static POOL: OnceLock<ThreadPool> = OnceLock::new();
+  POOL.get_or_init(|| {
+    let worker_count = std::thread::available_parallelism()
+      .map(|count| count.get().saturating_mul(2).clamp(4, 32))
+      .unwrap_or(8);
+    ThreadPoolBuilder::new()
+      .num_threads(worker_count)
+      .thread_name(|index| format!("silo-loopback-{index}"))
+      .build()
+      .expect("loopback fetch pool should be valid")
+  })
+}
+
+fn sync_loopback_response_cookies(original_url: &str, headers: &HeaderMap) {
+  let Some(manager) = cef::cookie_manager_get_global_manager(None) else {
+    return;
+  };
+  let cookie_url = cef::CefString::from(original_url);
+
+  for set_cookie in headers.get_all(http::header::SET_COOKIE) {
+    let Ok(set_cookie) = set_cookie.to_str() else {
+      continue;
+    };
+    let Ok(parsed) = cookie::Cookie::parse(set_cookie) else {
+      log::debug!("failed to parse loopback Set-Cookie header for {original_url}");
+      continue;
+    };
+
+    let mut cef_cookie = cef::Cookie {
+      name: cef::CefString::from(parsed.name()),
+      value: cef::CefString::from(parsed.value()),
+      ..Default::default()
+    };
+
+    if let Some(domain) = parsed.domain() {
+      cef_cookie.domain = cef::CefString::from(domain);
+    }
+    if let Some(path) = parsed.path() {
+      cef_cookie.path = cef::CefString::from(path);
+    }
+    if parsed.secure().unwrap_or(false) {
+      cef_cookie.secure = 1;
+    }
+    if parsed.http_only().unwrap_or(false) {
+      cef_cookie.httponly = 1;
+    }
+    cef_cookie.same_site = match parsed.same_site() {
+      Some(SameSite::Strict) => cef::CookieSameSite::STRICT_MODE,
+      Some(SameSite::Lax) => cef::CookieSameSite::LAX_MODE,
+      Some(SameSite::None) => cef::CookieSameSite::NO_RESTRICTION,
+      None => cef::CookieSameSite::UNSPECIFIED,
+    };
+
+    if let Some(expires) = parsed.expires().and_then(|expiration| expiration.datetime()) {
+      let mut cef_time = cef::Time::default();
+      if cef::time_from_doublet(expires.unix_timestamp_nanos() as f64 / 1_000_000_000.0, Some(&mut cef_time))
+        != 0
+      {
+        let mut basetime = cef::Basetime::default();
+        if cef::time_to_basetime(Some(&cef_time), Some(&mut basetime)) != 0 {
+          cef_cookie.has_expires = 1;
+          cef_cookie.expires = basetime;
+        }
+      }
+    }
+
+    let _ = manager.set_cookie(
+      Some(&cookie_url),
+      Some(&cef_cookie),
+      Option::<&mut cef::SetCookieCallback>::None,
+    );
+  }
+}
+
+fn original_authority_header_value(original_url: &str) -> Option<HeaderValue> {
+  let original_url = Url::parse(original_url).ok()?;
+  let host = original_url.host_str()?;
+  let authority = match original_url.port() {
+    Some(port) => format!("{host}:{port}"),
+    None => host.to_string(),
+  };
+  HeaderValue::from_str(&authority).ok()
 }
 
 fn error_response(message: String) -> http::Response<Cursor<Vec<u8>>> {
@@ -586,6 +642,7 @@ fn write_response_headers(
   response: Option<&mut Response>,
   response_length: Option<&mut i64>,
   redirect_url: Option<&mut CefString>,
+  force_no_store: bool,
 ) {
   let (Some(response), Some(response_data)) = (response, &*response_store.borrow()) else {
     return;
@@ -606,11 +663,13 @@ fn write_response_headers(
     }
   }
 
-  response.set_header_by_name(
-    Some(&"Cache-Control".into()),
-    Some(&"no-store".into()),
-    1,
-  );
+  if force_no_store {
+    response.set_header_by_name(
+      Some(&"Cache-Control".into()),
+      Some(&"no-store".into()),
+      1,
+    );
+  }
 
   let mime_type = content_type
     .as_ref()

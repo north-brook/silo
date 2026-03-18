@@ -36,7 +36,7 @@ use std::{
   fmt,
   fs::create_dir_all,
   sync::{
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
     atomic::AtomicBool,
     mpsc::{Sender, channel},
   },
@@ -52,6 +52,26 @@ mod cef_webview;
 mod utils;
 
 type DevToolsProtocolHandler = dyn Fn(DevToolsProtocol) + Send + Sync;
+pub type LoopbackRequestResolver =
+  Arc<dyn Fn(&str, &str) -> std::result::Result<Option<String>, String> + Send + Sync>;
+
+static LOOPBACK_REQUEST_RESOLVER: OnceLock<LoopbackRequestResolver> = OnceLock::new();
+
+pub fn set_loopback_request_resolver(
+  resolver: LoopbackRequestResolver,
+) -> std::result::Result<(), LoopbackRequestResolver> {
+  LOOPBACK_REQUEST_RESOLVER.set(resolver)
+}
+
+pub(crate) fn resolve_loopback_request_url(
+  webview_label: &str,
+  original_url: &str,
+) -> std::result::Result<Option<String>, String> {
+  let Some(resolver) = LOOPBACK_REQUEST_RESOLVER.get() else {
+    return Err("browser loopback resolver is not configured".to_string());
+  };
+  resolver(webview_label, original_url)
+}
 
 pub fn webview_version() -> Result<String> {
   Ok(format!(
