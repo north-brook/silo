@@ -40,26 +40,14 @@ function normalizeTerminalOutput(data: ArrayBuffer): Uint8Array {
 	return Uint8Array.from(normalized);
 }
 
-function writeTerminalChunk(term: Terminal, data: string | Uint8Array) {
-	return new Promise<void>((resolve) => {
-		term.write(data, resolve);
-	});
-}
-
 interface TerminalAttachResult {
 	terminal_id: string;
 	session: WorkspaceSession;
-	scrollback_vt: string;
-	scrollback_truncated: boolean;
 }
 
 interface TerminalSize {
 	cols: number;
 	rows: number;
-}
-
-function isAssistantSession(session: CloudSession) {
-	return session.name === "codex" || session.name === "claude";
 }
 
 interface TerminalExitPayload {
@@ -527,8 +515,6 @@ export function TerminalSessionHost({
 		const term = termRef.current;
 		const attachRunKey = attachNonce;
 		const shouldReconnect = pendingReconnectRef.current;
-		const shouldSkipScrollback =
-			isAssistantSession(session) || (!shouldReconnect && initialSkipScrollbackRef.current);
 
 		attachQueuedRef.current = false;
 		attachInFlightRef.current = true;
@@ -543,7 +529,6 @@ export function TerminalSessionHost({
 			attachNonce: attachRunKey,
 			cols: requestedSize.cols,
 			rows: requestedSize.rows,
-			skipInitialScrollback: shouldSkipScrollback,
 			reconnectAttempt: reconnectAttemptRef.current,
 		});
 
@@ -564,7 +549,6 @@ export function TerminalSessionHost({
 						attachmentId: session.attachmentId,
 						cols: requestedSize.cols,
 						rows: requestedSize.rows,
-						skipScrollback: shouldSkipScrollback,
 						output,
 					},
 				);
@@ -592,13 +576,6 @@ export function TerminalSessionHost({
 
 				term.reset();
 				lastResizeRef.current = null;
-
-				if (result.scrollback_vt) {
-					await writeTerminalChunk(term, result.scrollback_vt);
-					if (disposed) {
-						return;
-					}
-				}
 				await invoke("terminal_finish_attach", {
 					terminal: result.terminal_id,
 				});
