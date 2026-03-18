@@ -104,6 +104,7 @@ function NewWorkspaceDialog({
 					project: workspace.project ?? "",
 					workspace: workspace.name,
 				}),
+				{ state: { fresh: true } },
 			);
 			onOpenChange(false);
 		},
@@ -131,10 +132,7 @@ function NewWorkspaceDialog({
 
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
-			<DialogContent
-				onOpenAutoFocus={(e) => e.preventDefault()}
-				className="max-w-xs p-0 gap-0"
-			>
+			<DialogContent className="max-w-xs p-0 gap-0">
 				<DialogHeader className="p-4 pb-2">
 					<DialogTitle>New Workspace</DialogTitle>
 				</DialogHeader>
