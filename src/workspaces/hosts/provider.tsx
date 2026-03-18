@@ -7,12 +7,17 @@ import {
 	useRef,
 	useState,
 } from "react";
+import { BrowserSessionHost } from "@/workspaces/browser/host";
 import type { CloudSession } from "@/workspaces/hosts/model";
 import { cloudSessionKey } from "@/workspaces/hosts/model";
-import { BrowserSessionHost } from "@/workspaces/browser/host";
 import { TerminalSessionHost } from "@/workspaces/terminal/host";
 
-type CloudHostStatus = "idle" | "attaching" | "ready" | "error";
+type CloudHostStatus =
+	| "idle"
+	| "attaching"
+	| "ready"
+	| "reconnecting"
+	| "error";
 
 interface CloudHostRecord {
 	session: CloudSession;
@@ -22,6 +27,7 @@ interface CloudHostRecord {
 	terminalId: string | null;
 	portalUrl: string | null;
 	skipInitialScrollback: boolean;
+	retryNonce: number;
 }
 
 interface SessionHostContextValue {
@@ -45,6 +51,7 @@ interface SessionHostContextValue {
 		kind: string,
 		attachmentId: string,
 	) => void;
+	retrySession: (key: string | null) => void;
 	setActiveSession: (workspace: string | null, key: string | null) => void;
 }
 
@@ -66,6 +73,7 @@ function upsertHostRecord(
 			options?.skipInitialScrollback ??
 			existing?.skipInitialScrollback ??
 			false,
+		retryNonce: existing?.retryNonce ?? 0,
 	};
 }
 
@@ -240,6 +248,27 @@ export function SessionHostProvider({
 		[],
 	);
 
+	const retrySession = useCallback((key: string | null) => {
+		if (!key) {
+			return;
+		}
+
+		setHosts((previous) => {
+			const existing = previous[key];
+			if (!existing) {
+				return previous;
+			}
+
+			return {
+				...previous,
+				[key]: {
+					...existing,
+					retryNonce: existing.retryNonce + 1,
+				},
+			};
+		});
+	}, []);
+
 	const registerWorkspaceOutlet = useCallback(
 		(workspace: string, element: HTMLDivElement | null) => {
 			setWorkspaceOutlets((previous) => {
@@ -366,6 +395,7 @@ export function SessionHostProvider({
 			getHost,
 			registerWorkspaceOutlet,
 			removeSession,
+			retrySession,
 			setActiveSession,
 		}),
 		[
@@ -376,6 +406,7 @@ export function SessionHostProvider({
 			getHost,
 			registerWorkspaceOutlet,
 			removeSession,
+			retrySession,
 			setActiveSession,
 		],
 	);
@@ -403,6 +434,7 @@ export function SessionHostProvider({
 								target={target}
 								visible={isActive}
 								skipInitialScrollback={record.skipInitialScrollback}
+								retryNonce={record.retryNonce}
 								onFreshConsumed={() => consumeFreshFlag(record.key)}
 								onHostStateChange={(state) => updateHost(record.key, state)}
 							/>
