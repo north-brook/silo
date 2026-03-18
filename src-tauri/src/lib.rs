@@ -1,3 +1,4 @@
+mod bootstrap;
 mod browser;
 mod browser_loopback;
 mod claude;
@@ -9,6 +10,7 @@ mod git;
 mod logging;
 mod projects;
 mod prompts;
+mod remote;
 mod river_names;
 mod router;
 mod state;
