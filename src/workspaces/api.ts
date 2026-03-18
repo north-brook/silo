@@ -20,6 +20,7 @@ export interface WorkspaceSession {
 	type: string;
 	name: string;
 	attachment_id: string;
+	path?: string | null;
 	url?: string | null;
 	logical_url?: string | null;
 	resolved_url?: string | null;
@@ -42,9 +43,13 @@ export interface BranchWorkspace extends WorkspaceBase {
 	working: boolean | null;
 	terminals: WorkspaceSession[];
 	browsers: WorkspaceSession[];
+	files: WorkspaceSession[];
 }
 
 export interface TemplateWorkspace extends WorkspaceBase {
+	terminals: WorkspaceSession[];
+	browsers: WorkspaceSession[];
+	files: WorkspaceSession[];
 	template: true;
 }
 
@@ -69,7 +74,11 @@ export function workspaceSessions(workspace: Workspace): WorkspaceSession[] {
 		return [];
 	}
 
-	return [...workspace.terminals, ...workspace.browsers].sort((left, right) => {
+	return [
+		...workspace.terminals,
+		...workspace.browsers,
+		...workspace.files,
+	].sort((left, right) => {
 		const leftTimestamp = sessionTimestamp(left.attachment_id);
 		const rightTimestamp = sessionTimestamp(right.attachment_id);
 		if (leftTimestamp !== rightTimestamp) {
