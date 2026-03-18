@@ -4,9 +4,10 @@
 	"version": "0.1.0",
 	"type": "module",
 	"scripts": {
-		"dev": "next dev --port 3000",
-		"build": "next build",
-		"start": "next start --port 3000",
+		"dev": "vite",
+		"build": "bun x tsc --noEmit && vite build",
+		"preview": "vite preview",
+		"start": "vite preview",
 		"tauri": "cargo tauri",
 		"tauri:cef:install-cli": "cargo install tauri-cli --git https://github.com/tauri-apps/tauri --branch feat/cef",
 		"tauri:cef:update": "cargo update --manifest-path src-tauri/Cargo.toml && cargo install tauri-cli --git https://github.com/tauri-apps/tauri --branch feat/cef --force",
@@ -31,19 +32,21 @@
 		"@xterm/xterm": "^6.0.0",
 		"clsx": "^2.1.1",
 		"lucide-react": "^0.577.0",
-		"next": "^16.0.0",
 		"postcss": "^8.5.8",
 		"react": "^19.1.0",
 		"react-dom": "^19.1.0",
+		"react-router-dom": "^7.8.2",
 		"tailwind-merge": "^3.5.0",
 		"tailwindcss": "^4.2.1",
 		"tailwindcss-animate": "^1.0.7"
 	},
 	"devDependencies": {
+		"@vitejs/plugin-react": "^5.0.0",
 		"@types/bun": "latest",
 		"@types/node": "^24.3.0",
 		"@types/react": "^19.1.8",
 		"@types/react-dom": "^19.1.6",
-		"typescript": "~5.8.3"
+		"typescript": "~5.8.3",
+		"vite": "^7.1.3"
 	}
 }

@@ -4,7 +4,7 @@ Silo is a desktop app for working with cloud-hosted development workspaces. It g
 
 At a high level:
 
-- the frontend is a Next.js app
+- the frontend is a Vite app
 - the desktop shell and backend are Tauri + Rust
 - cloud workspaces are remote VMs managed through `gcloud`
 - a small Rust daemon, `workspace-observer`, runs inside each workspace VM and reports VM-side state back to the app
