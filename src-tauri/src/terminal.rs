@@ -1,7 +1,7 @@
-use crate::AppRuntime;
 use crate::config::ConfigStore;
 use crate::state::WorkspaceMetadataManager;
 use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
+use crate::AppRuntime;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -23,10 +23,9 @@ use uuid::Uuid;
 const TERMINAL_EXIT_EVENT: &str = "terminal://exit";
 const TERMINAL_ERROR_EVENT: &str = "terminal://error";
 const TERMINAL_DISCONNECT_EVENT: &str = "terminal://disconnect";
-const DEFAULT_TERMINAL_COLS: u16 = 80;
-const DEFAULT_TERMINAL_ROWS: u16 = 24;
 const MAX_SCROLLBACK_BYTES: usize = 512 * 1024;
 const MAX_ATTACHMENT_RECENT_OUTPUT_BYTES: usize = 16 * 1024;
+const MAX_ATTACHMENT_PENDING_OUTPUT_BYTES: usize = 512 * 1024;
 const ATTACH_COMMAND_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const ATTACH_RESERVATION_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const ATTACH_RESERVATION_WAIT_INTERVAL: Duration = Duration::from_millis(50);
@@ -85,6 +84,11 @@ pub struct TerminalReadResult {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TerminalFinishAttachResult {
+    flushed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct TerminalExitPayload {
     terminal_id: String,
     exit_code: u32,
@@ -116,11 +120,17 @@ struct Attachment {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
-    output: Mutex<Channel<Vec<u8>>>,
+    output_state: Mutex<AttachmentOutputState>,
     window_label: Mutex<String>,
     connected: Mutex<bool>,
     connected_cv: Condvar,
     recent_output: Mutex<Vec<u8>>,
+}
+
+struct AttachmentOutputState {
+    channel: Channel<Vec<u8>>,
+    ready: bool,
+    pending: Vec<u8>,
 }
 
 #[derive(Default)]
@@ -285,6 +295,8 @@ pub async fn terminal_attach_terminal(
     state: State<'_, TerminalManager>,
     workspace: String,
     attachment_id: String,
+    cols: u16,
+    rows: u16,
     skip_scrollback: Option<bool>,
     command: Option<String>,
     output: Channel<Vec<u8>>,
@@ -296,9 +308,11 @@ pub async fn terminal_attach_terminal(
     }
     let scrollback_mode = attach_scrollback_mode(skip_scrollback);
     log::info!(
-        "terminal attach start workspace={} attachment_id={} skip_scrollback={}",
+        "terminal attach start workspace={} attachment_id={} cols={} rows={} skip_scrollback={}",
         workspace,
         attachment_id,
+        cols,
+        rows,
         matches!(scrollback_mode, AttachScrollbackMode::Skip)
     );
     let key = AttachmentKey {
@@ -313,6 +327,8 @@ pub async fn terminal_attach_terminal(
                 existing,
                 &lookup,
                 &attachment_id,
+                cols,
+                rows,
                 scrollback_mode,
                 &window,
                 output,
@@ -333,6 +349,8 @@ pub async fn terminal_attach_terminal(
         state.inner().clone(),
         lookup.clone(),
         key,
+        cols,
+        rows,
         output,
         window.label().to_string(),
     )?;
@@ -358,6 +376,18 @@ pub async fn terminal_attach_terminal(
         scrollback_vt,
         scrollback_truncated,
     })
+}
+
+#[tauri::command]
+pub fn terminal_finish_attach(
+    state: State<'_, TerminalManager>,
+    terminal: String,
+) -> Result<TerminalFinishAttachResult, String> {
+    let attachment = state
+        .get_by_id(&terminal)
+        .ok_or_else(|| format!("terminal attachment not found: {terminal}"))?;
+    finish_attachment_output(&attachment)?;
+    Ok(TerminalFinishAttachResult { flushed: true })
 }
 
 #[tauri::command]
@@ -554,19 +584,36 @@ pub fn terminal_resize_terminal(
     Ok(())
 }
 
+fn resize_attachment(attachment: &Attachment, cols: u16, rows: u16) -> Result<(), String> {
+    let master = attachment
+        .master
+        .lock()
+        .map_err(|_| "terminal pty lock poisoned".to_string())?;
+    master
+        .resize(PtySize {
+            cols: cols.max(1),
+            rows: rows.max(1),
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|error| format!("failed to resize terminal: {error}"))
+}
+
 fn spawn_terminal_attachment(
     app: AppHandle<AppRuntime>,
     manager: TerminalManager,
     lookup: WorkspaceLookup,
     key: AttachmentKey,
+    cols: u16,
+    rows: u16,
     output: Channel<Vec<u8>>,
     window_label: String,
 ) -> Result<Arc<Attachment>, String> {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
-            cols: DEFAULT_TERMINAL_COLS,
-            rows: DEFAULT_TERMINAL_ROWS,
+            cols: cols.max(1),
+            rows: rows.max(1),
             pixel_width: 0,
             pixel_height: 0,
         })
@@ -608,7 +655,11 @@ fn spawn_terminal_attachment(
         master: Mutex::new(pair.master),
         writer: Mutex::new(writer),
         killer: Mutex::new(killer),
-        output: Mutex::new(output),
+        output_state: Mutex::new(AttachmentOutputState {
+            channel: output,
+            ready: false,
+            pending: Vec::new(),
+        }),
         window_label: Mutex::new(window_label),
         connected: Mutex::new(false),
         connected_cv: Condvar::new(),
@@ -631,18 +682,10 @@ fn spawn_reader_loop(mut reader: Box<dyn Read + Send>, attachment: Arc<Attachmen
                     mark_attachment_connected(&attachment);
                     let chunk = buffer[..count].to_vec();
                     record_attachment_output(&attachment, &chunk);
-                    if let Ok(channel) = attachment.output.lock() {
-                        if let Err(error) = channel.send(chunk) {
-                            emit_terminal_error(
-                                &attachment,
-                                format!("failed to send terminal output: {error}"),
-                            );
-                            break;
-                        }
-                    } else {
+                    if let Err(error) = push_attachment_output(&attachment, &chunk) {
                         emit_terminal_error(
                             &attachment,
-                            "terminal output lock poisoned".to_string(),
+                            format!("failed to send terminal output: {error}"),
                         );
                         break;
                     }
@@ -780,6 +823,64 @@ fn current_window_label(attachment: &Attachment) -> Option<String> {
         .map(|value| value.clone())
 }
 
+fn set_attachment_output_target(
+    attachment: &Attachment,
+    output: Channel<Vec<u8>>,
+    window_label: &str,
+) -> Result<(), String> {
+    let mut output_state = attachment
+        .output_state
+        .lock()
+        .map_err(|_| "terminal output lock poisoned".to_string())?;
+    output_state.channel = output;
+    output_state.ready = false;
+    drop(output_state);
+
+    let mut current_window = attachment
+        .window_label
+        .lock()
+        .map_err(|_| "terminal window label lock poisoned".to_string())?;
+    *current_window = window_label.to_string();
+    Ok(())
+}
+
+fn push_attachment_output(attachment: &Attachment, chunk: &[u8]) -> Result<(), String> {
+    let mut output_state = attachment
+        .output_state
+        .lock()
+        .map_err(|_| "terminal output lock poisoned".to_string())?;
+    if output_state.ready {
+        output_state
+            .channel
+            .send(chunk.to_vec())
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    output_state.pending.extend_from_slice(chunk);
+    if output_state.pending.len() > MAX_ATTACHMENT_PENDING_OUTPUT_BYTES {
+        let overflow = output_state.pending.len() - MAX_ATTACHMENT_PENDING_OUTPUT_BYTES;
+        output_state.pending.drain(..overflow);
+    }
+    Ok(())
+}
+
+fn finish_attachment_output(attachment: &Attachment) -> Result<(), String> {
+    let mut output_state = attachment
+        .output_state
+        .lock()
+        .map_err(|_| "terminal output lock poisoned".to_string())?;
+    if !output_state.pending.is_empty() {
+        let pending = std::mem::take(&mut output_state.pending);
+        output_state
+            .channel
+            .send(pending)
+            .map_err(|error| format!("failed to flush terminal output: {error}"))?;
+    }
+    output_state.ready = true;
+    Ok(())
+}
+
 fn record_attachment_output(attachment: &Attachment, chunk: &[u8]) {
     if let Ok(mut recent_output) = attachment.recent_output.lock() {
         recent_output.extend_from_slice(chunk);
@@ -835,20 +936,18 @@ async fn attach_existing_terminal(
     existing: Arc<Attachment>,
     lookup: &WorkspaceLookup,
     name: &str,
+    cols: u16,
+    rows: u16,
     scrollback_mode: AttachScrollbackMode,
     window: &Window<AppRuntime>,
     output: Channel<Vec<u8>>,
     command: Option<String>,
     attach_started: Instant,
 ) -> Result<TerminalAttachResult, String> {
+    resize_attachment(&existing, cols, rows)?;
     let (scrollback_vt, scrollback_truncated) =
         prepare_attach_scrollback(lookup, name, scrollback_mode).await?;
-    if let Ok(mut current_output) = existing.output.lock() {
-        *current_output = output;
-    }
-    if let Ok(mut current_window) = existing.window_label.lock() {
-        *current_window = window.label().to_string();
-    }
+    set_attachment_output_target(&existing, output, window.label().as_ref())?;
     if let Some(command) = command {
         queue_attach_command(existing.clone(), command);
     }
@@ -1208,12 +1307,9 @@ fn should_retry_template_bootstrap(error: &str) -> bool {
     }
 
     let lower = error.to_ascii_lowercase();
-    [
-        "system is booting up",
-        "not permitted to log in yet",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
+    ["system is booting up", "not permitted to log in yet"]
+        .iter()
+        .any(|needle| lower.contains(needle))
 }
 
 fn is_retryable_terminal_transport_error(error: &str) -> bool {
