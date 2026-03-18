@@ -16,6 +16,7 @@ export const shortcutEvents = {
 	goBackBrowser: "silo://go-back-browser",
 	goForwardBrowser: "silo://go-forward-browser",
 	refreshBrowser: "silo://refresh-browser",
+	toggleBrowserDevtools: "silo://toggle-browser-devtools",
 	previousTab: "silo://previous-tab",
 	nextTab: "silo://next-tab",
 	toggleProjectsBar: "silo://toggle-projects-bar",

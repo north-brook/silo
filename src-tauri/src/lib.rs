@@ -28,6 +28,7 @@ const MENU_ID_CLOSE_TAB: &str = "close_tab";
 const MENU_ID_GO_BACK_BROWSER: &str = "go_back_browser";
 const MENU_ID_GO_FORWARD_BROWSER: &str = "go_forward_browser";
 const MENU_ID_REFRESH_BROWSER: &str = "refresh_browser";
+const MENU_ID_TOGGLE_BROWSER_DEVTOOLS: &str = "toggle_browser_devtools";
 const MENU_ID_PREVIOUS_TAB: &str = "previous_tab";
 const MENU_ID_NEXT_TAB: &str = "next_tab";
 const MENU_ID_TOGGLE_PROJECTS_BAR: &str = "toggle_projects_bar";
@@ -47,6 +48,7 @@ const SHORTCUT_EVENT_CLOSE_TAB: &str = "silo://close-tab";
 const SHORTCUT_EVENT_GO_BACK_BROWSER: &str = "silo://go-back-browser";
 const SHORTCUT_EVENT_GO_FORWARD_BROWSER: &str = "silo://go-forward-browser";
 const SHORTCUT_EVENT_REFRESH_BROWSER: &str = "silo://refresh-browser";
+const SHORTCUT_EVENT_TOGGLE_BROWSER_DEVTOOLS: &str = "silo://toggle-browser-devtools";
 const SHORTCUT_EVENT_PREVIOUS_TAB: &str = "silo://previous-tab";
 const SHORTCUT_EVENT_NEXT_TAB: &str = "silo://next-tab";
 const SHORTCUT_EVENT_TOGGLE_PROJECTS_BAR: &str = "silo://toggle-projects-bar";
@@ -81,6 +83,9 @@ fn handle_shortcut_menu_event(app_handle: &AppHandle<AppRuntime>, menu_id: &str)
             emit_shortcut_event(app_handle, SHORTCUT_EVENT_GO_FORWARD_BROWSER)
         }
         MENU_ID_REFRESH_BROWSER => emit_shortcut_event(app_handle, SHORTCUT_EVENT_REFRESH_BROWSER),
+        MENU_ID_TOGGLE_BROWSER_DEVTOOLS => {
+            emit_shortcut_event(app_handle, SHORTCUT_EVENT_TOGGLE_BROWSER_DEVTOOLS)
+        }
         MENU_ID_PREVIOUS_TAB => emit_shortcut_event(app_handle, SHORTCUT_EVENT_PREVIOUS_TAB),
         MENU_ID_NEXT_TAB => emit_shortcut_event(app_handle, SHORTCUT_EVENT_NEXT_TAB),
         MENU_ID_TOGGLE_PROJECTS_BAR => {
@@ -203,6 +208,13 @@ pub fn run() {
                     true,
                     Some("CmdOrCtrl+R"),
                 )?;
+                let toggle_browser_devtools = MenuItem::with_id(
+                    handle,
+                    MENU_ID_TOGGLE_BROWSER_DEVTOOLS,
+                    "Toggle DevTools",
+                    true,
+                    Some("CmdOrCtrl+Shift+I"),
+                )?;
                 let previous_tab = MenuItem::with_id(
                     handle,
                     MENU_ID_PREVIOUS_TAB,
@@ -319,7 +331,12 @@ pub fn run() {
                     .build()?;
 
                 let browser_submenu = SubmenuBuilder::new(handle, "Browser")
-                    .items(&[&go_back_browser, &go_forward_browser, &refresh_browser])
+                    .items(&[
+                        &go_back_browser,
+                        &go_forward_browser,
+                        &refresh_browser,
+                        &toggle_browser_devtools,
+                    ])
                     .build()?;
 
                 let navigate_submenu = SubmenuBuilder::new(handle, "Navigate")
@@ -446,6 +463,7 @@ pub fn run() {
             browser::browser_go_forward,
             browser::browser_refresh_page,
             browser::browser_open_devtools,
+            browser::browser_toggle_devtools,
             terminal::terminal_create_terminal,
             terminal::terminal_create_assistant,
             terminal::terminal_list_terminals,

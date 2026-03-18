@@ -880,6 +880,12 @@ fn shortcut_from_key_event(event: &KeyEvent) -> Option<ShortcutDispatch<'static>
           payload_json: "null",
         });
       }
+      if shift && matches_shortcut_char([character, unmodified_character], &['i', 'I']) {
+        return Some(ShortcutDispatch {
+          event: "silo://toggle-browser-devtools",
+          payload_json: "null",
+        });
+      }
       None
     }
   }
