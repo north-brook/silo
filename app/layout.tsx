@@ -12,6 +12,7 @@ import { PromptDraftProvider } from "../components/prompt-context";
 import { ProjectsBar, ProjectsBarProvider } from "../components/projects-bar";
 import { Toaster } from "../components/toaster";
 import { TooltipProvider } from "../components/tooltip";
+import { WorkspaceStateProvider } from "../components/workspace-state";
 import { initializeFrontendLogging } from "../lib/invoke";
 
 export default function RootLayout({
@@ -38,21 +39,23 @@ export default function RootLayout({
 						<OverlayStateProvider>
 							<CloudProvider>
 								<PromptDraftProvider>
-									<GitBarProvider>
-										<ProjectsBarProvider>
-											<OpenProjectProvider>
-												<NewWorkspaceProvider>
-													<div className="flex flex-1 min-h-0">
-														<ProjectsBar />
-														<main className="flex-1 min-w-0 overflow-hidden flex flex-col">
-															{children}
-														</main>
-														<GitBar />
-													</div>
-												</NewWorkspaceProvider>
-											</OpenProjectProvider>
-										</ProjectsBarProvider>
-									</GitBarProvider>
+									<WorkspaceStateProvider>
+										<GitBarProvider>
+											<ProjectsBarProvider>
+												<OpenProjectProvider>
+													<NewWorkspaceProvider>
+														<div className="flex flex-1 min-h-0">
+															<ProjectsBar />
+															<main className="flex-1 min-w-0 overflow-hidden flex flex-col">
+																{children}
+															</main>
+															<GitBar />
+														</div>
+													</NewWorkspaceProvider>
+												</OpenProjectProvider>
+											</ProjectsBarProvider>
+										</GitBarProvider>
+									</WorkspaceStateProvider>
 								</PromptDraftProvider>
 							</CloudProvider>
 						</OverlayStateProvider>
