@@ -1,8 +1,89 @@
 use crate::cef_webview::CefBrowserExt;
 use cef::*;
+use objc2::ClassType;
 use objc2::rc::Retained;
-use objc2_app_kit::NSView;
+use objc2_app_kit::{NSResponder, NSView};
+use objc2_foundation::{NSObject, NSObjectProtocol};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+fn restore_window_first_responder(nsview: &NSView, reason: &str) {
+  let Some(window) = nsview.window() else {
+    log::info!(
+      "cef macos focus restore skipped reason={} browser_view={:p} state=no_window",
+      reason,
+      nsview
+    );
+    return;
+  };
+  let Some(first_responder) = window.firstResponder() else {
+    log::info!(
+      "cef macos focus restore skipped reason={} browser_view={:p} state=no_first_responder",
+      reason,
+      nsview
+    );
+    return;
+  };
+
+  let first_responder_ptr: *const NSResponder = &*first_responder;
+  let first_responder_object = unsafe { first_responder_ptr.cast::<NSObject>().as_ref() };
+  let Some(first_responder_object) = first_responder_object else {
+    log::info!(
+      "cef macos focus restore skipped reason={} browser_view={:p} state=invalid_first_responder_ptr",
+      reason,
+      nsview
+    );
+    return;
+  };
+
+  if !first_responder_object.isKindOfClass(NSView::class()) {
+    log::info!(
+      "cef macos focus restore skipped reason={} browser_view={:p} first_responder={:p} state=first_responder_not_view",
+      reason,
+      nsview,
+      &*first_responder
+    );
+    return;
+  }
+
+  let first_responder_view = unsafe { first_responder_ptr.cast::<NSView>().as_ref() };
+  let Some(first_responder_view) = first_responder_view else {
+    log::info!(
+      "cef macos focus restore skipped reason={} browser_view={:p} state=invalid_first_responder_view_ptr",
+      reason,
+      nsview
+    );
+    return;
+  };
+
+  if !std::ptr::eq(first_responder_view, nsview) && !first_responder_view.isDescendantOf(nsview) {
+    log::info!(
+      "cef macos focus restore skipped reason={} browser_view={:p} first_responder_view={:p} state=first_responder_outside_browser",
+      reason,
+      nsview,
+      first_responder_view
+    );
+    return;
+  }
+
+  if let Some(content_view) = window.contentView() {
+    let restored = window.makeFirstResponder(Some(&content_view));
+    log::info!(
+      "cef macos focus restore attempted reason={} browser_view={:p} first_responder_view={:p} content_view={:p} restored={}",
+      reason,
+      nsview,
+      first_responder_view,
+      &*content_view,
+      restored
+    );
+  } else {
+    log::warn!(
+      "cef macos focus restore skipped reason={} browser_view={:p} first_responder_view={:p} state=no_content_view",
+      reason,
+      nsview,
+      first_responder_view
+    );
+  }
+}
 
 impl CefBrowserExt for cef::Browser {
   fn nsview(&self) -> Option<objc2::rc::Retained<objc2_app_kit::NSView>> {
@@ -68,8 +149,11 @@ impl CefBrowserExt for cef::Browser {
     };
 
     if visible != 0 {
+      log::debug!("cef macos child view visible=true browser_view={:p}", &*nsview);
       nsview.setHidden(false);
     } else {
+      log::info!("cef macos child view visible=false browser_view={:p}", &*nsview);
+      restore_window_first_responder(&nsview, "set_visible_false");
       nsview.setHidden(true);
     }
   }
@@ -79,6 +163,8 @@ impl CefBrowserExt for cef::Browser {
       return;
     };
 
+    log::info!("cef macos child view close browser_view={:p}", &*nsview);
+    restore_window_first_responder(&nsview, "close");
     unsafe { nsview.removeFromSuperview() };
   }
 
