@@ -3,9 +3,9 @@ import { GitSidebarHeader } from "@/workspaces/git/header";
 import { GitSidebarTabs } from "@/workspaces/git/tabs";
 
 export function GitSidebar() {
-	const { isOpen, hasChanges, isInBranchWorkspace } = useGitSidebar();
+	const { isOpen, isInBranchWorkspace } = useGitSidebar();
 
-	if (!isOpen || !hasChanges || !isInBranchWorkspace) return null;
+	if (!isOpen || !isInBranchWorkspace) return null;
 
 	return (
 		<aside className="w-72 shrink-0 border-l border-border-light bg-bg flex flex-col">

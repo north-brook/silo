@@ -3,10 +3,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useGitSidebar } from "@/workspaces/git/context";
 
 export function GitSidebarToggle() {
-	const { isOpen, toggle, diff, hasChanges, isInBranchWorkspace } =
-		useGitSidebar();
+	const { isOpen, toggle, diff, isInBranchWorkspace } = useGitSidebar();
 
-	if (isOpen || !isInBranchWorkspace || !hasChanges) return null;
+	if (isOpen || !isInBranchWorkspace) return null;
 
 	const additions = diff?.overview.additions ?? 0;
 	const deletions = diff?.overview.deletions ?? 0;

@@ -1,12 +1,17 @@
-import { GitChecksStatusIndicator, GitChecksTab } from "@/workspaces/git/checks";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { GitFilesTab } from "@/workspaces/files/explorer";
+import {
+	GitChecksStatusIndicator,
+	GitChecksTab,
+} from "@/workspaces/git/checks";
 import { useGitSidebar } from "@/workspaces/git/context";
 import { GitDiffTab } from "@/workspaces/git/diff";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 export function GitSidebarTabs() {
 	const {
 		activeTab,
 		diff,
+		hasChanges,
 		openTab,
 		prStatus,
 		observation,
@@ -24,12 +29,33 @@ export function GitSidebarTabs() {
 					<TooltipTrigger asChild>
 						<button
 							type="button"
+							onClick={() => openTab("files")}
+							className={`h-9 flex items-center gap-1.5 px-3 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
+								activeTab === "files"
+									? "bg-surface text-text-bright border-r-border-light border-b-surface"
+									: "text-text-muted border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text"
+							}`}
+						>
+							Files
+						</button>
+					</TooltipTrigger>
+					<TooltipContent side="bottom">
+						<HotkeyHint keys={["⌘", "⇧", "E"]} />
+					</TooltipContent>
+				</Tooltip>
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<button
+							type="button"
 							onClick={() => openTab("diff")}
 							className={`h-9 flex items-center gap-1.5 px-3 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
 								activeTab === "diff"
 									? "bg-surface text-text-bright border-r-border-light border-b-surface"
-									: "text-text-muted border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text"
+									: hasChanges
+										? "text-text-muted border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text"
+										: "text-text-placeholder border-r-border-light border-b-border-light cursor-default"
 							}`}
+							disabled={!hasChanges}
 						>
 							Diff
 							<span className="text-emerald-400">+{additions}</span>
@@ -67,6 +93,7 @@ export function GitSidebarTabs() {
 				<div className="flex-1 h-9 border-b border-border-light" />
 			</div>
 			<div className="flex-1 overflow-y-auto bg-surface">
+				{activeTab === "files" && <GitFilesTab />}
 				{activeTab === "diff" && <GitDiffTab />}
 				{activeTab === "checks" && hasPr && (
 					<GitChecksTab

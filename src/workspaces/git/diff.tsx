@@ -1,5 +1,9 @@
+import { useNavigate } from "react-router-dom";
+import { useFileSessions } from "@/workspaces/files/context";
 import type { DiffFile, DiffSection } from "@/workspaces/git/api";
 import { useGitSidebar } from "@/workspaces/git/context";
+import { fileSessionHref } from "@/workspaces/routes/paths";
+import { useWorkspaceSessions } from "@/workspaces/state";
 
 export function GitDiffTab() {
 	const { diff } = useGitSidebar();
@@ -38,8 +42,32 @@ function DiffSectionView({
 }
 
 function DiffFileRow({ file }: { file: DiffFile }) {
+	const navigate = useNavigate();
+	const workspaceSessions = useWorkspaceSessions();
+	const { openFileTab } = useFileSessions();
+	const { workspace, project } = useGitSidebar();
+
 	return (
-		<div className="flex items-center justify-between px-3 py-1 text-[11px] hover:bg-btn-hover transition-colors">
+		<button
+			type="button"
+			onClick={() => {
+				void openFileTab({
+					path: file.path,
+					persistent: true,
+					workspace,
+					workspaceSessions,
+				}).then((result) => {
+					navigate(
+						fileSessionHref({
+							project,
+							workspace,
+							attachmentId: result.attachmentId,
+						}),
+					);
+				});
+			}}
+			className="w-full flex items-center justify-between px-3 py-1 text-[11px] hover:bg-btn-hover transition-colors text-left"
+		>
 			<span className="truncate min-w-0 text-text">{file.path}</span>
 			<span className="shrink-0 ml-2 text-text-muted">
 				{file.additions > 0 && (
@@ -50,6 +78,6 @@ function DiffFileRow({ file }: { file: DiffFile }) {
 					<span className="text-red-400">-{file.deletions}</span>
 				)}
 			</span>
-		</div>
+		</button>
 	);
 }

@@ -13,7 +13,7 @@ import {
 } from "@/workspaces/git/api";
 import { useWorkspaceProject, useWorkspaceState } from "@/workspaces/state";
 
-type GitSidebarTab = "diff" | "checks";
+type GitSidebarTab = "diff" | "files" | "checks";
 
 interface GitSidebarContextValue {
 	isOpen: boolean;
@@ -89,8 +89,16 @@ export function GitSidebarProvider({ children }: { children: ReactNode }) {
 	});
 
 	const [isOpen, setIsOpen] = useState(false);
-	const [activeTab, setActiveTab] = useState<GitSidebarTab>("diff");
-	const visibleTab = hasPr ? activeTab : "diff";
+	const [activeTab, setActiveTab] = useState<GitSidebarTab>("files");
+	const visibleTab = hasPr
+		? activeTab
+		: activeTab === "checks"
+			? hasChanges
+				? "diff"
+				: "files"
+			: activeTab === "diff" && !hasChanges
+				? "files"
+				: activeTab;
 
 	useShortcut<void>({
 		event: shortcutEvents.toggleGitBar,
@@ -127,6 +135,20 @@ export function GitSidebarProvider({ children }: { children: ReactNode }) {
 			if (e.key.toLowerCase() === "d") {
 				e.preventDefault();
 				openTab("diff");
+			}
+		},
+	});
+
+	useShortcut<void>({
+		event: shortcutEvents.openGitFiles,
+		onTrigger: () => {
+			openTab("files");
+		},
+		onKeyDown: (e) => {
+			if (!e.metaKey || !e.shiftKey || e.altKey || e.ctrlKey) return;
+			if (e.key.toLowerCase() === "e") {
+				e.preventDefault();
+				openTab("files");
 			}
 		},
 	});
