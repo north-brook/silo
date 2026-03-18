@@ -1,16 +1,11 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { Suspense, useEffect, useMemo } from "react";
 import { Loader } from "../../components/loader";
+import { useWorkspaceState } from "../../components/workspace-state";
 import { cloudSessionHref } from "../../lib/cloud";
-import { invoke } from "../../lib/invoke";
-import {
-	isTemplateWorkspace,
-	type Workspace,
-	workspaceSessions,
-} from "../../lib/workspaces";
+import { isTemplateWorkspace, workspaceSessions } from "../../lib/workspaces";
 import { PromptWorkspace } from "./prompt";
 import { TemplatingWorkspace } from "./templating";
 
@@ -24,38 +19,20 @@ export default function WorkspacePage() {
 
 function WorkspaceView() {
 	const router = useRouter();
-	const searchParams = useSearchParams();
-	const workspaceName = searchParams.get("name") ?? "";
-	const projectParam = searchParams.get("project") ?? "";
-
-	const workspace = useQuery({
-		queryKey: ["workspaces_get_workspace", workspaceName],
-		queryFn: () =>
-			invoke<Workspace>(
-				"workspaces_get_workspace",
-				{ workspace: workspaceName },
-				{
-					log: "state_changes_only",
-					key: `poll:workspaces_get_workspace:${workspaceName}`,
-				},
-			),
-		enabled: !!workspaceName,
-		refetchInterval: 2000,
-	});
+	const { project, workspace } = useWorkspaceState();
 
 	const redirectHref = useMemo(() => {
-		if (!workspace.data || isTemplateWorkspace(workspace.data)) {
+		if (!workspace || isTemplateWorkspace(workspace)) {
 			return null;
 		}
 
-		const project = projectParam || workspace.data.project || "";
-		const sessions = workspaceSessions(workspace.data);
-		const activeSession = workspace.data.active_session
+		const sessions = workspaceSessions(workspace);
+		const activeSession = workspace.active_session
 			? sessions.find(
 					(session) =>
-						session.type === workspace.data.active_session?.type &&
+						session.type === workspace.active_session?.type &&
 						session.attachment_id ===
-							workspace.data.active_session?.attachment_id,
+							workspace.active_session?.attachment_id,
 				)
 			: null;
 		const targetSession =
@@ -67,11 +44,11 @@ function WorkspaceView() {
 
 		return cloudSessionHref({
 			project,
-			workspace: workspace.data.name,
+			workspace: workspace.name,
 			kind: targetSession.type,
 			attachmentId: targetSession.attachment_id,
 		});
-	}, [projectParam, workspace.data]);
+	}, [project, workspace]);
 
 	useEffect(() => {
 		if (!redirectHref) {
@@ -80,7 +57,7 @@ function WorkspaceView() {
 		router.replace(redirectHref);
 	}, [redirectHref, router]);
 
-	if (!workspace.data) {
+	if (!workspace) {
 		return (
 			<div className="flex-1 flex items-center justify-center">
 				<Loader />
@@ -92,16 +69,16 @@ function WorkspaceView() {
 		return null;
 	}
 
-	const isRunning = workspace.data.status === "RUNNING";
+	const isRunning = workspace.status === "RUNNING";
 
-	if (isTemplateWorkspace(workspace.data)) {
+	if (isTemplateWorkspace(workspace)) {
 		return (
 			<TemplatingWorkspace
 				isRunning={isRunning}
-				ready={workspace.data.ready}
-				status={workspace.data.status}
-				workspace={workspace.data.name}
-				project={workspace.data.project}
+				ready={workspace.ready}
+				status={workspace.status}
+				workspace={workspace.name}
+				project={workspace.project}
 			/>
 		);
 	}
@@ -109,10 +86,10 @@ function WorkspaceView() {
 	return (
 		<PromptWorkspace
 			isRunning={isRunning}
-			ready={workspace.data.ready}
-			status={workspace.data.status}
-			workspace={workspace.data.name}
-			project={workspace.data.project}
+			ready={workspace.ready}
+			status={workspace.status}
+			workspace={workspace.name}
+			project={workspace.project}
 		/>
 	);
 }

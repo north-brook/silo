@@ -1,26 +1,17 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { listen } from "@tauri-apps/api/event";
+import { useMutation } from "@tanstack/react-query";
 import { ArrowLeft, ArrowRight, RotateCw } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { CloudDeck } from "../../../components/cloud";
 import { Loader } from "../../../components/loader";
 import { toast } from "../../../components/toaster";
-import {
-	type CloudSession,
-	normalizeWorkspaceSession,
-} from "../../../lib/cloud";
+import { useWorkspaceState } from "../../../components/workspace-state";
+import { type CloudSession } from "../../../lib/cloud";
 import { invoke } from "../../../lib/invoke";
 import { shortcutEvents } from "../../../lib/shortcuts";
 import { useShortcut } from "../../../lib/use-shortcut";
-import {
-	isTemplateWorkspace,
-	type Workspace,
-	type WorkspaceSession,
-	workspaceSessions,
-} from "../../../lib/workspaces";
 
 export default function WorkspaceSessionPage() {
 	return (
@@ -33,7 +24,7 @@ export default function WorkspaceSessionPage() {
 function WorkspaceSessionView() {
 	const router = useRouter();
 	const searchParams = useSearchParams();
-	const queryClient = useQueryClient();
+	const { cloudSessions, invalidateWorkspace, sessions } = useWorkspaceState();
 	const workspace = searchParams.get("workspace") ?? "";
 	const attachmentId = searchParams.get("attachment_id") ?? "";
 	const kind = searchParams.get("kind") ?? "";
@@ -49,65 +40,6 @@ function WorkspaceSessionView() {
 		router.replace(cleanUrl);
 	}, [cleanUrl, fresh, router]);
 
-	useEffect(() => {
-		if (!workspace) {
-			return;
-		}
-
-		let disposed = false;
-		let unlisten: (() => void | Promise<void>) | null = null;
-		const disposeListener = (
-			nextUnlisten: (() => void | Promise<void>) | null,
-		) => {
-			if (!nextUnlisten) {
-				return;
-			}
-
-			void Promise.resolve(nextUnlisten()).catch(() => {});
-		};
-		void listen<{ workspace: string }>("browser://state", (event) => {
-			if (disposed || event.payload.workspace !== workspace) {
-				return;
-			}
-			queryClient.invalidateQueries({
-				queryKey: ["workspaces_get_workspace", workspace],
-			});
-		}).then((nextUnlisten) => {
-			if (disposed) {
-				disposeListener(nextUnlisten);
-				return;
-			}
-			unlisten = nextUnlisten;
-		});
-
-		return () => {
-			disposed = true;
-			disposeListener(unlisten);
-		};
-	}, [queryClient, workspace]);
-
-	const workspaceQuery = useQuery({
-		queryKey: ["workspaces_get_workspace", workspace],
-		queryFn: () =>
-			invoke<Workspace>(
-				"workspaces_get_workspace",
-				{ workspace },
-				{
-					log: "state_changes_only",
-					key: `poll:workspaces_get_workspace:${workspace}`,
-				},
-			),
-		enabled: !!workspace,
-		refetchInterval: 2000,
-	});
-
-	const sessions = useMemo<WorkspaceSession[]>(
-		() =>
-			workspaceQuery.data && !isTemplateWorkspace(workspaceQuery.data)
-				? workspaceSessions(workspaceQuery.data)
-				: [],
-		[workspaceQuery.data],
-	);
 	const hasLiveSession = useMemo(
 		() =>
 			sessions.some(
@@ -115,11 +47,6 @@ function WorkspaceSessionView() {
 					session.type === kind && session.attachment_id === attachmentId,
 			),
 		[attachmentId, kind, sessions],
-	);
-	const cloudSessions = useMemo(
-		() =>
-			sessions.map((session) => normalizeWorkspaceSession(workspace, session)),
-		[sessions, workspace],
 	);
 	const activeSession = useMemo<CloudSession | null>(() => {
 		if (!workspace || !attachmentId || !kind) {
@@ -152,11 +79,17 @@ function WorkspaceSessionView() {
 			return;
 		}
 
-		void invoke("workspaces_set_active_session", {
-			workspace,
-			kind,
-			attachmentId,
-		});
+		const timeout = window.setTimeout(() => {
+			void invoke("workspaces_set_active_session", {
+				workspace,
+				kind,
+				attachmentId,
+			});
+		}, 200);
+
+		return () => {
+			window.clearTimeout(timeout);
+		};
 	}, [attachmentId, hasLiveSession, kind, workspace]);
 
 	if (!workspace || !attachmentId || !kind || !activeSession) {
@@ -191,11 +124,7 @@ function WorkspaceSessionView() {
 				key={`${activeSession.workspace}:${activeSession.attachmentId}`}
 				session={activeSession}
 				autoFocusAddress={!hasUrl}
-				onChanged={() =>
-					queryClient.invalidateQueries({
-						queryKey: ["workspaces_get_workspace", workspace],
-					})
-				}
+				onChanged={invalidateWorkspace}
 			/>
 			{hasUrl && (
 				<CloudDeck

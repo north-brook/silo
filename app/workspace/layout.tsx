@@ -3,8 +3,6 @@
 import {
 	useMutation,
 	useMutationState,
-	useQuery,
-	useQueryClient,
 } from "@tanstack/react-query";
 import { Globe, Plus, Terminal, X } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
@@ -26,16 +24,12 @@ import {
 	TooltipTrigger,
 } from "../../components/tooltip";
 import { TopBar } from "../../components/top-bar";
-import { cloudSessionHref, normalizeWorkspaceSession } from "../../lib/cloud";
+import { useWorkspaceState } from "../../components/workspace-state";
+import { cloudSessionHref } from "../../lib/cloud";
 import { invoke } from "../../lib/invoke";
 import { shortcutEvents } from "../../lib/shortcuts";
 import { useShortcut } from "../../lib/use-shortcut";
-import {
-	isTemplateWorkspace,
-	type Workspace,
-	type WorkspaceSession,
-	workspaceSessions,
-} from "../../lib/workspaces";
+import { type WorkspaceSession } from "../../lib/workspaces";
 
 export default function WorkspaceLayout({
 	children,
@@ -125,32 +119,19 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 	const searchParams = useSearchParams();
 	const pathname = usePathname();
 	const router = useRouter();
-	const queryClient = useQueryClient();
 	const { ensureWorkspaceSessions, removeSession } = useCloud();
+	const {
+		cloudSessions,
+		invalidateWorkspace,
+		isWorkspaceReady,
+		project,
+		sessions,
+		workspace,
+		workspaceName,
+	} = useWorkspaceState();
 	const [newTabOpen, setNewTabOpen] = useState(false);
-	const workspaceName =
-		searchParams.get("name") ?? searchParams.get("workspace") ?? "";
 	const activeKind = searchParams.get("kind");
 	const activeAttachmentId = searchParams.get("attachment_id");
-	const projectParam = searchParams.get("project") ?? "";
-
-	const workspace = useQuery({
-		queryKey: ["workspaces_get_workspace", workspaceName],
-		queryFn: () =>
-			invoke<Workspace>(
-				"workspaces_get_workspace",
-				{ workspace: workspaceName },
-				{
-					log: "state_changes_only",
-					key: `poll:workspaces_get_workspace:${workspaceName}`,
-				},
-			),
-		enabled: !!workspaceName,
-		refetchInterval: 2000,
-	});
-	const isWorkspaceReady =
-		workspace.data?.status === "RUNNING" && workspace.data?.ready === true;
-	const project = projectParam || workspace.data?.project || "";
 	const workspaceHref = useMemo(() => {
 		const params = new URLSearchParams({ name: workspaceName });
 		if (project) {
@@ -187,20 +168,6 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 		return true;
 	}, [activeAttachmentId, activeKind, pathname, project, workspaceName]);
 
-	const sessions = useMemo<WorkspaceSession[]>(
-		() =>
-			workspace.data && !isTemplateWorkspace(workspace.data)
-				? workspaceSessions(workspace.data)
-				: [],
-		[workspace.data],
-	);
-	const cloudSessions = useMemo(
-		() =>
-			sessions.map((session) =>
-				normalizeWorkspaceSession(workspaceName, session),
-			),
-		[sessions, workspaceName],
-	);
 	useEffect(() => {
 		if (!workspaceName || !isWorkspaceReady) {
 			return;
@@ -215,9 +182,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 			}),
 		onSuccess: (result) => {
 			setNewTabOpen(false);
-			queryClient.invalidateQueries({
-				queryKey: ["workspaces_get_workspace", workspaceName],
-			});
+			invalidateWorkspace();
 			router.push(
 				cloudSessionHref({
 					project,
@@ -245,9 +210,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 			}),
 		onSuccess: (result) => {
 			setNewTabOpen(false);
-			queryClient.invalidateQueries({
-				queryKey: ["workspaces_get_workspace", workspaceName],
-			});
+			invalidateWorkspace();
 			router.push(
 				cloudSessionHref({
 					project,
@@ -274,9 +237,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 			}),
 		onSuccess: (result) => {
 			setNewTabOpen(false);
-			queryClient.invalidateQueries({
-				queryKey: ["workspaces_get_workspace", workspaceName],
-			});
+			invalidateWorkspace();
 			router.push(
 				cloudSessionHref({
 					project,
@@ -314,9 +275,7 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 						attachmentId: session.attachment_id,
 					}),
 		onSuccess: (_, session) => {
-			queryClient.invalidateQueries({
-				queryKey: ["workspaces_get_workspace", workspaceName],
-			});
+			invalidateWorkspace();
 			removeSession(workspaceName, session.type, session.attachment_id);
 		},
 		onError: (error, session) => {
@@ -554,8 +513,8 @@ function WorkspaceLayoutInner({ children }: { children: React.ReactNode }) {
 
 	return (
 		<>
-			{workspace.data ? (
-				<TopBar workspace={workspace.data} />
+			{workspace ? (
+				<TopBar workspace={workspace} />
 			) : (
 				<header className="h-9 w-full border-b border-border-light shrink-0 flex items-center relative">
 					<div data-tauri-drag-region className="absolute inset-0" />
