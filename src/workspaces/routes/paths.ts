@@ -45,6 +45,18 @@ export function terminalSessionHref({
 	return `${workspaceHref({ project, workspace })}/terminal/${encodePathSegment(attachmentId)}`;
 }
 
+export function fileSessionHref({
+	project,
+	workspace,
+	attachmentId,
+}: {
+	project: string;
+	workspace: string;
+	attachmentId: string;
+}): string {
+	return `${workspaceHref({ project, workspace })}/file/${encodePathSegment(attachmentId)}`;
+}
+
 export function workspaceSessionHref({
 	project,
 	workspace,
@@ -58,6 +70,10 @@ export function workspaceSessionHref({
 }): string {
 	if (kind === "browser") {
 		return browserSessionHref({ project, workspace, attachmentId });
+	}
+
+	if (kind === "file") {
+		return fileSessionHref({ project, workspace, attachmentId });
 	}
 
 	return terminalSessionHref({ project, workspace, attachmentId });

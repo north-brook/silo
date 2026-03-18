@@ -1,20 +1,21 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { domFocusSnapshot } from "@/shared/lib/focus-debug";
+import { invoke } from "@/shared/lib/invoke";
 import { BrowserSessionView } from "@/workspaces/browser/view";
+import { WorkspaceFileSessionView } from "@/workspaces/files/view";
 import type { CloudSession } from "@/workspaces/hosts/model";
+import { useWorkspaceSessionRouteParams } from "@/workspaces/routes/params";
+import {
+	type SessionRouteState,
+	workspaceSessionHref,
+} from "@/workspaces/routes/paths";
 import {
 	useCloudSessions,
 	useWorkspaceSessions,
 	useWorkspaceState,
 } from "@/workspaces/state";
 import { TerminalSessionView } from "@/workspaces/terminal/view";
-import { invoke } from "@/shared/lib/invoke";
-import { domFocusSnapshot } from "@/shared/lib/focus-debug";
-import {
-	type SessionRouteState,
-	workspaceSessionHref,
-} from "@/workspaces/routes/paths";
-import { useWorkspaceSessionRouteParams } from "@/workspaces/routes/params";
 
 export function WorkspaceBrowserSessionPage() {
 	return <WorkspaceSessionView kind="browser" />;
@@ -22,6 +23,10 @@ export function WorkspaceBrowserSessionPage() {
 
 export function WorkspaceTerminalSessionPage() {
 	return <WorkspaceSessionView kind="terminal" />;
+}
+
+export function WorkspaceFileSessionPage() {
+	return <WorkspaceFileSessionView />;
 }
 
 function WorkspaceSessionView({ kind }: { kind: "browser" | "terminal" }) {
