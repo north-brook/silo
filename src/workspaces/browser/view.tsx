@@ -4,9 +4,11 @@ import { BrowserSessionHeader } from "@/workspaces/browser/header";
 
 export function BrowserSessionView({
 	session,
+	autoFocusAddress,
 	onChanged,
 }: {
 	session: CloudSession;
+	autoFocusAddress?: boolean;
 	onChanged: () => void;
 }) {
 	const hasUrl = !!session.url;
@@ -16,7 +18,7 @@ export function BrowserSessionView({
 			<BrowserSessionHeader
 				key={`${session.workspace}:${session.attachmentId}`}
 				session={session}
-				autoFocusAddress={!hasUrl}
+				autoFocusAddress={autoFocusAddress === true || !hasUrl}
 				onChanged={onChanged}
 			/>
 			{hasUrl && (

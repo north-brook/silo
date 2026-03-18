@@ -22,10 +22,13 @@ export function BrowserSessionHeader({
 	const [isEditingAddress, setIsEditingAddress] = useState(autoFocusAddress);
 
 	useEffect(() => {
-		if (autoFocusAddress) {
-			inputRef.current?.focus();
+		if (!autoFocusAddress) {
+			return;
 		}
-	}, [autoFocusAddress]);
+
+		inputRef.current?.focus();
+		inputRef.current?.select();
+	}, [autoFocusAddress, session.attachmentId, session.workspace]);
 
 	const navigate = useMutation({
 		mutationFn: (url: string) =>

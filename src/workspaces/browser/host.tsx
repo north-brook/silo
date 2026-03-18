@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { domFocusSnapshot } from "@/shared/lib/focus-debug";
 import type { CloudSession } from "@/workspaces/hosts/model";
 import { invoke } from "@/shared/lib/invoke";
 import { useOverlayOpen } from "@/shared/ui/overlay-state";
@@ -11,6 +12,13 @@ interface BrowserViewport {
 	width: number;
 	height: number;
 }
+
+const HIDDEN_VIEWPORT: BrowserViewport = {
+	x: -20_000,
+	y: 0,
+	width: 1,
+	height: 1,
+};
 
 export function BrowserSessionHost({
 	session,
@@ -39,8 +47,62 @@ export function BrowserSessionHost({
 		onHostStateChangeRef.current = onHostStateChange;
 	}, [onHostStateChange]);
 
+	const concealBrowserTab = useEffectEvent(
+		(
+			cancelled: boolean,
+			reason: "workspace-inactive" | "overlay-open",
+		) => {
+		if (!ensuredRef.current) {
+			return;
+		}
+
+		console.info("browser host conceal requested", {
+			workspace: session.workspace,
+			attachmentId: session.attachmentId,
+			reason,
+			overlayOpen,
+			workspaceActive,
+			visible,
+			effectiveVisible,
+			...domFocusSnapshot(),
+		});
+
+		const hiddenViewportKey = JSON.stringify({
+			viewport: HIDDEN_VIEWPORT,
+			visible: false,
+		});
+		void invoke("browser_resize_tab", {
+			workspace: session.workspace,
+			attachmentId: session.attachmentId,
+			viewport: HIDDEN_VIEWPORT,
+			visible: false,
+		})
+			.then(() => {
+				if (cancelled) {
+					return;
+				}
+				lastViewportRef.current = hiddenViewportKey;
+				console.info("browser host concealed", {
+					workspace: session.workspace,
+					attachmentId: session.attachmentId,
+					reason,
+					...domFocusSnapshot(),
+				});
+			})
+			.catch((error: Error) => {
+				if (cancelled) {
+					return;
+				}
+				onHostStateChangeRef.current({
+					status: "error",
+					errorMessage: error.message,
+				});
+			});
+		},
+	);
+
 	useEffect(() => {
-		if (ensured || !target || !workspaceActive) {
+		if (ensured || !target || !workspaceActive || !effectiveVisible) {
 			return;
 		}
 
@@ -56,6 +118,13 @@ export function BrowserSessionHost({
 			width: rect.width,
 			height: rect.height,
 		};
+		console.info("browser host mount start", {
+			workspace: session.workspace,
+			attachmentId: session.attachmentId,
+			viewport,
+			effectiveVisible,
+			...domFocusSnapshot(),
+		});
 		onHostStateChangeRef.current({ status: "attaching", errorMessage: null });
 		void invoke("browser_mount_tab", {
 			workspace: session.workspace,
@@ -69,6 +138,12 @@ export function BrowserSessionHost({
 				}
 				ensuredRef.current = true;
 				setEnsured(true);
+				console.info("browser host mount ready", {
+					workspace: session.workspace,
+					attachmentId: session.attachmentId,
+					effectiveVisible,
+					...domFocusSnapshot(),
+				});
 				onHostStateChangeRef.current({ status: "ready", errorMessage: null });
 			})
 			.catch((error: Error) => {
@@ -98,7 +173,7 @@ export function BrowserSessionHost({
 			if (!ensuredRef.current) {
 				return;
 			}
-			void invoke("browser_unmount_tab", {
+			void invoke("browser_detach_tab", {
 				workspace: session.workspace,
 				attachmentId: session.attachmentId,
 			});
@@ -117,18 +192,7 @@ export function BrowserSessionHost({
 
 		if (!workspaceActive || !target) {
 			unmountTimer = window.setTimeout(() => {
-				void invoke("browser_unmount_tab", {
-					workspace: session.workspace,
-					attachmentId: session.attachmentId,
-				}).catch((error: Error) => {
-					if (cancelled) {
-						return;
-					}
-					onHostStateChangeRef.current({
-						status: "error",
-						errorMessage: error.message,
-					});
-				});
+				concealBrowserTab(cancelled, "workspace-inactive");
 			}, 150);
 			return () => {
 				cancelled = true;
@@ -139,30 +203,7 @@ export function BrowserSessionHost({
 		}
 
 		if (!effectiveVisible) {
-			const viewport: BrowserViewport = {
-				x: -20_000,
-				y: 0,
-				width: 1,
-				height: 1,
-			};
-			const viewportKey = JSON.stringify({ viewport, visible: false });
-			if (lastViewportRef.current !== viewportKey) {
-				lastViewportRef.current = viewportKey;
-				void invoke("browser_resize_tab", {
-					workspace: session.workspace,
-					attachmentId: session.attachmentId,
-					viewport,
-					visible: false,
-				}).catch((error: Error) => {
-					if (cancelled) {
-						return;
-					}
-					onHostStateChangeRef.current({
-						status: "error",
-						errorMessage: error.message,
-					});
-				});
-			}
+			concealBrowserTab(cancelled, "overlay-open");
 			return () => {
 				cancelled = true;
 			};
@@ -231,6 +272,7 @@ export function BrowserSessionHost({
 			resizeObserver?.disconnect();
 		};
 	}, [
+		concealBrowserTab,
 		ensured,
 		session.attachmentId,
 		session.workspace,
