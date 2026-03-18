@@ -2,7 +2,8 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
@@ -34,6 +35,7 @@ const TERMINAL_LAST_WORKING_METADATA_KEY: &str = "terminal-last-working";
 const TERMINAL_SESSION_METADATA_PREFIX: &str = "terminal-session-";
 const TERMINAL_UNREAD_METADATA_KEY: &str = "terminal-unread";
 const TERMINAL_WORKING_METADATA_KEY: &str = "terminal-working";
+const WORKSPACE_ROOT: &str = "/home/silo/workspace";
 
 fn main() {
     if let Err(error) = run() {
@@ -53,6 +55,11 @@ fn run() -> Result<(), String> {
         "emit" => run_emit(&args[1..]),
         "mark-read" => run_mark_read(&args[1..]),
         "assistant-proxy" => run_assistant_proxy(&args[1..]),
+        "files-tree" => run_files_tree(),
+        "files-read" => run_files_read(&args[1..]),
+        "files-write" => run_files_write(&args[1..]),
+        "files-sync-watch-set" => run_files_sync_watch_set(),
+        "files-watch-state" => run_files_watch_state(),
         other => Err(format!("unknown command: {other}")),
     }
 }
@@ -86,6 +93,7 @@ fn run_daemon(args: &[String]) -> Result<(), String> {
         if let Err(error) = reconcile_live_sessions(&mut state) {
             eprintln!("workspace-observer: failed to list zmx sessions: {error}");
         }
+        reconcile_watched_files(&mut state);
         state.branch = read_workspace_branch();
         persist_state(&runtime.state_file, &state)?;
 
@@ -240,6 +248,69 @@ fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
     process::exit(code as i32);
 }
 
+fn run_files_tree() -> Result<(), String> {
+    write_json_stdout(&list_workspace_files()?)
+}
+
+fn run_files_read(args: &[String]) -> Result<(), String> {
+    let path = normalize_repo_relative_path(required_flag_value(args, "--path")?)?;
+    write_json_stdout(&read_workspace_file(&path)?)
+}
+
+fn run_files_write(args: &[String]) -> Result<(), String> {
+    let path = normalize_repo_relative_path(required_flag_value(args, "--path")?)?;
+    let expected_revision = required_flag_value(args, "--expected-revision")?.trim();
+    if expected_revision.is_empty() {
+        return Err("file expected revision must not be empty".to_string());
+    }
+
+    let mut content = String::new();
+    io::stdin()
+        .read_to_string(&mut content)
+        .map_err(|error| format!("failed to read file write stdin: {error}"))?;
+    write_json_stdout(&write_workspace_file(&path, expected_revision, &content)?)
+}
+
+fn run_files_sync_watch_set() -> Result<(), String> {
+    let mut payload = String::new();
+    io::stdin()
+        .read_to_string(&mut payload)
+        .map_err(|error| format!("failed to read watch set stdin: {error}"))?;
+    let paths = if payload.trim().is_empty() {
+        Vec::new()
+    } else {
+        serde_json::from_str::<Vec<String>>(&payload)
+            .map_err(|error| format!("invalid watch set json: {error}"))?
+    };
+    let mut normalized = BTreeSet::new();
+    for path in paths {
+        normalized.insert(normalize_repo_relative_path(&path)?);
+    }
+    send_event(
+        &RuntimePaths::new().fifo,
+        &ObserverEvent::FilesWatchSet {
+            paths: normalized.into_iter().collect(),
+        },
+    )
+}
+
+fn run_files_watch_state() -> Result<(), String> {
+    let state = load_state(&RuntimePaths::new().state_file).unwrap_or_default();
+    let mut entries = state
+        .files
+        .watched
+        .into_iter()
+        .map(|(path, state)| FileWatchEntry {
+            path,
+            exists: state.exists,
+            binary: state.binary,
+            revision: state.revision,
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    write_json_stdout(&entries)
+}
+
 fn spawn_passthrough(command: Vec<String>) -> Result<(), String> {
     let status = Command::new(&command[0])
         .args(&command[1..])
@@ -353,6 +424,23 @@ struct ObserverState {
     last_working: Option<String>,
     #[serde(default)]
     sessions: BTreeMap<String, SessionState>,
+    #[serde(default)]
+    files: FilesState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct FilesState {
+    #[serde(default)]
+    watch_paths: BTreeSet<String>,
+    #[serde(default)]
+    watched: BTreeMap<String, WatchedFileState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+struct WatchedFileState {
+    exists: bool,
+    binary: bool,
+    revision: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -463,6 +551,45 @@ enum ObserverEvent {
     MarkRead {
         session: String,
     },
+    FilesWatchSet {
+        paths: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct FileTreeEntry {
+    path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct FileReadResult {
+    path: String,
+    exists: bool,
+    binary: bool,
+    revision: String,
+    content: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum FileWriteStatus {
+    Saved,
+    Conflict,
+    Missing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct FileWriteResult {
+    status: FileWriteStatus,
+    revision: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct FileWatchEntry {
+    path: String,
+    exists: bool,
+    binary: bool,
+    revision: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -537,6 +664,13 @@ fn apply_event(state: &mut ObserverState, event: ObserverEvent) {
                 session_state.unread = false;
             }
         }
+        ObserverEvent::FilesWatchSet { paths } => {
+            state.files.watch_paths = paths.into_iter().collect();
+            state
+                .files
+                .watched
+                .retain(|path, _| state.files.watch_paths.contains(path));
+        }
     }
 }
 
@@ -544,6 +678,32 @@ fn reconcile_live_sessions(state: &mut ObserverState) -> Result<(), String> {
     let live_sessions = list_zmx_sessions()?;
     reconcile_sessions(state, &live_sessions);
     Ok(())
+}
+
+fn reconcile_watched_files(state: &mut ObserverState) {
+    let paths = state.files.watch_paths.iter().cloned().collect::<Vec<_>>();
+    state
+        .files
+        .watched
+        .retain(|path, _| state.files.watch_paths.contains(path));
+
+    for path in paths {
+        match read_workspace_file(&path) {
+            Ok(file) => {
+                state.files.watched.insert(
+                    path,
+                    WatchedFileState {
+                        exists: file.exists,
+                        binary: file.binary,
+                        revision: file.revision,
+                    },
+                );
+            }
+            Err(error) => {
+                eprintln!("workspace-observer: failed to observe file state for {path}: {error}");
+            }
+        }
+    }
 }
 
 fn reconcile_sessions(state: &mut ObserverState, live_sessions: &[ZmxSession]) {
@@ -561,7 +721,8 @@ fn reconcile_sessions(state: &mut ObserverState, live_sessions: &[ZmxSession]) {
             session_state.active_command = Some(command.clone());
             session_state.assistant_provider = resolve_assistant_provider(&command);
             session_state.command_running = true;
-        } else if !session_state.command_running && !session_state.working && !session_state.unread {
+        } else if !session_state.command_running && !session_state.working && !session_state.unread
+        {
             session_state.active_command = None;
             session_state.assistant_provider = None;
         }
@@ -698,6 +859,167 @@ fn persist_state(path: &Path, state: &ObserverState) -> Result<(), String> {
             path.display()
         )
     })
+}
+
+fn write_json_stdout<T: Serialize>(value: &T) -> Result<(), String> {
+    let payload = serde_json::to_string(value).map_err(|error| error.to_string())?;
+    println!("{payload}");
+    Ok(())
+}
+
+fn list_workspace_files() -> Result<Vec<FileTreeEntry>, String> {
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "core.quotepath=false",
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ])
+        .current_dir(workspace_root())
+        .output()
+        .map_err(|error| format!("failed to list workspace files: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "failed to list workspace files".to_string()
+        } else {
+            format!("failed to list workspace files: {stderr}")
+        });
+    }
+
+    let mut entries = String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|path| FileTreeEntry {
+            path: path.to_string(),
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    entries.dedup_by(|left, right| left.path == right.path);
+    Ok(entries)
+}
+
+fn read_workspace_file(path: &str) -> Result<FileReadResult, String> {
+    let normalized = normalize_repo_relative_path(path)?;
+    let absolute_path = workspace_root().join(&normalized);
+    if !absolute_path.exists() || absolute_path.is_dir() {
+        return Ok(FileReadResult {
+            path: normalized,
+            exists: false,
+            binary: false,
+            revision: "missing".to_string(),
+            content: None,
+        });
+    }
+
+    let bytes = fs::read(&absolute_path)
+        .map_err(|error| format!("failed to read workspace file {normalized}: {error}"))?;
+    let revision = hex_sha256(&bytes);
+    let binary = bytes.iter().any(|byte| *byte == 0) || std::str::from_utf8(&bytes).is_err();
+
+    Ok(FileReadResult {
+        path: normalized,
+        exists: true,
+        binary,
+        revision,
+        content: if binary {
+            None
+        } else {
+            Some(
+                String::from_utf8(bytes).map_err(|error| {
+                    format!("failed to decode workspace file as utf-8: {error}")
+                })?,
+            )
+        },
+    })
+}
+
+fn write_workspace_file(
+    path: &str,
+    expected_revision: &str,
+    content: &str,
+) -> Result<FileWriteResult, String> {
+    let normalized = normalize_repo_relative_path(path)?;
+    let absolute_path = workspace_root().join(&normalized);
+    if !absolute_path.exists() || absolute_path.is_dir() {
+        return Ok(FileWriteResult {
+            status: FileWriteStatus::Missing,
+            revision: None,
+        });
+    }
+
+    let current_bytes = fs::read(&absolute_path)
+        .map_err(|error| format!("failed to read workspace file {normalized}: {error}"))?;
+    let current_revision = hex_sha256(&current_bytes);
+    if current_revision != expected_revision {
+        return Ok(FileWriteResult {
+            status: FileWriteStatus::Conflict,
+            revision: Some(current_revision),
+        });
+    }
+
+    let metadata = fs::metadata(&absolute_path)
+        .map_err(|error| format!("failed to stat workspace file {normalized}: {error}"))?;
+    let parent = absolute_path
+        .parent()
+        .ok_or_else(|| format!("workspace file {normalized} is missing a parent dir"))?;
+    let temp_path = parent.join(format!(
+        ".silo-write-{}-{}",
+        process::id(),
+        OffsetDateTime::now_utc().unix_timestamp_nanos()
+    ));
+    fs::write(&temp_path, content.as_bytes())
+        .map_err(|error| format!("failed to stage workspace file {normalized}: {error}"))?;
+    fs::set_permissions(&temp_path, metadata.permissions()).map_err(|error| {
+        format!("failed to copy workspace file permissions {normalized}: {error}")
+    })?;
+    fs::rename(&temp_path, &absolute_path)
+        .map_err(|error| format!("failed to replace workspace file {normalized}: {error}"))?;
+
+    Ok(FileWriteResult {
+        status: FileWriteStatus::Saved,
+        revision: Some(hex_sha256(content.as_bytes())),
+    })
+}
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(WORKSPACE_ROOT)
+}
+
+fn normalize_repo_relative_path(path: &str) -> Result<String, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("file path must not be empty".to_string());
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in Path::new(trimmed).components() {
+        match component {
+            std::path::Component::Normal(value) => normalized.push(value),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir
+            | std::path::Component::Prefix(_)
+            | std::path::Component::RootDir => {
+                return Err("file path must stay within the workspace root".to_string());
+            }
+        }
+    }
+
+    normalized
+        .to_str()
+        .map(|value| value.replace('\\', "/"))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "file path must be valid UTF-8".to_string())
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 fn ensure_fifo(path: &Path) -> Result<(), String> {
@@ -973,7 +1295,9 @@ impl ComputeMetadataClient {
         for attempt in 0..METADATA_PUBLISH_ATTEMPTS {
             match self.publish_once(&token, published) {
                 Ok(()) => return Ok(()),
-                Err(error) if attempt + 1 < METADATA_PUBLISH_ATTEMPTS && should_retry_publish(&error) => {
+                Err(error)
+                    if attempt + 1 < METADATA_PUBLISH_ATTEMPTS && should_retry_publish(&error) =>
+                {
                     last_error = Some(error);
                     thread::sleep(METADATA_PUBLISH_RETRY_BASE_DELAY * 2u32.pow(attempt as u32));
                 }
@@ -1143,7 +1467,10 @@ fn flat_metadata_items(
         published.last_working.as_deref(),
     );
     for terminal in &published.terminals {
-        let key = format!("{TERMINAL_SESSION_METADATA_PREFIX}{}", terminal.attachment_id);
+        let key = format!(
+            "{TERMINAL_SESSION_METADATA_PREFIX}{}",
+            terminal.attachment_id
+        );
         let value = serde_json::to_string(terminal)
             .map_err(|error| format!("failed to serialize session metadata: {error}"))?;
         items.insert(key, value);
@@ -1500,10 +1827,9 @@ mod tests {
         flat_metadata_items, normalize_assistant_input, parse_timestamp, parse_zmx_session,
         resolve_assistant_provider, sanitize_command_name, should_suspend_for_inactivity_at,
         turn_output_timeout, update_metadata_item, AssistantProvider, ObserverEvent, ObserverState,
-        PublishedSession, PublishedState, INITIAL_PROMPT_STARTUP_GRACE,
-        SOFT_NEWLINE_SENTINEL, TERMINAL_LAST_ACTIVE_METADATA_KEY,
-        TERMINAL_LAST_WORKING_METADATA_KEY, TERMINAL_UNREAD_METADATA_KEY,
-        TERMINAL_WORKING_METADATA_KEY, TURN_OUTPUT_IDLE_TIMEOUT,
+        PublishedSession, PublishedState, INITIAL_PROMPT_STARTUP_GRACE, SOFT_NEWLINE_SENTINEL,
+        TERMINAL_LAST_ACTIVE_METADATA_KEY, TERMINAL_LAST_WORKING_METADATA_KEY,
+        TERMINAL_UNREAD_METADATA_KEY, TERMINAL_WORKING_METADATA_KEY, TURN_OUTPUT_IDLE_TIMEOUT,
     };
     use std::collections::BTreeMap;
     use time::Duration as TimeDuration;
@@ -1773,7 +2099,10 @@ mod tests {
             }],
         );
 
-        let session = state.sessions.get("terminal-1").expect("session should remain");
+        let session = state
+            .sessions
+            .get("terminal-1")
+            .expect("session should remain");
         assert_eq!(session.active_command, None);
         assert_eq!(session.assistant_provider, None);
     }
@@ -1828,7 +2157,10 @@ mod tests {
             }],
         );
 
-        let session = state.sessions.get("terminal-1").expect("session should remain");
+        let session = state
+            .sessions
+            .get("terminal-1")
+            .expect("session should remain");
         assert_eq!(session.active_command.as_deref(), Some("bun run dev"));
         assert_eq!(session.assistant_provider, None);
         assert!(session.command_running);
@@ -1846,7 +2178,10 @@ mod tests {
             },
         );
 
-        let session = state.sessions.get("terminal-1").expect("session should exist");
+        let session = state
+            .sessions
+            .get("terminal-1")
+            .expect("session should exist");
         assert_eq!(session.active_command.as_deref(), Some("claude"));
         assert_eq!(session.assistant_provider, Some(AssistantProvider::Claude));
         assert!(session.command_running);
