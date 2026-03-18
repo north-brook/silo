@@ -20,6 +20,7 @@ tauri-build = { git = "https://github.com/tauri-apps/tauri", branch = "feat/cef"
 [dependencies]
 anyhow = "1"
 tauri = { git = "https://github.com/tauri-apps/tauri", branch = "feat/cef", default-features = false, features = ["cef", "protocol-asset", "unstable", "devtools"] }
+tauri-runtime-cef = { git = "https://github.com/tauri-apps/tauri", branch = "feat/cef" }
 tauri-plugin-opener = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "feat/cef" }
 tauri-plugin-log = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "feat/cef" }
 serde = { version = "1", features = ["derive"] }
@@ -37,11 +38,6 @@ base64 = "0.22"
 sha2 = "0.10"
 urlencoding = "2"
 url = "2"
-bytes = "1"
-http-body-util = "0.1"
-hyper = { version = "1", features = ["full"] }
-hyper-util = { version = "0.1", features = ["client", "client-legacy", "server", "http1", "http2", "tokio"] }
-tokio = { version = "1", features = ["io-util", "net", "rt-multi-thread"] }
 
 [patch.crates-io]
 tauri = { git = "https://github.com/tauri-apps/tauri", branch = "feat/cef" }

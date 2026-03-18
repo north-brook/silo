@@ -117,10 +117,18 @@ pub fn run() {
     let loopback_router = router::RouterManager::default();
     let browser_manager = browser::BrowserManager::new(loopback_router.clone());
     let browser_loopback_manager = browser_loopback::BrowserLoopbackManager::new(loopback_router);
+    let browser_loopback_resolver = browser_loopback_manager.clone();
+
+    let _ = tauri_runtime_cef::set_loopback_request_resolver(std::sync::Arc::new(
+        move |webview_label, original_url| {
+            browser_loopback_resolver.rewrite_loopback_url(webview_label, original_url)
+        },
+    ));
 
     tauri::Builder::<AppRuntime>::new()
         .command_line_args(cef_command_line_args)
         .manage(browser_manager)
+        .manage(browser_loopback_manager)
         .manage(state::WorkspaceMetadataManager::default())
         .manage(terminal::TerminalManager::default())
         .plugin(logging_plugin)
@@ -128,7 +136,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .setup(move |app| {
-            browser_loopback_manager.ensure_started()?;
             if let Err(error) = config::initialize_on_start() {
                 log::error!("failed to initialize silo config: {error}");
             }

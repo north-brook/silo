@@ -1,3 +1,4 @@
+use crate::browser_loopback::BrowserLoopbackManager;
 use crate::router::RouterManager;
 use crate::AppRuntime;
 use crate::state::{
@@ -182,6 +183,9 @@ pub async fn browser_mount_tab(
         );
         emit_browser_state_changed(&app, &workspace, &attachment_id)?;
     }
+
+    app.state::<BrowserLoopbackManager>()
+        .cache_workspace_lookup(&lookup);
 
     state.ensure_webview(
         &app,

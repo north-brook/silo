@@ -554,7 +554,7 @@ pub async fn workspaces_get_workspace(
 }
 
 #[tauri::command]
-pub async fn workspaces_set_active_session(
+pub fn workspaces_set_active_session(
     state: State<'_, crate::state::WorkspaceMetadataManager>,
     workspace: String,
     kind: String,
@@ -569,15 +569,6 @@ pub async fn workspaces_set_active_session(
         return Err("active session attachment_id must not be empty".to_string());
     }
 
-    let lookup = find_workspace(&workspace).await?;
-    let resolved = state.apply_workspace_state(lookup.workspace.clone());
-    if !resolved.has_session(&kind, &attachment_id) {
-        return Err(format!(
-            "workspace {} is missing session {}:{}",
-            workspace, kind, attachment_id
-        ));
-    }
-
     let active_session = WorkspaceActiveSession::new(kind.clone(), attachment_id);
     state.set_active_workspace_session(&workspace, active_session.clone());
 
@@ -588,7 +579,7 @@ pub async fn workspaces_set_active_session(
             value: Some(current_rfc3339_timestamp()),
         });
     }
-    state.enqueue(&workspace, Some(lookup), entries);
+    state.enqueue(&workspace, None, entries);
 
     Ok(())
 }
