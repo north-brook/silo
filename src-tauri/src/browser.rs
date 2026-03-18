@@ -1,12 +1,12 @@
 use crate::browser_loopback::BrowserLoopbackManager;
 use crate::router::RouterManager;
-use crate::AppRuntime;
 use crate::state::{
     browser_session_metadata_key, WorkspaceMetadataEntry, WorkspaceMetadataManager,
     BROWSER_LAST_ACTIVE_METADATA_KEY,
 };
 use crate::terminal;
 use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
+use crate::AppRuntime;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -1410,6 +1410,7 @@ fn browser_session_for_url(
         kind: BROWSER_KIND.to_string(),
         name: title.clone(),
         attachment_id: attachment_id.to_string(),
+        path: None,
         url: (normalized.logical_url != BROWSER_DEFAULT_URL)
             .then_some(normalized.logical_url.clone()),
         logical_url: (normalized.logical_url != BROWSER_DEFAULT_URL)

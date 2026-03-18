@@ -23,7 +23,6 @@ use uuid::Uuid;
 const TERMINAL_EXIT_EVENT: &str = "terminal://exit";
 const TERMINAL_ERROR_EVENT: &str = "terminal://error";
 const TERMINAL_DISCONNECT_EVENT: &str = "terminal://disconnect";
-const MAX_SCROLLBACK_BYTES: usize = 512 * 1024;
 const MAX_ATTACHMENT_RECENT_OUTPUT_BYTES: usize = 16 * 1024;
 const MAX_ATTACHMENT_PENDING_OUTPUT_BYTES: usize = 512 * 1024;
 const ATTACH_COMMAND_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -34,7 +33,7 @@ pub(crate) const TERMINAL_WORKSPACE_DIR: &str = "/home/silo/workspace";
 const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
 const REMOTE_BOOTSTRAP_STATE_FILE: &str = "/home/silo/.silo/workspace-bootstrap-state";
 const REMOTE_BOOTSTRAP_LOCK_DIR: &str = "/home/silo/.silo/workspace-bootstrap.lock";
-const REMOTE_WORKSPACE_OBSERVER_BIN: &str = "/home/silo/.silo/bin/workspace-observer";
+pub(crate) const REMOTE_WORKSPACE_OBSERVER_BIN: &str = "/home/silo/.silo/bin/workspace-observer";
 const REMOTE_WORKSPACE_OBSERVER_PIDFILE: &str = "/home/silo/.silo/workspace-observer/daemon.pid";
 const REMOTE_WORKSPACE_OBSERVER_SHELL_FILE: &str = "/home/silo/.silo/workspace-observer-shell.sh";
 const WORKSPACE_BOOTSTRAP_VERSION: &str = "11";
@@ -53,8 +52,6 @@ static WORKSPACE_SSH_READY_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
 pub struct TerminalAttachResult {
     terminal_id: String,
     session: WorkspaceSession,
-    scrollback_vt: String,
-    scrollback_truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -297,7 +294,6 @@ pub async fn terminal_attach_terminal(
     attachment_id: String,
     cols: u16,
     rows: u16,
-    skip_scrollback: Option<bool>,
     command: Option<String>,
     output: Channel<Vec<u8>>,
 ) -> Result<TerminalAttachResult, String> {
@@ -306,14 +302,12 @@ pub async fn terminal_attach_terminal(
     if !lookup.workspace.ready() {
         return Err(format!("workspace {workspace} is not ready"));
     }
-    let scrollback_mode = attach_scrollback_mode(skip_scrollback);
     log::info!(
-        "terminal attach start workspace={} attachment_id={} cols={} rows={} skip_scrollback={}",
+        "terminal attach start workspace={} attachment_id={} cols={} rows={}",
         workspace,
         attachment_id,
         cols,
-        rows,
-        matches!(scrollback_mode, AttachScrollbackMode::Skip)
+        rows
     );
     let key = AttachmentKey {
         workspace: workspace.clone(),
@@ -329,7 +323,6 @@ pub async fn terminal_attach_terminal(
                 &attachment_id,
                 cols,
                 rows,
-                scrollback_mode,
                 &window,
                 output,
                 startup_command,
@@ -339,9 +332,6 @@ pub async fn terminal_attach_terminal(
         }
         AttachmentSlot::Reserved(reservation) => reservation,
     };
-
-    let (scrollback_vt, scrollback_truncated) =
-        prepare_attach_scrollback(&lookup, &attachment_id, scrollback_mode).await?;
 
     let spawn_started = Instant::now();
     let attachment = spawn_terminal_attachment(
@@ -373,8 +363,6 @@ pub async fn terminal_attach_terminal(
     Ok(TerminalAttachResult {
         terminal_id: attachment.id.clone(),
         session: resolve_attached_session(&lookup, &attachment_id).await?,
-        scrollback_vt,
-        scrollback_truncated,
     })
 }
 
@@ -938,15 +926,12 @@ async fn attach_existing_terminal(
     name: &str,
     cols: u16,
     rows: u16,
-    scrollback_mode: AttachScrollbackMode,
     window: &Window<AppRuntime>,
     output: Channel<Vec<u8>>,
     command: Option<String>,
     attach_started: Instant,
 ) -> Result<TerminalAttachResult, String> {
     resize_attachment(&existing, cols, rows)?;
-    let (scrollback_vt, scrollback_truncated) =
-        prepare_attach_scrollback(lookup, name, scrollback_mode).await?;
     set_attachment_output_target(&existing, output, window.label().as_ref())?;
     if let Some(command) = command {
         queue_attach_command(existing.clone(), command);
@@ -961,8 +946,6 @@ async fn attach_existing_terminal(
     Ok(TerminalAttachResult {
         terminal_id: existing.id.clone(),
         session: resolve_attached_session(lookup, name).await?,
-        scrollback_vt,
-        scrollback_truncated,
     })
 }
 
@@ -1015,88 +998,6 @@ async fn find_terminal_session(
         .await?
         .into_iter()
         .find(|session| session.attachment_id == attachment_id))
-}
-
-async fn load_scrollback(lookup: &WorkspaceLookup, name: &str) -> Result<(String, bool), String> {
-    let result = run_remote_command(
-        lookup,
-        &run_terminal_user_command(&format!("zmx history {} --vt", shell_quote(name))),
-    )
-    .await?;
-    if !result.success {
-        if is_missing_terminal_session_error(&result.stderr) {
-            return Ok((String::new(), false));
-        }
-
-        return Err(remote_command_error(
-            "failed to load terminal scrollback",
-            &result.stderr,
-        ));
-    }
-
-    Ok(truncate_scrollback(result.stdout, MAX_SCROLLBACK_BYTES))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AttachScrollbackMode {
-    Load,
-    Skip,
-}
-
-fn attach_scrollback_mode(skip_scrollback: Option<bool>) -> AttachScrollbackMode {
-    if skip_scrollback.unwrap_or(false) {
-        AttachScrollbackMode::Skip
-    } else {
-        AttachScrollbackMode::Load
-    }
-}
-
-async fn prepare_attach_scrollback(
-    lookup: &WorkspaceLookup,
-    attachment_id: &str,
-    mode: AttachScrollbackMode,
-) -> Result<(String, bool), String> {
-    let started = Instant::now();
-    match mode {
-        AttachScrollbackMode::Skip => {
-            log::info!(
-                "terminal attach scrollback skipped workspace={} attachment_id={} elapsed_ms=0",
-                lookup.workspace.name(),
-                attachment_id
-            );
-            Ok((String::new(), false))
-        }
-        AttachScrollbackMode::Load => {
-            log::info!(
-                "terminal attach scrollback load start workspace={} attachment_id={}",
-                lookup.workspace.name(),
-                attachment_id
-            );
-            let result = load_scrollback(lookup, attachment_id).await;
-            match &result {
-                Ok((scrollback, truncated)) => {
-                    log::info!(
-                        "terminal attach scrollback load complete workspace={} attachment_id={} bytes={} truncated={} elapsed_ms={}",
-                        lookup.workspace.name(),
-                        attachment_id,
-                        scrollback.len(),
-                        truncated,
-                        started.elapsed().as_millis()
-                    );
-                }
-                Err(error) => {
-                    log::warn!(
-                        "terminal attach scrollback load failed workspace={} attachment_id={} elapsed_ms={} error={}",
-                        lookup.workspace.name(),
-                        attachment_id,
-                        started.elapsed().as_millis(),
-                        error
-                    );
-                }
-            }
-            result
-        }
-    }
 }
 
 async fn resolve_attached_session(
@@ -2124,7 +2025,7 @@ pub(crate) async fn run_remote_command(
     run_gcloud_ssh_command(lookup, Some(remote_command.to_string()), None).await
 }
 
-async fn run_remote_command_with_stdin(
+pub(crate) async fn run_remote_command_with_stdin(
     lookup: &WorkspaceLookup,
     remote_command: &str,
     stdin_bytes: Vec<u8>,
@@ -2262,7 +2163,7 @@ fn workspace_shell_script(prelude: Option<&str>, command: &str) -> String {
     )
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
@@ -2297,6 +2198,7 @@ pub(crate) fn pending_terminal_session(attachment_id: &str) -> WorkspaceSession 
         kind: "terminal".to_string(),
         name: "shell".to_string(),
         attachment_id: attachment_id.to_string(),
+        path: None,
         url: None,
         logical_url: None,
         resolved_url: None,
@@ -2342,21 +2244,10 @@ fn session_name_timestamp(name: &str) -> Option<u128> {
     if let Some(timestamp) = name.strip_prefix("browser-") {
         return timestamp.parse::<u128>().ok();
     }
-    None
-}
-
-fn truncate_scrollback(mut scrollback: String, max_bytes: usize) -> (String, bool) {
-    if scrollback.len() <= max_bytes {
-        return (scrollback, false);
+    if let Some(timestamp) = name.strip_prefix("file-") {
+        return timestamp.parse::<u128>().ok();
     }
-
-    let start = scrollback
-        .char_indices()
-        .find(|(index, _)| *index >= scrollback.len() - max_bytes)
-        .map(|(index, _)| index)
-        .unwrap_or(0);
-    scrollback.drain(..start);
-    (scrollback, true)
+    None
 }
 
 pub(crate) fn session_for_command(attachment_id: &str, command: &str) -> WorkspaceSession {
@@ -2366,6 +2257,7 @@ pub(crate) fn session_for_command(attachment_id: &str, command: &str) -> Workspa
         kind: "terminal".to_string(),
         name,
         attachment_id: attachment_id.to_string(),
+        path: None,
         url: None,
         logical_url: None,
         resolved_url: None,
@@ -2603,30 +2495,6 @@ mod tests {
     }
 
     #[test]
-    fn truncate_scrollback_keeps_recent_tail() {
-        let (scrollback, truncated) = truncate_scrollback("abcdef".to_string(), 3);
-        assert!(truncated);
-        assert_eq!(scrollback, "def");
-    }
-
-    #[test]
-    fn attach_scrollback_mode_skips_when_requested() {
-        assert_eq!(
-            attach_scrollback_mode(Some(true)),
-            AttachScrollbackMode::Skip
-        );
-    }
-
-    #[test]
-    fn attach_scrollback_mode_loads_by_default() {
-        assert_eq!(attach_scrollback_mode(None), AttachScrollbackMode::Load);
-        assert_eq!(
-            attach_scrollback_mode(Some(false)),
-            AttachScrollbackMode::Load
-        );
-    }
-
-    #[test]
     fn terminal_command_bytes_appends_newline_once() {
         assert_eq!(terminal_command_bytes("pwd"), b"pwd\n");
         assert_eq!(terminal_command_bytes("pwd\n"), b"pwd\n");
@@ -2725,6 +2593,7 @@ mod tests {
                 kind: "terminal".to_string(),
                 name: "shell".to_string(),
                 attachment_id: "terminal-1741812345680".to_string(),
+                path: None,
                 url: None,
                 logical_url: None,
                 resolved_url: None,
@@ -2739,6 +2608,7 @@ mod tests {
                 kind: "terminal".to_string(),
                 name: "shell".to_string(),
                 attachment_id: "terminal-1741812345678".to_string(),
+                path: None,
                 url: None,
                 logical_url: None,
                 resolved_url: None,
@@ -2753,6 +2623,7 @@ mod tests {
                 kind: "terminal".to_string(),
                 name: "shell".to_string(),
                 attachment_id: "terminal-1741812345679".to_string(),
+                path: None,
                 url: None,
                 logical_url: None,
                 resolved_url: None,
@@ -2820,7 +2691,11 @@ mod tests {
             ),
             writer: Mutex::new(Box::new(Vec::<u8>::new())),
             killer: Mutex::new(Box::new(NoopKiller)),
-            output: Mutex::new(Channel::new(|_| Ok(()))),
+            output_state: Mutex::new(AttachmentOutputState {
+                channel: Channel::new(|_| Ok(())),
+                ready: false,
+                pending: Vec::new(),
+            }),
             window_label: Mutex::new("main".to_string()),
             connected: Mutex::new(false),
             connected_cv: Condvar::new(),
@@ -2875,7 +2750,11 @@ mod tests {
             ),
             writer: Mutex::new(Box::new(Vec::<u8>::new())),
             killer: Mutex::new(Box::new(NoopKiller)),
-            output: Mutex::new(Channel::new(|_| Ok(()))),
+            output_state: Mutex::new(AttachmentOutputState {
+                channel: Channel::new(|_| Ok(())),
+                ready: false,
+                pending: Vec::new(),
+            }),
             window_label: Mutex::new("main".to_string()),
             connected: Mutex::new(false),
             connected_cv: Condvar::new(),

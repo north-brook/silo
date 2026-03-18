@@ -41,7 +41,9 @@ impl BrowserLoopbackManager {
         }
 
         let lookup = self.lookup_workspace(workspace)?;
-        let rewritten = self.loopback_router.rewrite_loopback_url(&lookup, original_url)?;
+        let rewritten = self
+            .loopback_router
+            .rewrite_loopback_url(&lookup, original_url)?;
         if let Some(rewritten) = &rewritten {
             log::debug!(
                 "browser loopback rewrote request workspace={} label={} from={} to={}",

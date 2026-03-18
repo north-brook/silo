@@ -4,8 +4,9 @@ use crate::state::{
     active_session_metadata_entries, workspace_last_active_metadata_key, WorkspaceMetadataEntry,
     ACTIVE_SESSION_ATTACHMENT_ID_METADATA_KEY, ACTIVE_SESSION_KIND_METADATA_KEY,
     BROWSER_LAST_ACTIVE_METADATA_KEY, BROWSER_SESSION_METADATA_PREFIX,
-    TERMINAL_LAST_ACTIVE_METADATA_KEY, TERMINAL_LAST_WORKING_METADATA_KEY,
-    TERMINAL_SESSION_METADATA_PREFIX, TERMINAL_UNREAD_METADATA_KEY, TERMINAL_WORKING_METADATA_KEY,
+    FILE_LAST_ACTIVE_METADATA_KEY, FILE_SESSION_METADATA_PREFIX, TERMINAL_LAST_ACTIVE_METADATA_KEY,
+    TERMINAL_LAST_WORKING_METADATA_KEY, TERMINAL_SESSION_METADATA_PREFIX,
+    TERMINAL_UNREAD_METADATA_KEY, TERMINAL_WORKING_METADATA_KEY,
 };
 use crate::terminal;
 use serde::Deserialize;
@@ -35,6 +36,7 @@ pub struct BranchWorkspace {
     working: Option<bool>,
     terminals: Vec<WorkspaceSession>,
     browsers: Vec<WorkspaceSession>,
+    files: Vec<WorkspaceSession>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -45,6 +47,7 @@ pub struct TemplateWorkspace {
     working: Option<bool>,
     terminals: Vec<WorkspaceSession>,
     browsers: Vec<WorkspaceSession>,
+    files: Vec<WorkspaceSession>,
     template: bool,
 }
 
@@ -97,6 +100,8 @@ pub struct WorkspaceSession {
     pub(crate) name: String,
     pub(crate) attachment_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) logical_url: Option<String>,
@@ -127,6 +132,7 @@ impl Workspace {
         working: Option<bool>,
         terminals: Vec<WorkspaceSession>,
         browsers: Vec<WorkspaceSession>,
+        files: Vec<WorkspaceSession>,
     ) -> Self {
         Self::Branch(BranchWorkspace {
             base,
@@ -136,6 +142,7 @@ impl Workspace {
             working,
             terminals,
             browsers,
+            files,
         })
     }
 
@@ -206,9 +213,17 @@ impl Workspace {
         }
     }
 
+    pub(crate) fn files(&self) -> &[WorkspaceSession] {
+        match self {
+            Self::Branch(workspace) => &workspace.files,
+            Self::Template(workspace) => &workspace.files,
+        }
+    }
+
     pub(crate) fn sessions(&self) -> Vec<WorkspaceSession> {
         let mut sessions = self.terminals().to_vec();
         sessions.extend_from_slice(self.browsers());
+        sessions.extend_from_slice(self.files());
         terminal::sort_workspace_sessions_oldest_to_newest(&mut sessions);
         sessions
     }
@@ -251,15 +266,19 @@ pub(crate) fn overlay_workspace_sessions(
 
     let mut terminals = Vec::new();
     let mut browsers = Vec::new();
+    let mut files = Vec::new();
     for session in sessions.into_values() {
         if session.kind == "browser" {
             browsers.push(session);
+        } else if session.kind == "file" {
+            files.push(session);
         } else {
             terminals.push(session);
         }
     }
     terminal::sort_workspace_sessions_oldest_to_newest(&mut terminals);
     terminal::sort_workspace_sessions_oldest_to_newest(&mut browsers);
+    terminal::sort_workspace_sessions_oldest_to_newest(&mut files);
     let assistant_present = terminals
         .iter()
         .any(|session| session.working.is_some() || session.unread.is_some());
@@ -276,6 +295,7 @@ pub(crate) fn overlay_workspace_sessions(
             workspace.working = working;
             workspace.terminals = terminals;
             workspace.browsers = browsers;
+            workspace.files = files;
             Workspace::Branch(workspace)
         }
         Workspace::Template(mut workspace) => {
@@ -283,6 +303,7 @@ pub(crate) fn overlay_workspace_sessions(
             workspace.working = working;
             workspace.terminals = terminals;
             workspace.browsers = browsers;
+            workspace.files = files;
             Workspace::Template(workspace)
         }
     }
@@ -880,6 +901,7 @@ fn pending_workspace(
         None,
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -904,6 +926,7 @@ fn pending_template_workspace(name: &str, project_label: &str, zone: &str) -> Te
         working: None,
         terminals: Vec::new(),
         browsers: Vec::new(),
+        files: Vec::new(),
         template: true,
     }
 }
@@ -1766,6 +1789,7 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
     let working = parse_optional_bool(&metadata, TERMINAL_WORKING_METADATA_KEY, "working")?;
     let terminals = parse_prefixed_workspace_sessions(&metadata, TERMINAL_SESSION_METADATA_PREFIX);
     let browsers = parse_prefixed_workspace_sessions(&metadata, BROWSER_SESSION_METADATA_PREFIX);
+    let files = parse_prefixed_workspace_sessions(&metadata, FILE_SESSION_METADATA_PREFIX);
 
     if template {
         Ok(Workspace::Template(TemplateWorkspace {
@@ -1774,6 +1798,7 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
             working,
             terminals,
             browsers,
+            files,
             template: true,
         }))
     } else {
@@ -1788,6 +1813,7 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
             working,
             terminals,
             browsers,
+            files,
         ))
     }
 }
@@ -1937,6 +1963,7 @@ fn parse_prefixed_workspace_sessions(
 fn resolve_workspace_last_active(metadata: &HashMap<String, String>) -> Option<String> {
     [
         metadata.get(BROWSER_LAST_ACTIVE_METADATA_KEY),
+        metadata.get(FILE_LAST_ACTIVE_METADATA_KEY),
         metadata.get(TERMINAL_LAST_ACTIVE_METADATA_KEY),
     ]
     .into_iter()
@@ -2284,6 +2311,7 @@ mod tests {
             String::new(),
             false,
             None,
+            Vec::new(),
             Vec::new(),
             Vec::new(),
         )
