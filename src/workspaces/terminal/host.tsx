@@ -3,15 +3,20 @@ import { Channel } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@/shared/lib/invoke";
 import type { WorkspaceSession } from "@/workspaces/api";
 import type { CloudSession } from "@/workspaces/hosts/model";
 import { attachTerminalBindings } from "./bindings";
+import {
+	isRetryableTerminalTransportMessage,
+	reconnectDelayMs,
+} from "./reconnect";
 
 const DELETE_BYTE = 0x7f;
 const BACKSPACE_ERASE_SEQUENCE = [0x08, 0x20, 0x08];
+const MAX_AUTO_RECONNECT_ATTEMPTS = 5;
 
 function normalizeTerminalOutput(data: ArrayBuffer): Uint8Array {
 	const bytes = new Uint8Array(data);
@@ -49,7 +54,12 @@ interface TerminalErrorPayload {
 	message: string;
 }
 
-type HostStatus = "idle" | "attaching" | "ready" | "error";
+interface TerminalDisconnectPayload {
+	terminal_id: string;
+	message: string;
+}
+
+type HostStatus = "idle" | "attaching" | "ready" | "reconnecting" | "error";
 
 function usePageIsForeground() {
 	const [isForeground, setIsForeground] = useState(() => {
@@ -110,6 +120,7 @@ export function TerminalSessionHost({
 	target,
 	visible,
 	skipInitialScrollback,
+	retryNonce,
 	onFreshConsumed,
 	onHostStateChange,
 }: {
@@ -117,6 +128,7 @@ export function TerminalSessionHost({
 	target: HTMLElement | null;
 	visible: boolean;
 	skipInitialScrollback: boolean;
+	retryNonce: number;
 	onFreshConsumed: () => void;
 	onHostStateChange: (state: {
 		status: HostStatus;
@@ -131,19 +143,33 @@ export function TerminalSessionHost({
 	const termRef = useRef<Terminal | null>(null);
 	const fitAddonRef = useRef<FitAddon | null>(null);
 	const pendingMarkReadRef = useRef(false);
-	const attachedRef = useRef(false);
 	const initialSkipScrollbackRef = useRef(skipInitialScrollback);
 	const onFreshConsumedRef = useRef(onFreshConsumed);
 	const onHostStateChangeRef = useRef(onHostStateChange);
 	const visibleRef = useRef(visible);
+	const reconnectTimeoutRef = useRef<number | null>(null);
+	const reconnectAttemptRef = useRef(0);
+	const reconnectMessageRef = useRef<string | null>(null);
+	const pendingReconnectRef = useRef(false);
+	const attachInFlightRef = useRef(false);
+	const retryNonceRef = useRef(retryNonce);
+	const resetTerminalOnNextAttachRef = useRef(false);
 	const [isMountReady, setIsMountReady] = useState(false);
+	const [attachNonce, setAttachNonce] = useState(0);
 	const isPageForeground = usePageIsForeground();
 
 	useEffect(() => {
 		visibleRef.current = visible;
 	}, [visible]);
 
-	const fitAndResizeTerminal = () => {
+	const clearReconnectTimer = useCallback(() => {
+		if (reconnectTimeoutRef.current !== null) {
+			window.clearTimeout(reconnectTimeoutRef.current);
+			reconnectTimeoutRef.current = null;
+		}
+	}, []);
+
+	const fitAndResizeTerminal = useCallback(() => {
 		if (!visibleRef.current) {
 			return;
 		}
@@ -155,16 +181,98 @@ export function TerminalSessionHost({
 		}
 
 		fitAddon.fit();
-	};
+	}, []);
 
-	const scheduleFitAndResize = () => {
+	const scheduleFitAndResize = useCallback(() => {
 		requestAnimationFrame(() => {
 			fitAndResizeTerminal();
 			requestAnimationFrame(() => {
 				fitAndResizeTerminal();
 			});
 		});
-	};
+	}, [fitAndResizeTerminal]);
+
+	const sendResize = useCallback((cols: number, rows: number) => {
+		if (!terminalIdRef.current) {
+			return;
+		}
+
+		const next = { cols, rows };
+		const lastResize = lastResizeRef.current;
+		if (
+			lastResize &&
+			lastResize.cols === next.cols &&
+			lastResize.rows === next.rows
+		) {
+			return;
+		}
+		lastResizeRef.current = next;
+
+		void invoke("terminal_resize_terminal", {
+			terminal: terminalIdRef.current,
+			cols: next.cols,
+			rows: next.rows,
+		});
+	}, []);
+
+	const triggerAttach = useCallback(() => {
+		if (!isMountReady || !termRef.current || attachInFlightRef.current) {
+			return;
+		}
+		setAttachNonce((previous) => previous + 1);
+	}, [isMountReady]);
+
+	const scheduleReconnectAttempt = useCallback(() => {
+		if (
+			!pendingReconnectRef.current ||
+			attachInFlightRef.current ||
+			reconnectTimeoutRef.current !== null
+		) {
+			return;
+		}
+		if (reconnectAttemptRef.current >= MAX_AUTO_RECONNECT_ATTEMPTS) {
+			pendingReconnectRef.current = false;
+			onHostStateChangeRef.current({
+				status: "error",
+				errorMessage:
+					reconnectMessageRef.current ??
+					"Connection lost. Automatic reconnect attempts failed.",
+				terminalId: null,
+			});
+			return;
+		}
+		if (!visibleRef.current) {
+			return;
+		}
+
+		reconnectAttemptRef.current += 1;
+		const delay = reconnectDelayMs(reconnectAttemptRef.current);
+		onHostStateChangeRef.current({
+			status: "reconnecting",
+			errorMessage: reconnectMessageRef.current,
+			terminalId: null,
+		});
+		reconnectTimeoutRef.current = window.setTimeout(() => {
+			reconnectTimeoutRef.current = null;
+			triggerAttach();
+		}, delay);
+	}, [triggerAttach]);
+
+	const requestReconnect = useCallback(
+		(message: string) => {
+			terminalIdRef.current = null;
+			pendingReconnectRef.current = true;
+			reconnectMessageRef.current = message;
+			resetTerminalOnNextAttachRef.current = true;
+			onHostStateChangeRef.current({
+				status: "reconnecting",
+				errorMessage: message,
+				terminalId: null,
+			});
+			scheduleReconnectAttempt();
+		},
+		[scheduleReconnectAttempt],
+	);
 
 	if (typeof document !== "undefined" && !mountElementRef.current) {
 		const element = document.createElement("div");
@@ -193,25 +301,18 @@ export function TerminalSessionHost({
 		if (visibleRef.current) {
 			scheduleFitAndResize();
 		}
-	}, [target]);
+	}, [scheduleFitAndResize, target]);
 
 	useEffect(() => {
 		const mountElement = mountElementRef.current;
-		if (!mountElement || !isMountReady || attachedRef.current) {
+		if (!mountElement || !isMountReady) {
 			return;
 		}
-
-		attachedRef.current = true;
-		onHostStateChangeRef.current({ status: "attaching", errorMessage: null });
-		console.info("cloud terminal attach start", {
-			workspace: session.workspace,
-			attachmentId: session.attachmentId,
-			skipInitialScrollback: initialSkipScrollbackRef.current,
-		});
 
 		let disposed = false;
 		let unlistenExit: (() => void | Promise<void>) | null = null;
 		let unlistenError: (() => void | Promise<void>) | null = null;
+		let unlistenDisconnect: (() => void | Promise<void>) | null = null;
 
 		const term = new Terminal({
 			theme: THEME,
@@ -245,22 +346,42 @@ export function TerminalSessionHost({
 		};
 		const detachBindings = attachTerminalBindings(term, sendTerminalInput);
 
-		const output = new Channel<ArrayBuffer>();
-		output.onmessage = (data: ArrayBuffer) => {
-			if (disposed) {
-				return;
+		term.onData((data) => {
+			sendTerminalInput(data);
+		});
+
+		term.onBinary((data) => {
+			const bytes = new Uint8Array(data.length);
+			for (let index = 0; index < data.length; index++) {
+				bytes[index] = data.charCodeAt(index);
 			}
-			term.write(normalizeTerminalOutput(data));
-		};
+			sendTerminalInput(bytes);
+		});
+
+		term.onResize(({ cols, rows }) => {
+			sendResize(cols, rows);
+		});
 
 		void getCurrentWindow()
 			.listen<TerminalExitPayload>("terminal://exit", ({ payload }) => {
-				if (!disposed && payload.terminal_id === terminalIdRef.current) {
-					const reason = payload.signal
-						? `signal=${payload.signal}`
-						: `exit=${payload.exit_code}`;
-					term.writeln(`\r\n[terminal exited: ${reason}]`);
+				if (disposed || payload.terminal_id !== terminalIdRef.current) {
+					return;
 				}
+
+				terminalIdRef.current = null;
+				clearReconnectTimer();
+				pendingReconnectRef.current = false;
+				reconnectAttemptRef.current = 0;
+				reconnectMessageRef.current = null;
+				const reason = payload.signal
+					? `signal=${payload.signal}`
+					: `exit=${payload.exit_code}`;
+				term.writeln(`\r\n[terminal exited: ${reason}]`);
+				onHostStateChangeRef.current({
+					status: "ready",
+					errorMessage: null,
+					terminalId: null,
+				});
 			})
 			.then((unlisten) => {
 				if (disposed) {
@@ -272,9 +393,11 @@ export function TerminalSessionHost({
 
 		void getCurrentWindow()
 			.listen<TerminalErrorPayload>("terminal://error", ({ payload }) => {
-				if (!disposed && payload.terminal_id === terminalIdRef.current) {
-					term.writeln(`\r\n[terminal error] ${payload.message}`);
+				if (disposed || payload.terminal_id !== terminalIdRef.current) {
+					return;
 				}
+
+				term.writeln(`\r\n[terminal error] ${payload.message}`);
 			})
 			.then((unlisten) => {
 				if (disposed) {
@@ -284,6 +407,98 @@ export function TerminalSessionHost({
 				unlistenError = unlisten;
 			});
 
+		void getCurrentWindow()
+			.listen<TerminalDisconnectPayload>(
+				"terminal://disconnect",
+				({ payload }) => {
+					if (disposed || payload.terminal_id !== terminalIdRef.current) {
+						return;
+					}
+
+					term.writeln("\r\n[connection lost, attempting to resume]");
+					requestReconnect(payload.message);
+				},
+			)
+			.then((unlisten) => {
+				if (disposed) {
+					void Promise.resolve(unlisten()).catch(() => {});
+					return;
+				}
+				unlistenDisconnect = unlisten;
+			});
+
+		const resizeObserver = new ResizeObserver(() => {
+			scheduleFitAndResize();
+		});
+		resizeObserver.observe(mountElement);
+		triggerAttach();
+
+		return () => {
+			disposed = true;
+			clearReconnectTimer();
+			resizeObserver.disconnect();
+			detachBindings();
+			term.dispose();
+			termRef.current = null;
+			fitAddonRef.current = null;
+			if (unlistenExit) {
+				void Promise.resolve(unlistenExit()).catch(() => {});
+			}
+			if (unlistenError) {
+				void Promise.resolve(unlistenError()).catch(() => {});
+			}
+			if (unlistenDisconnect) {
+				void Promise.resolve(unlistenDisconnect()).catch(() => {});
+			}
+			if (mountElement.parentElement) {
+				mountElement.parentElement.removeChild(mountElement);
+			}
+		};
+	}, [
+		clearReconnectTimer,
+		isMountReady,
+		requestReconnect,
+		scheduleFitAndResize,
+		sendResize,
+		triggerAttach,
+	]);
+
+	useEffect(() => {
+		if (!isMountReady || !termRef.current) {
+			return;
+		}
+
+		let disposed = false;
+		let attachedTerminalId: string | null = null;
+		const term = termRef.current;
+		const attachRunKey = attachNonce;
+		const shouldReconnect = pendingReconnectRef.current;
+		const shouldSkipScrollback = shouldReconnect
+			? false
+			: initialSkipScrollbackRef.current;
+
+		attachInFlightRef.current = true;
+		onHostStateChangeRef.current({
+			status: shouldReconnect ? "reconnecting" : "attaching",
+			errorMessage: shouldReconnect ? reconnectMessageRef.current : null,
+			terminalId: null,
+		});
+		console.info("cloud terminal attach start", {
+			workspace: session.workspace,
+			attachmentId: session.attachmentId,
+			attachNonce: attachRunKey,
+			skipInitialScrollback: shouldSkipScrollback,
+			reconnectAttempt: reconnectAttemptRef.current,
+		});
+
+		const output = new Channel<ArrayBuffer>();
+		output.onmessage = (data: ArrayBuffer) => {
+			if (disposed) {
+				return;
+			}
+			term.write(normalizeTerminalOutput(data));
+		};
+
 		void (async () => {
 			try {
 				const result = await invoke<TerminalAttachResult>(
@@ -291,7 +506,7 @@ export function TerminalSessionHost({
 					{
 						workspace: session.workspace,
 						attachmentId: session.attachmentId,
-						skipScrollback: initialSkipScrollbackRef.current,
+						skipScrollback: shouldSkipScrollback,
 						output,
 					},
 				);
@@ -299,7 +514,13 @@ export function TerminalSessionHost({
 					return;
 				}
 
+				attachInFlightRef.current = false;
 				terminalIdRef.current = result.terminal_id;
+				attachedTerminalId = result.terminal_id;
+				clearReconnectTimer();
+				pendingReconnectRef.current = false;
+				reconnectAttemptRef.current = 0;
+				reconnectMessageRef.current = null;
 				onHostStateChangeRef.current({
 					status: "ready",
 					errorMessage: null,
@@ -310,6 +531,12 @@ export function TerminalSessionHost({
 					attachmentId: session.attachmentId,
 					terminalId: result.terminal_id,
 				});
+
+				if (resetTerminalOnNextAttachRef.current) {
+					term.reset();
+					lastResizeRef.current = null;
+					resetTerminalOnNextAttachRef.current = false;
+				}
 
 				if (result.scrollback_vt) {
 					term.write(result.scrollback_vt);
@@ -324,86 +551,58 @@ export function TerminalSessionHost({
 					scheduleFitAndResize();
 					term.focus();
 				}
+				sendResize(term.cols, term.rows);
 			} catch (error) {
+				attachInFlightRef.current = false;
 				if (disposed) {
 					return;
 				}
-				term.writeln(`\r\n[attach failed] ${String(error)}`);
+
+				const message = String(error);
+				term.writeln(`\r\n[attach failed] ${message}`);
 				console.warn("cloud terminal attach failed", {
 					workspace: session.workspace,
 					attachmentId: session.attachmentId,
-					error: String(error),
+					error: message,
 				});
+
+				if (isRetryableTerminalTransportMessage(message)) {
+					requestReconnect(message);
+					return;
+				}
+
+				pendingReconnectRef.current = false;
+				reconnectAttemptRef.current = 0;
+				reconnectMessageRef.current = null;
 				onHostStateChangeRef.current({
 					status: "error",
-					errorMessage: String(error),
+					errorMessage: message,
+					terminalId: null,
 				});
 			}
 		})();
 
-		term.onData((data) => {
-			sendTerminalInput(data);
-		});
-
-		term.onBinary((data) => {
-			const bytes = new Uint8Array(data.length);
-			for (let i = 0; i < data.length; i++) {
-				bytes[i] = data.charCodeAt(i);
-			}
-			sendTerminalInput(bytes);
-		});
-
-		term.onResize(({ cols, rows }) => {
-			if (!terminalIdRef.current) {
-				return;
-			}
-			const lastResize = lastResizeRef.current;
-			if (lastResize && lastResize.cols === cols && lastResize.rows === rows) {
-				return;
-			}
-			lastResizeRef.current = { cols, rows };
-
-			void invoke("terminal_resize_terminal", {
-				terminal: terminalIdRef.current,
-				cols,
-				rows,
-			});
-		});
-
-		const resizeObserver = new ResizeObserver(() => {
-			scheduleFitAndResize();
-		});
-		resizeObserver.observe(mountElement);
-		if (target) {
-			resizeObserver.observe(target);
-		}
-
 		return () => {
 			disposed = true;
-			resizeObserver.disconnect();
-			detachBindings();
-			term.dispose();
-			termRef.current = null;
-			fitAddonRef.current = null;
-			if (unlistenExit) {
-				void Promise.resolve(unlistenExit()).catch(() => {});
-			}
-			if (unlistenError) {
-				void Promise.resolve(unlistenError()).catch(() => {});
-			}
-			if (terminalIdRef.current) {
+			attachInFlightRef.current = false;
+			if (attachedTerminalId && terminalIdRef.current === attachedTerminalId) {
 				void invoke("terminal_detach_terminal", {
 					workspace: session.workspace,
 					attachmentId: session.attachmentId,
 				});
 				terminalIdRef.current = null;
 			}
-			lastResizeRef.current = null;
-			if (mountElement.parentElement) {
-				mountElement.parentElement.removeChild(mountElement);
-			}
 		};
-	}, [isMountReady, session.attachmentId, session.workspace]);
+	}, [
+		attachNonce,
+		clearReconnectTimer,
+		isMountReady,
+		requestReconnect,
+		scheduleFitAndResize,
+		sendResize,
+		session.attachmentId,
+		session.workspace,
+	]);
 
 	useEffect(() => {
 		if (!visible) {
@@ -412,7 +611,25 @@ export function TerminalSessionHost({
 
 		scheduleFitAndResize();
 		termRef.current?.focus();
-	}, [target, visible]);
+		if (pendingReconnectRef.current && !terminalIdRef.current) {
+			scheduleReconnectAttempt();
+		}
+	}, [scheduleFitAndResize, scheduleReconnectAttempt, visible]);
+
+	useEffect(() => {
+		if (retryNonceRef.current === retryNonce) {
+			return;
+		}
+
+		retryNonceRef.current = retryNonce;
+		clearReconnectTimer();
+		reconnectAttemptRef.current = 0;
+		reconnectMessageRef.current = null;
+		pendingReconnectRef.current = false;
+		resetTerminalOnNextAttachRef.current = true;
+		terminalIdRef.current = null;
+		triggerAttach();
+	}, [clearReconnectTimer, retryNonce, triggerAttach]);
 
 	useEffect(() => {
 		if (!visible || !isPageForeground || session.unread !== true) {
