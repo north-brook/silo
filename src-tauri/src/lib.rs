@@ -3,6 +3,7 @@ mod browser_loopback;
 mod claude;
 mod codex;
 mod config;
+mod files;
 mod gcloud;
 mod git;
 mod logging;
@@ -35,6 +36,7 @@ const MENU_ID_NEXT_TAB: &str = "next_tab";
 const MENU_ID_TOGGLE_PROJECTS_BAR: &str = "toggle_projects_bar";
 const MENU_ID_TOGGLE_GIT_BAR: &str = "toggle_git_bar";
 const MENU_ID_OPEN_GIT_DIFF: &str = "open_git_diff";
+const MENU_ID_OPEN_GIT_FILES: &str = "open_git_files";
 const MENU_ID_OPEN_GIT_CHECKS: &str = "open_git_checks";
 const MENU_ID_GIT_CREATE_OR_PUSH_PR: &str = "git_create_or_push_pr";
 const MENU_ID_GIT_MERGE_PR: &str = "git_merge_pr";
@@ -55,6 +57,7 @@ const SHORTCUT_EVENT_NEXT_TAB: &str = "silo://next-tab";
 const SHORTCUT_EVENT_TOGGLE_PROJECTS_BAR: &str = "silo://toggle-projects-bar";
 const SHORTCUT_EVENT_TOGGLE_GIT_BAR: &str = "silo://toggle-git-bar";
 const SHORTCUT_EVENT_OPEN_GIT_DIFF: &str = "silo://open-git-diff";
+const SHORTCUT_EVENT_OPEN_GIT_FILES: &str = "silo://open-git-files";
 const SHORTCUT_EVENT_OPEN_GIT_CHECKS: &str = "silo://open-git-checks";
 const SHORTCUT_EVENT_GIT_CREATE_OR_PUSH_PR: &str = "silo://git-create-or-push-pr";
 const SHORTCUT_EVENT_GIT_MERGE_PR: &str = "silo://git-merge-pr";
@@ -80,6 +83,7 @@ fn shortcut_targets_main_shell(menu_id: &str) -> bool {
             | MENU_ID_TOGGLE_PROJECTS_BAR
             | MENU_ID_TOGGLE_GIT_BAR
             | MENU_ID_OPEN_GIT_DIFF
+            | MENU_ID_OPEN_GIT_FILES
             | MENU_ID_OPEN_GIT_CHECKS
             | MENU_ID_GIT_CREATE_OR_PUSH_PR
             | MENU_ID_GIT_MERGE_PR
@@ -147,6 +151,7 @@ fn handle_shortcut_menu_event(app_handle: &AppHandle<AppRuntime>, menu_id: &str)
         }
         MENU_ID_TOGGLE_GIT_BAR => emit_shortcut_event(app_handle, SHORTCUT_EVENT_TOGGLE_GIT_BAR),
         MENU_ID_OPEN_GIT_DIFF => emit_shortcut_event(app_handle, SHORTCUT_EVENT_OPEN_GIT_DIFF),
+        MENU_ID_OPEN_GIT_FILES => emit_shortcut_event(app_handle, SHORTCUT_EVENT_OPEN_GIT_FILES),
         MENU_ID_OPEN_GIT_CHECKS => emit_shortcut_event(app_handle, SHORTCUT_EVENT_OPEN_GIT_CHECKS),
         MENU_ID_GIT_CREATE_OR_PUSH_PR => {
             emit_shortcut_event(app_handle, SHORTCUT_EVENT_GIT_CREATE_OR_PUSH_PR)
@@ -304,6 +309,13 @@ pub fn run() {
                     true,
                     Some("CmdOrCtrl+Shift+D"),
                 )?;
+                let open_git_files = MenuItem::with_id(
+                    handle,
+                    MENU_ID_OPEN_GIT_FILES,
+                    "Show Files",
+                    true,
+                    Some("CmdOrCtrl+Shift+E"),
+                )?;
                 let open_git_checks = MenuItem::with_id(
                     handle,
                     MENU_ID_OPEN_GIT_CHECKS,
@@ -408,6 +420,7 @@ pub fn run() {
                 let git_submenu = SubmenuBuilder::new(handle, "Git")
                     .items(&[
                         &open_git_diff,
+                        &open_git_files,
                         &open_git_checks,
                         &git_create_or_push_pr,
                         &git_merge_pr,
@@ -529,6 +542,13 @@ pub fn run() {
             terminal::terminal_write_terminal,
             terminal::terminal_finish_attach,
             terminal::terminal_resize_terminal,
+            files::files_list_tree,
+            files::files_read,
+            files::files_save,
+            files::files_set_watched_paths,
+            files::files_get_watched_state,
+            files::files_open_session,
+            files::files_close_session,
             system::system_memory_usage
         ])
         .build(tauri::generate_context!())

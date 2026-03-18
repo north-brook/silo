@@ -30,6 +30,8 @@ const WORKSPACE_METADATA_BACKGROUND_RETRY_ATTEMPTS: usize = 2;
 const WORKSPACE_METADATA_BACKGROUND_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 pub(crate) const BROWSER_LAST_ACTIVE_METADATA_KEY: &str = "browser-last-active";
 pub(crate) const BROWSER_SESSION_METADATA_PREFIX: &str = "browser-session-";
+pub(crate) const FILE_LAST_ACTIVE_METADATA_KEY: &str = "file-last-active";
+pub(crate) const FILE_SESSION_METADATA_PREFIX: &str = "file-session-";
 pub(crate) const ACTIVE_SESSION_KIND_METADATA_KEY: &str = "active-session-kind";
 pub(crate) const ACTIVE_SESSION_ATTACHMENT_ID_METADATA_KEY: &str = "active-session-attachment-id";
 pub(crate) const TERMINAL_LAST_ACTIVE_METADATA_KEY: &str = "terminal-last-active";
@@ -40,6 +42,10 @@ pub(crate) const TERMINAL_WORKING_METADATA_KEY: &str = "terminal-working";
 
 pub(crate) fn browser_session_metadata_key(attachment_id: &str) -> String {
     format!("{BROWSER_SESSION_METADATA_PREFIX}{attachment_id}")
+}
+
+pub(crate) fn file_session_metadata_key(attachment_id: &str) -> String {
+    format!("{FILE_SESSION_METADATA_PREFIX}{attachment_id}")
 }
 
 pub(crate) fn active_session_metadata_entries(
@@ -60,6 +66,7 @@ pub(crate) fn active_session_metadata_entries(
 pub(crate) fn workspace_last_active_metadata_key(kind: &str) -> Option<&'static str> {
     match kind {
         "browser" => Some(BROWSER_LAST_ACTIVE_METADATA_KEY),
+        "file" => Some(FILE_LAST_ACTIVE_METADATA_KEY),
         "terminal" => Some(TERMINAL_LAST_ACTIVE_METADATA_KEY),
         _ => None,
     }
