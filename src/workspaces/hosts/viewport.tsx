@@ -16,8 +16,13 @@ export function SessionViewport({
 	bgClassName?: string;
 }) {
 	const outletRef = useRef<HTMLDivElement>(null);
-	const { ensureSession, getHost, registerWorkspaceOutlet, setActiveSession } =
-		useSessionHosts();
+	const {
+		ensureSession,
+		getHost,
+		registerWorkspaceOutlet,
+		retrySession,
+		setActiveSession,
+	} = useSessionHosts();
 	const activeSessionKey = activeSession
 		? cloudSessionKey(activeSession)
 		: null;
@@ -57,9 +62,23 @@ export function SessionViewport({
 				>
 					<div className="flex items-center gap-2 text-[11px] text-text-muted">
 						{activeHost?.status === "error" ? (
-							<span>
-								{activeHost.errorMessage ?? "Session failed to attach"}
-							</span>
+							<>
+								<span>
+									{activeHost.errorMessage ?? "Session failed to attach"}
+								</span>
+								<button
+									className="rounded border border-line bg-surface-elevated px-2 py-1 text-[11px] text-text hover:bg-surface"
+									onClick={() => retrySession(activeSessionKey)}
+									type="button"
+								>
+									Retry
+								</button>
+							</>
+						) : activeHost?.status === "reconnecting" ? (
+							<>
+								<Loader />
+								<span>Reconnecting to session...</span>
+							</>
 						) : (
 							<>
 								<Loader />
