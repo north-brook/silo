@@ -1,5 +1,5 @@
 import { useMutation } from "@tanstack/react-query";
-import { ArrowLeft, ArrowRight, RotateCw } from "lucide-react";
+import { ArrowLeft, ArrowRight, Code2, RotateCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@/shared/lib/invoke";
 import { shortcutEvents } from "@/shared/lib/shortcuts";
@@ -124,11 +124,37 @@ export function BrowserSessionHeader({
 		},
 	});
 
-	const busy =
+	const toggleDevtools = useMutation({
+		mutationFn: () =>
+			invoke("browser_toggle_devtools", {
+				workspace: session.workspace,
+				attachmentId: session.attachmentId,
+			}),
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to toggle DevTools",
+				description: error.message,
+			});
+		},
+	});
+
+	useShortcut<void>({
+		event: shortcutEvents.toggleBrowserDevtools,
+		onTrigger: () => {
+			if (!toggleDevtools.isPending) {
+				toggleDevtools.mutate();
+			}
+		},
+	});
+
+	const controlsDisabled =
 		navigate.isPending ||
 		goBack.isPending ||
 		goForward.isPending ||
-		refresh.isPending;
+		refresh.isPending ||
+		toggleDevtools.isPending;
+	const showPageLoading = session.working === true || refresh.isPending;
 
 	return (
 		<form
@@ -141,7 +167,7 @@ export function BrowserSessionHeader({
 		>
 			<button
 				type="button"
-				disabled={busy || session.canGoBack === false}
+				disabled={controlsDisabled || session.canGoBack === false}
 				onClick={() => goBack.mutate()}
 				aria-label="Back"
 				className="h-7 w-7 rounded-md flex items-center justify-center text-text-muted hover:text-text-bright hover:bg-btn-hover disabled:opacity-40 disabled:hover:bg-transparent transition-colors"
@@ -150,7 +176,7 @@ export function BrowserSessionHeader({
 			</button>
 			<button
 				type="button"
-				disabled={busy || session.canGoForward === false}
+				disabled={controlsDisabled || session.canGoForward === false}
 				onClick={() => goForward.mutate()}
 				aria-label="Forward"
 				className="h-7 w-7 rounded-md flex items-center justify-center text-text-muted hover:text-text-bright hover:bg-btn-hover disabled:opacity-40 disabled:hover:bg-transparent transition-colors"
@@ -159,12 +185,16 @@ export function BrowserSessionHeader({
 			</button>
 			<button
 				type="button"
-				disabled={busy}
+				disabled={controlsDisabled}
 				onClick={() => refresh.mutate()}
 				aria-label="Refresh"
 				className="h-7 w-7 rounded-md flex items-center justify-center text-text-muted hover:text-text-bright hover:bg-btn-hover disabled:opacity-40 disabled:hover:bg-transparent transition-colors"
 			>
-				{busy ? <Loader className="text-text-muted" /> : <RotateCw size={12} />}
+				{showPageLoading ? (
+					<Loader className="text-text-muted" />
+				) : (
+					<RotateCw size={12} />
+				)}
 			</button>
 			<input
 				ref={inputRef}
@@ -186,6 +216,15 @@ export function BrowserSessionHeader({
 				autoCapitalize="off"
 				className="flex-1 min-w-0 h-7 rounded-md bg-bg px-2.5 text-[12px] text-text-bright outline-none border border-border-light focus:border-text-muted transition-colors"
 			/>
+			<button
+				type="button"
+				disabled={controlsDisabled}
+				onClick={() => toggleDevtools.mutate()}
+				aria-label="Toggle DevTools"
+				className="h-7 w-7 rounded-md flex items-center justify-center text-text-muted hover:text-text-bright hover:bg-btn-hover disabled:opacity-40 disabled:hover:bg-transparent transition-colors"
+			>
+				<Code2 size={12} />
+			</button>
 		</form>
 	);
 }
