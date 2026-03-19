@@ -7,11 +7,12 @@ use crate::state::{
     WorkspaceMetadataManager,
 };
 use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
+use crate::{emit_workspace_state_changed, AppRuntime};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::State;
+use tauri::{AppHandle, State};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -186,7 +187,8 @@ pub async fn files_open_session(
 }
 
 #[tauri::command]
-pub async fn files_close_session(
+pub fn files_close_session(
+    app: AppHandle<AppRuntime>,
     state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
     attachment_id: String,
@@ -196,21 +198,21 @@ pub async fn files_close_session(
         return Err("file attachment_id must not be empty".to_string());
     }
 
-    let lookup = branch_workspace_lookup(&workspace).await?;
     if state.clear_active_workspace_session_if_matches(
         &workspace,
         "file",
         &attachment_id,
-        lookup.workspace.active_session(),
+        None,
     ) {
         state.enqueue(
             &workspace,
-            Some(lookup.clone()),
+            None,
             active_session_metadata_entries(None),
         );
     }
 
-    enqueue_file_metadata_remove(state.inner(), &workspace, Some(lookup), &attachment_id);
+    enqueue_file_metadata_remove(state.inner(), &workspace, None, &attachment_id);
+    emit_workspace_state_changed(&app, &workspace);
     Ok(())
 }
 
