@@ -134,7 +134,7 @@ run_as_developer "export PATH='${BUN_INSTALL_DIR}/bin:${BREW_PREFIX}/bin:${BREW_
 run_as_developer "export PATH='${BUN_INSTALL_DIR}/bin:${BREW_PREFIX}/bin:${BREW_PREFIX}/sbin:\$PATH' && corepack prepare yarn@stable --activate"
 run_as_developer "export PATH='${BUN_INSTALL_DIR}/bin:${BREW_PREFIX}/bin:${BREW_PREFIX}/sbin:\$PATH' && corepack prepare pnpm@latest --activate"
 
-run_as_developer "export PATH='${BUN_INSTALL_DIR}/bin:${BREW_PREFIX}/bin:${BREW_PREFIX}/sbin:\$PATH' && npm install -g @openai/codex"
+run_as_developer "eval \"\$(${BREW_PREFIX}/bin/brew shellenv)\" && brew install codex"
 run_as_developer 'curl -fsSL https://claude.ai/install.sh | bash'
 
 mkdir -p /etc/profile.d
