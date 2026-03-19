@@ -26,6 +26,15 @@ pub(crate) const WORKSPACE_LIFECYCLE_ERROR_METADATA_KEY: &str = "workspace-lifec
 pub(crate) const WORKSPACE_LIFECYCLE_UPDATED_AT_METADATA_KEY: &str =
     "workspace-lifecycle-updated-at";
 pub(crate) const WORKSPACE_AGENT_HEARTBEAT_METADATA_KEY: &str = "workspace-agent-heartbeat-at";
+pub(crate) const TEMPLATE_OPERATION_KIND_METADATA_KEY: &str = "template-operation-kind";
+pub(crate) const TEMPLATE_OPERATION_PHASE_METADATA_KEY: &str = "template-operation-phase";
+pub(crate) const TEMPLATE_OPERATION_DETAIL_METADATA_KEY: &str = "template-operation-detail";
+pub(crate) const TEMPLATE_OPERATION_ERROR_METADATA_KEY: &str = "template-operation-error";
+pub(crate) const TEMPLATE_OPERATION_UPDATED_AT_METADATA_KEY: &str = "template-operation-updated-at";
+pub(crate) const TEMPLATE_OPERATION_SNAPSHOT_METADATA_KEY: &str = "template-operation-snapshot";
+pub(crate) const TEMPLATE_OPERATION_KIND_LABEL_KEY: &str = "template-operation-kind";
+pub(crate) const TEMPLATE_OPERATION_PHASE_LABEL_KEY: &str = "template-operation-phase";
+pub(crate) const TEMPLATE_OPERATION_ID_LABEL_KEY: &str = "template-operation-id";
 const STARTUP_FAILURE_RETRY_COOLDOWN: Duration = Duration::from_secs(15);
 const METADATA_DELIMITER_CANDIDATES: &[&str] = &["|", ";", "#", "@@", "SILO_METADATA_DELIM"];
 const MAX_WORKSPACE_METADATA_VALUE_LEN: usize = 512;
@@ -60,6 +69,8 @@ pub struct TemplateWorkspace {
     browsers: Vec<WorkspaceSession>,
     files: Vec<WorkspaceSession>,
     template: bool,
+    #[serde(skip_serializing)]
+    template_operation: Option<TemplateOperationState>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -79,6 +90,16 @@ pub struct WorkspaceLifecycle {
     last_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TemplateOperationState {
+    pub(crate) kind: String,
+    pub(crate) phase: String,
+    pub(crate) detail: Option<String>,
+    pub(crate) last_error: Option<String>,
+    pub(crate) updated_at: Option<String>,
+    pub(crate) snapshot_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -268,6 +289,19 @@ impl Workspace {
         self.sessions()
             .into_iter()
             .any(|session| session.kind == kind && session.attachment_id == attachment_id)
+    }
+
+    pub(crate) fn template_operation(&self) -> Option<&TemplateOperationState> {
+        match self {
+            Self::Template(workspace) => workspace.template_operation.as_ref(),
+            Self::Branch(_) => None,
+        }
+    }
+}
+
+impl TemplateWorkspace {
+    pub(crate) fn template_operation(&self) -> Option<&TemplateOperationState> {
+        self.template_operation.as_ref()
     }
 }
 
@@ -468,6 +502,9 @@ pub(crate) struct Snapshot {
     pub(crate) status: String,
     pub(crate) project: Option<String>,
     pub(crate) template: bool,
+    pub(crate) template_operation_kind: Option<String>,
+    pub(crate) template_operation_phase: Option<String>,
+    pub(crate) template_operation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -834,6 +871,56 @@ pub(crate) async fn set_workspace_lifecycle_in_lookup(
     .await
 }
 
+pub(crate) fn template_operation_metadata_entries(
+    kind: &str,
+    phase: &str,
+    detail: Option<&str>,
+    last_error: Option<&str>,
+    snapshot_name: Option<&str>,
+) -> Vec<WorkspaceMetadataEntry> {
+    vec![
+        WorkspaceMetadataEntry {
+            key: TEMPLATE_OPERATION_KIND_METADATA_KEY.to_string(),
+            value: Some(kind.to_string()),
+        },
+        WorkspaceMetadataEntry {
+            key: TEMPLATE_OPERATION_PHASE_METADATA_KEY.to_string(),
+            value: Some(phase.to_string()),
+        },
+        WorkspaceMetadataEntry {
+            key: TEMPLATE_OPERATION_DETAIL_METADATA_KEY.to_string(),
+            value: detail.map(str::to_string),
+        },
+        WorkspaceMetadataEntry {
+            key: TEMPLATE_OPERATION_ERROR_METADATA_KEY.to_string(),
+            value: last_error.map(str::to_string),
+        },
+        WorkspaceMetadataEntry {
+            key: TEMPLATE_OPERATION_UPDATED_AT_METADATA_KEY.to_string(),
+            value: Some(current_rfc3339_timestamp()),
+        },
+        WorkspaceMetadataEntry {
+            key: TEMPLATE_OPERATION_SNAPSHOT_METADATA_KEY.to_string(),
+            value: snapshot_name.map(str::to_string),
+        },
+    ]
+}
+
+pub(crate) async fn set_template_operation_in_lookup(
+    lookup: WorkspaceLookup,
+    kind: &str,
+    phase: &str,
+    detail: Option<&str>,
+    last_error: Option<&str>,
+    snapshot_name: Option<&str>,
+) -> Result<(), String> {
+    apply_workspace_metadata_entries_in_lookup(
+        lookup,
+        &template_operation_metadata_entries(kind, phase, detail, last_error, snapshot_name),
+    )
+    .await
+}
+
 pub(crate) async fn apply_workspace_metadata_entries_in_lookup(
     lookup: WorkspaceLookup,
     entries: &[WorkspaceMetadataEntry],
@@ -1010,6 +1097,7 @@ fn pending_template_workspace(name: &str, project_label: &str, zone: &str) -> Te
         browsers: Vec::new(),
         files: Vec::new(),
         template: true,
+        template_operation: None,
     }
 }
 
@@ -1582,18 +1670,18 @@ pub(crate) async fn delete_template_workspace_if_exists(
     Ok(())
 }
 
-pub(crate) async fn create_template_snapshot_for_disk(
+pub(crate) async fn create_template_snapshot_for_disk_named(
     account: &str,
     gcloud_project: &str,
     project: &str,
+    snapshot_name: &str,
     source_disk: &str,
     zone: &str,
-) -> Result<String, String> {
-    let snapshot_name = generate_template_snapshot_name(project);
+) -> Result<(), String> {
     let snapshot_result = run_gcloud(
         account,
         gcloud_project,
-        create_template_snapshot_args(&snapshot_name, source_disk, zone, project),
+        create_template_snapshot_args(snapshot_name, source_disk, zone, project),
     )
     .await?;
 
@@ -1604,7 +1692,7 @@ pub(crate) async fn create_template_snapshot_for_disk(
         ));
     }
 
-    Ok(snapshot_name)
+    Ok(())
 }
 
 pub(crate) async fn delete_old_template_snapshots(
@@ -1752,6 +1840,79 @@ pub(crate) async fn wait_for_template_snapshot_ready(
         "template snapshot {snapshot_name} did not reach {TEMPLATE_SNAPSHOT_STATUS_READY} after {} seconds",
         TEMPLATE_SNAPSHOT_POLL_ATTEMPTS * TEMPLATE_SNAPSHOT_POLL_INTERVAL.as_secs() as usize
     ))
+}
+
+pub(crate) async fn describe_snapshot_if_exists_in_project(
+    snapshot_name: &str,
+    account: &str,
+    project: &str,
+) -> Result<Option<Snapshot>, String> {
+    let result = run_gcloud(
+        account,
+        project,
+        [
+            "compute".to_string(),
+            "snapshots".to_string(),
+            "describe".to_string(),
+            snapshot_name.to_string(),
+            "--format=json(name,status,creationTimestamp,labels)".to_string(),
+        ],
+    )
+    .await?;
+
+    if !result.success {
+        let stderr = result.stderr.to_ascii_lowercase();
+        if stderr.contains("was not found") || stderr.contains("could not fetch resource") {
+            return Ok(None);
+        }
+        return Err(gcloud_error(
+            "failed to describe template snapshot",
+            &result.stderr,
+        ));
+    }
+
+    let value: Value = serde_json::from_str(&result.stdout)
+        .map_err(|error| format!("invalid gcloud json: {error}"))?;
+    Ok(Some(parse_snapshot(&value)?))
+}
+
+pub(crate) async fn update_template_snapshot_labels(
+    account: &str,
+    project: &str,
+    snapshot_name: &str,
+    updates: &[(&str, &str)],
+    removals: &[&str],
+) -> Result<(), String> {
+    let mut args = vec![
+        "compute".to_string(),
+        "snapshots".to_string(),
+        "update".to_string(),
+        snapshot_name.to_string(),
+    ];
+
+    if !updates.is_empty() {
+        args.push(format!(
+            "--update-labels={}",
+            updates
+                .iter()
+                .map(|(key, value)| format!("{key}={}", sanitize_label_value(value)))
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    if !removals.is_empty() {
+        args.push(format!("--remove-labels={}", removals.join(",")));
+    }
+
+    let result = run_gcloud(account, project, args).await?;
+    if !result.success {
+        return Err(gcloud_error(
+            "failed to update template snapshot labels",
+            &result.stderr,
+        ));
+    }
+
+    Ok(())
 }
 
 async fn describe_snapshot_in_project(
@@ -1950,6 +2111,7 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
     let files = parse_prefixed_workspace_sessions(&metadata, FILE_SESSION_METADATA_PREFIX);
 
     if template {
+        let template_operation = resolve_template_operation(&metadata);
         Ok(Workspace::Template(TemplateWorkspace {
             base,
             unread,
@@ -1958,6 +2120,7 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
             browsers,
             files,
             template: true,
+            template_operation,
         }))
     } else {
         let branch = metadata.get("branch").cloned().unwrap_or_default();
@@ -1998,6 +2161,21 @@ fn parse_snapshot(value: &Value) -> Result<Snapshot, String> {
             .and_then(Value::as_str)
             .map(str::to_owned),
         template,
+        template_operation_kind: labels
+            .get(TEMPLATE_OPERATION_KIND_LABEL_KEY)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .filter(|value| !value.trim().is_empty()),
+        template_operation_phase: labels
+            .get(TEMPLATE_OPERATION_PHASE_LABEL_KEY)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .filter(|value| !value.trim().is_empty()),
+        template_operation_id: labels
+            .get(TEMPLATE_OPERATION_ID_LABEL_KEY)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .filter(|value| !value.trim().is_empty()),
     })
 }
 
@@ -2162,6 +2340,48 @@ fn resolve_workspace_agent_heartbeat(metadata: &HashMap<String, String>) -> Opti
         .get(WORKSPACE_AGENT_HEARTBEAT_METADATA_KEY)
         .cloned()
         .filter(|value| !value.trim().is_empty())
+}
+
+fn resolve_template_operation(
+    metadata: &HashMap<String, String>,
+) -> Option<TemplateOperationState> {
+    let kind = metadata
+        .get(TEMPLATE_OPERATION_KIND_METADATA_KEY)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let phase = metadata
+        .get(TEMPLATE_OPERATION_PHASE_METADATA_KEY)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let detail = metadata
+        .get(TEMPLATE_OPERATION_DETAIL_METADATA_KEY)
+        .cloned()
+        .filter(|value| !value.trim().is_empty());
+    let last_error = metadata
+        .get(TEMPLATE_OPERATION_ERROR_METADATA_KEY)
+        .cloned()
+        .filter(|value| !value.trim().is_empty());
+    let updated_at = metadata
+        .get(TEMPLATE_OPERATION_UPDATED_AT_METADATA_KEY)
+        .cloned()
+        .filter(|value| !value.trim().is_empty());
+    let snapshot_name = metadata
+        .get(TEMPLATE_OPERATION_SNAPSHOT_METADATA_KEY)
+        .cloned()
+        .filter(|value| !value.trim().is_empty());
+
+    Some(TemplateOperationState {
+        kind,
+        phase,
+        detail,
+        last_error,
+        updated_at,
+        snapshot_name,
+    })
 }
 
 fn resolve_workspace_active_session(
@@ -2414,7 +2634,7 @@ fn generate_branch_workspace_name(project: &str, branch: &str) -> String {
     generate_project_workspace_name(project, &suffix)
 }
 
-fn generate_template_snapshot_name(project: &str) -> String {
+pub(crate) fn generate_template_snapshot_name(project: &str) -> String {
     let now = OffsetDateTime::now_utc();
     let suffix = format!("template-{}-{:03}", now.unix_timestamp(), now.millisecond());
     generate_project_workspace_name(project, &suffix)
@@ -3350,6 +3570,9 @@ mod tests {
                 created_at: "2026-03-12T12:00:00Z".to_string(),
                 project: Some("demo".to_string()),
                 template: true,
+                template_operation_kind: None,
+                template_operation_phase: None,
+                template_operation_id: None,
             }]
         );
     }
@@ -3362,6 +3585,9 @@ mod tests {
             created_at: "2026-03-12T12:00:00Z".to_string(),
             project: None,
             template: true,
+            template_operation_kind: None,
+            template_operation_phase: None,
+            template_operation_id: None,
         };
 
         assert_eq!(snapshot_into_template(snapshot), None);
@@ -3375,6 +3601,9 @@ mod tests {
             created_at: "2026-03-12T12:00:00Z".to_string(),
             project: Some("demo".to_string()),
             template: true,
+            template_operation_kind: None,
+            template_operation_phase: None,
+            template_operation_id: None,
         };
         let non_matching = Snapshot {
             name: "other-silo-template-1710000000-123".to_string(),
@@ -3382,6 +3611,9 @@ mod tests {
             created_at: "2026-03-12T12:00:00Z".to_string(),
             project: Some("other".to_string()),
             template: true,
+            template_operation_kind: None,
+            template_operation_phase: None,
+            template_operation_id: None,
         };
 
         assert!(snapshot_matches_project(&matching, "Demo"));
