@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { GCloudIcon } from "@/shared/ui/icons/gcloud";
 import { SiloIcon } from "@/shared/ui/icons/silo";
 import { Loader } from "@/shared/ui/loader";
+import type { WorkspaceLifecycle } from "@/workspaces/api";
 
 interface Step {
 	label: string;
@@ -101,18 +102,19 @@ export function WorkspaceSavingScreen({
 
 export function WorkspaceResumingScreen({
 	status,
-	ready,
+	lifecycle,
 }: {
 	status: string;
-	ready: boolean;
+	lifecycle: WorkspaceLifecycle;
 }) {
 	const isRunning = status === "RUNNING";
 	const resumeState: Step["state"] = isRunning ? "done" : "active";
-	const prepareState: Step["state"] = isRunning
-		? ready
-			? "done"
-			: "active"
-		: "pending";
+	const prepareState: Step["state"] =
+		!isRunning
+			? "pending"
+			: lifecycle.phase === "ready"
+				? "done"
+				: "active";
 
 	return (
 		<ScreenFrame

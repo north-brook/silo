@@ -14,7 +14,10 @@ import {
 import { toast } from "@/shared/ui/toaster";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { invoke } from "@/shared/lib/invoke";
-import { submitWorkspacePrompt } from "@/workspaces/api";
+import {
+	type WorkspaceLifecycle,
+	submitWorkspacePrompt,
+} from "@/workspaces/api";
 import {
 	type SessionRouteState,
 	workspaceSessionHref,
@@ -38,7 +41,10 @@ const PROVIDERS = [
 	},
 ] as Provider[];
 
-function statusMessage(status: string): string {
+function statusMessage(status: string, lifecycle: WorkspaceLifecycle): string {
+	if (status === "RUNNING" && lifecycle.phase !== "ready") {
+		return lifecycle.detail ?? lifecycle.last_error ?? "Preparing workspace...";
+	}
 	switch (status) {
 		case "STAGING":
 		case "PROVISIONING":
@@ -59,14 +65,14 @@ function statusMessage(status: string): string {
 export function PromptWorkspace({
 	autoFocusPrompt,
 	isRunning,
-	ready,
+	lifecycle,
 	status,
 	workspace,
 	project,
 }: {
 	autoFocusPrompt: boolean;
 	isRunning: boolean;
-	ready: boolean;
+	lifecycle: WorkspaceLifecycle;
 	status: string;
 	workspace: string;
 	project: string | null;
@@ -155,7 +161,10 @@ export function PromptWorkspace({
 		},
 	});
 	const canSubmit =
-		isRunning && ready && prompt.trim().length > 0 && !submitPrompt.isPending;
+		isRunning &&
+		lifecycle.phase === "ready" &&
+		prompt.trim().length > 0 &&
+		!submitPrompt.isPending;
 
 	return (
 		<div className="flex-1 flex flex-col items-center justify-center p-6">
@@ -265,7 +274,7 @@ export function PromptWorkspace({
 						</button>
 					</div>
 				</div>
-				{isRunning && ready ? (
+				{isRunning && lifecycle.phase === "ready" ? (
 					<div className="flex items-center gap-3 mt-3">
 						<button
 							type="button"
@@ -288,7 +297,7 @@ export function PromptWorkspace({
 					<div className="flex items-center gap-2 mt-3 px-2 py-1 text-[11px] text-text-muted">
 						<Loader className="text-text-muted" />
 						<span>
-							{isRunning ? "Waiting for SSH..." : statusMessage(status)}
+							{statusMessage(status, lifecycle)}
 						</span>
 					</div>
 				)}

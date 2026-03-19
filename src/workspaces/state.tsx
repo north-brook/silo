@@ -18,6 +18,7 @@ import {
 	isTemplateWorkspace,
 	type Workspace,
 	type WorkspaceSession,
+	workspaceIsReady,
 	workspaceSessions,
 } from "@/workspaces/api";
 
@@ -192,7 +193,7 @@ export function useWorkspaceProject() {
 export function useWorkspaceReady() {
 	const { workspace } = useWorkspaceStateContext();
 
-	return workspace?.status === "RUNNING" && workspace.ready === true;
+	return workspace ? workspaceIsReady(workspace) : false;
 }
 
 export function useWorkspaceSessions() {

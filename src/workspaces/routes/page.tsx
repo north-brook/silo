@@ -11,6 +11,7 @@ import {
 } from "@/workspaces/routes/paths";
 import {
 	isTemplateWorkspace,
+	workspaceIsReady,
 	workspaceSessions,
 } from "@/workspaces/api";
 import { PromptWorkspace } from "@/workspaces/prompt/screen";
@@ -103,11 +104,11 @@ function WorkspaceView() {
 	}
 
 	if (transition === "resuming" && workspace) {
-		if (workspace.status !== "RUNNING" || !workspace.ready) {
+		if (!workspaceIsReady(workspace)) {
 			return (
 				<WorkspaceResumingScreen
 					status={workspace.status}
-					ready={workspace.ready}
+					lifecycle={workspace.lifecycle}
 				/>
 			);
 		}
@@ -135,7 +136,7 @@ function WorkspaceView() {
 		return (
 			<TemplatingWorkspace
 				isRunning={isRunning}
-				ready={workspace.ready}
+				lifecycle={workspace.lifecycle}
 				status={workspace.status}
 				workspace={workspace.name}
 				project={workspace.project}
@@ -147,7 +148,7 @@ function WorkspaceView() {
 		<PromptWorkspace
 			autoFocusPrompt={freshRef.current}
 			isRunning={isRunning}
-			ready={workspace.ready}
+			lifecycle={workspace.lifecycle}
 			status={workspace.status}
 			workspace={workspace.name}
 			project={workspace.project}
