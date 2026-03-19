@@ -152,6 +152,9 @@ export function TemplatingWorkspace({
 	const navigate = useNavigate();
 	const queryClient = useQueryClient();
 	const { steps, allDone } = useProvisioningSteps(status, lifecycle);
+	const startupFailed = lifecycle.phase === "failed";
+	const startupError =
+		lifecycle.last_error ?? lifecycle.detail ?? "Template startup failed";
 
 	const createTerminal = useMutation({
 		mutationFn: () =>
@@ -196,6 +199,12 @@ export function TemplatingWorkspace({
 						))}
 					</div>
 				)}
+
+				{startupFailed ? (
+					<p className="max-w-md text-center text-[11px] text-error">
+						{startupError}
+					</p>
+				) : null}
 
 				{allDone && (
 					<div className="flex items-center gap-3">
