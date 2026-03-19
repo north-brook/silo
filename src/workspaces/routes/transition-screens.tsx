@@ -1,5 +1,6 @@
 import { Check, HardDrive } from "lucide-react";
 import type { ReactNode } from "react";
+import type { TemplateOperation } from "@/projects/api";
 import { GCloudIcon } from "@/shared/ui/icons/gcloud";
 import { SiloIcon } from "@/shared/ui/icons/silo";
 import { Loader } from "@/shared/ui/loader";
@@ -59,44 +60,25 @@ function ScreenFrame({ steps }: { steps: Step[] }) {
 	);
 }
 
-export function WorkspaceSavingScreen({
-	status,
-	deleted,
+export function TemplateOperationScreen({
+	operation,
 }: {
-	status: string;
-	deleted: boolean;
+	operation: TemplateOperation;
 }) {
-	const isStopping = status === "STOPPING";
-	const isStopped = status === "TERMINATED" || status === "STOPPED";
-	const stopState: Step["state"] =
-		deleted || isStopped ? "done" : isStopping ? "active" : "pending";
-	const snapshotState: Step["state"] = deleted
-		? "done"
-		: isStopped
-			? "active"
-			: "pending";
-	const cleanupState: Step["state"] = deleted ? "done" : "pending";
+	const steps =
+		operation.kind === "delete"
+			? buildDeleteSteps(operation)
+			: buildSaveSteps(operation);
 
 	return (
-		<ScreenFrame
-			steps={[
-				{
-					label: "Stopping virtual machine",
-					icon: <GCloudIcon height={ICON_SIZE} />,
-					state: stopState,
-				},
-				{
-					label: "Snapshotting disk",
-					icon: <HardDrive size={ICON_SIZE} />,
-					state: snapshotState,
-				},
-				{
-					label: "Cleaning up",
-					icon: <GCloudIcon height={ICON_SIZE} />,
-					state: cleanupState,
-				},
-			]}
-		/>
+		<div className="flex-1 flex flex-col items-center justify-center p-6 gap-4">
+			<ScreenFrame steps={steps} />
+			{operation.status === "failed" && operation.last_error ? (
+				<p className="max-w-md text-center text-[11px] text-error">
+					{operation.last_error}
+				</p>
+			) : null}
+		</div>
 	);
 }
 
@@ -132,4 +114,105 @@ export function WorkspaceResumingScreen({
 			]}
 		/>
 	);
+}
+
+function buildSaveSteps(operation: TemplateOperation): Step[] {
+	const completed = operation.status === "completed";
+
+	return [
+		{
+			label: "Waiting for template workspace",
+			icon: <SiloIcon height={ICON_SIZE} />,
+			state: stepState(
+				operation,
+				["waiting_for_template_ready"],
+				["clearing_runtime_state", "stopping_vm", "creating_snapshot", "waiting_for_snapshot_ready", "deleting_old_snapshots", "deleting_template_workspace", "completed"],
+				completed,
+			),
+		},
+		{
+			label: "Removing runtime state",
+			icon: <SiloIcon height={ICON_SIZE} />,
+			state: stepState(
+				operation,
+				["clearing_runtime_state"],
+				["stopping_vm", "creating_snapshot", "waiting_for_snapshot_ready", "deleting_old_snapshots", "deleting_template_workspace", "completed"],
+				completed,
+			),
+		},
+		{
+			label: "Stopping virtual machine",
+			icon: <GCloudIcon height={ICON_SIZE} />,
+			state: stepState(
+				operation,
+				["stopping_vm"],
+				["creating_snapshot", "waiting_for_snapshot_ready", "deleting_old_snapshots", "deleting_template_workspace", "completed"],
+				completed,
+			),
+		},
+		{
+			label: "Creating template snapshot",
+			icon: <HardDrive size={ICON_SIZE} />,
+			state: stepState(
+				operation,
+				["creating_snapshot", "waiting_for_snapshot_ready"],
+				["deleting_old_snapshots", "deleting_template_workspace", "completed"],
+				completed,
+			),
+		},
+		{
+			label: "Removing previous snapshots",
+			icon: <HardDrive size={ICON_SIZE} />,
+			state: stepState(
+				operation,
+				["deleting_old_snapshots"],
+				["deleting_template_workspace", "completed"],
+				completed,
+			),
+		},
+		{
+			label: "Cleaning up template workspace",
+			icon: <GCloudIcon height={ICON_SIZE} />,
+			state: stepState(operation, ["deleting_template_workspace"], ["completed"], completed),
+		},
+	];
+}
+
+function buildDeleteSteps(operation: TemplateOperation): Step[] {
+	const completed = operation.status === "completed";
+
+	return [
+		{
+			label: "Deleting template workspace",
+			icon: <GCloudIcon height={ICON_SIZE} />,
+			state: stepState(
+				operation,
+				["deleting_template_workspace"],
+				["deleting_snapshots", "completed"],
+				completed,
+			),
+		},
+		{
+			label: "Deleting template snapshots",
+			icon: <HardDrive size={ICON_SIZE} />,
+			state: stepState(operation, ["deleting_snapshots"], ["completed"], completed),
+		},
+	];
+}
+
+function stepState(
+	operation: TemplateOperation,
+	activePhases: string[],
+	donePhases: string[],
+	completed: boolean,
+): Step["state"] {
+	if (completed || donePhases.includes(operation.phase)) {
+		return "done";
+	}
+
+	if (activePhases.includes(operation.phase) || operation.status === "failed") {
+		return "active";
+	}
+
+	return "pending";
 }

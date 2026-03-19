@@ -12,6 +12,7 @@ import {
 	type CloudSession,
 	normalizeWorkspaceSession,
 } from "@/workspaces/hosts/model";
+import { type TemplateState, getTemplateState } from "@/projects/api";
 import { useWorkspaceRouteParams } from "@/workspaces/routes/params";
 import { invoke } from "@/shared/lib/invoke";
 import {
@@ -295,6 +296,15 @@ export function useWorkspaceProject() {
 	const { project } = useWorkspaceRouteParams();
 
 	return workspace?.project ?? routeProject ?? project ?? "";
+}
+
+export function useTemplateState(project: string | null | undefined) {
+	return useQuery<TemplateState>({
+		queryKey: ["templates_get_state", project],
+		queryFn: () => getTemplateState(project ?? ""),
+		enabled: !!project,
+		refetchInterval: 2000,
+	});
 }
 
 export function useWorkspaceReady() {

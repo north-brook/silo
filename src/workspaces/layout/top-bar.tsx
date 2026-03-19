@@ -9,14 +9,13 @@ import {
 	Save,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { gitUpdateBranch, gitUpdateTargetBranch } from "@/workspaces/git/api";
 import { invoke } from "@/shared/lib/invoke";
-import type { ListedProject } from "@/projects/api";
 import {
-	type WorkspaceRouteState,
-	workspaceHref,
-} from "@/workspaces/routes/paths";
+	type ListedProject,
+	type TemplateState,
+	saveTemplate,
+} from "@/projects/api";
 import {
 	isTemplateWorkspace,
 	type Workspace,
@@ -24,6 +23,7 @@ import {
 } from "@/workspaces/api";
 import { useGitSidebar } from "@/workspaces/git/context";
 import { GitSidebarToggle } from "@/workspaces/git/toggle";
+import { useTemplateState } from "@/workspaces/state";
 import Image from "@/shared/ui/image";
 import { Loader } from "@/shared/ui/loader";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
@@ -74,8 +74,10 @@ function ProjectsSidebarReopenButton() {
 
 function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 	const { isOpen: projectsBarOpen } = useProjectsSidebar();
-	const navigate = useNavigate();
 	const queryClient = useQueryClient();
+	const templateState = useTemplateState(workspace.project);
+	const templateOperation = templateState.data?.operation;
+	const templateBusy = templateOperation?.status === "running";
 
 	const projects = useQuery({
 		queryKey: ["projects_list_projects"],
@@ -86,36 +88,26 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 	)?.image;
 
 	const save = useMutation({
-		mutationFn: () =>
-			invoke("templates_save_template", { project: workspace.project ?? "" }),
-		onMutate: () => {
-			navigate(
-				workspaceHref({
-					project: workspace.project ?? "",
-					workspace: workspace.name,
-				}),
-				{
-					replace: true,
-					state: { transition: "saving" } satisfies WorkspaceRouteState,
-				},
-			);
-		},
-		onSuccess: () => {
+		mutationFn: () => saveTemplate(workspace.project ?? ""),
+		onSuccess: (operation) => {
 			queryClient.invalidateQueries({
 				queryKey: ["workspaces_list_workspaces"],
 			});
 			queryClient.invalidateQueries({
 				queryKey: ["templates_list_templates"],
 			});
+			queryClient.setQueryData<TemplateState | undefined>(
+				["templates_get_state", workspace.project ?? ""],
+				(current) => ({
+					project: workspace.project ?? "",
+					workspace_name: workspace.name,
+					workspace_present: current?.workspace_present ?? true,
+					snapshot_name: current?.snapshot_name ?? null,
+					operation,
+				}),
+			);
 		},
 		onError: (error) => {
-			navigate(
-				workspaceHref({
-					project: workspace.project ?? "",
-					workspace: workspace.name,
-				}),
-				{ replace: true, state: null },
-			);
 			toast({
 				variant: "error",
 				title: "Failed to save template",
@@ -150,16 +142,16 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 				{workspaceIsReady(workspace) && (
 					<button
 						type="button"
-						disabled={save.isPending}
+						disabled={save.isPending || templateBusy}
 						onClick={() => save.mutate()}
 						className="flex items-center gap-1.5 justify-center px-2.5 py-1 rounded text-[11px] font-medium bg-green-600 text-white transition-colors hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
 					>
-						{save.isPending ? (
+						{save.isPending || templateBusy ? (
 							<Loader className="text-white" />
 						) : (
 							<Save size={10} />
 						)}
-						Save
+						{templateBusy ? "Saving" : "Save"}
 					</button>
 				)}
 			</div>

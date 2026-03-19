@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Loader } from "@/shared/ui/loader";
 import {
+	useTemplateState,
 	useWorkspaceProject,
 	useWorkspaceState,
 } from "@/workspaces/state";
@@ -18,7 +19,7 @@ import { PromptWorkspace } from "@/workspaces/prompt/screen";
 import { TemplatingWorkspace } from "@/workspaces/template/screen";
 import {
 	WorkspaceResumingScreen,
-	WorkspaceSavingScreen,
+	TemplateOperationScreen,
 } from "@/workspaces/routes/transition-screens";
 
 export default function WorkspacePage() {
@@ -34,6 +35,17 @@ function WorkspaceView() {
 	const { isLoading, isMissing, workspace } = useWorkspaceState();
 	const project = useWorkspaceProject();
 	const transition = routeState?.transition;
+	const templateState = useTemplateState(
+		(workspace ? isTemplateWorkspace(workspace) : false) || isMissing
+			? project
+			: null,
+	);
+	const templateOperation = templateState.data?.operation ?? null;
+	const templateLifecycleOperation =
+		templateOperation &&
+		(templateOperation.kind === "save" || templateOperation.kind === "delete")
+			? templateOperation
+			: null;
 
 	const redirectHref = useMemo(() => {
 		if (!workspace || isTemplateWorkspace(workspace) || transition) {
@@ -83,7 +95,12 @@ function WorkspaceView() {
 	}, [navigate, redirectHref]);
 
 	useEffect(() => {
-		if (transition !== "saving" || !isMissing || savingRoutedRef.current) {
+		if (
+			!templateLifecycleOperation ||
+			templateLifecycleOperation.status !== "completed" ||
+			(!isMissing && templateState.data?.workspace_present !== false) ||
+			savingRoutedRef.current
+		) {
 			return;
 		}
 
@@ -92,14 +109,11 @@ function WorkspaceView() {
 		return () => {
 			window.clearTimeout(timer);
 		};
-	}, [isMissing, navigate, transition]);
+	}, [isMissing, navigate, templateLifecycleOperation, templateState.data?.workspace_present]);
 
-	if (transition === "saving") {
+	if (templateLifecycleOperation) {
 		return (
-			<WorkspaceSavingScreen
-				status={workspace?.status ?? ""}
-				deleted={isMissing}
-			/>
+			<TemplateOperationScreen operation={templateLifecycleOperation} />
 		);
 	}
 
