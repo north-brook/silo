@@ -1,4 +1,5 @@
 use crate::bootstrap::is_retryable_terminal_transport_error;
+use crate::bootstrap;
 use crate::remote::{
     assistant_prompt_command, remote_command_error, run_remote_command, run_terminal_user_command,
     shell_quote, terminal_shell_command, wrap_remote_shell_command, REMOTE_WORKSPACE_OBSERVER_BIN,
@@ -248,8 +249,9 @@ pub async fn terminal_attach_terminal(
 ) -> Result<TerminalAttachResult, String> {
     let attach_started = Instant::now();
     let lookup = workspaces::find_workspace(&workspace).await?;
-    if !lookup.workspace.ready() {
-        return Err(format!("workspace {workspace} is not ready"));
+    if !lookup.workspace.is_ready() {
+        bootstrap::start_workspace_startup_reconcile_if_needed(lookup.workspace.clone());
+        return Err(workspaces::workspace_not_ready_error(&lookup.workspace));
     }
     log::info!(
         "terminal attach start workspace={} attachment_id={} cols={} rows={}",
@@ -335,8 +337,9 @@ pub async fn terminal_run_terminal(
     command: String,
 ) -> Result<TerminalRunResult, String> {
     let lookup = workspaces::find_workspace(&workspace).await?;
-    if !lookup.workspace.ready() {
-        return Err(format!("workspace {workspace} is not ready"));
+    if !lookup.workspace.is_ready() {
+        bootstrap::start_workspace_startup_reconcile_if_needed(lookup.workspace.clone());
+        return Err(workspaces::workspace_not_ready_error(&lookup.workspace));
     }
     let session = session_for_command(&attachment_id, &command);
     let created = find_terminal_session(&lookup, &attachment_id)

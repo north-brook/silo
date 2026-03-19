@@ -1,3 +1,4 @@
+use crate::bootstrap;
 use crate::remote::{
     run_remote_command, run_remote_command_with_stdin, shell_quote, workspace_shell_command,
     workspace_shell_command_preserving_stdin, REMOTE_WORKSPACE_OBSERVER_BIN,
@@ -224,8 +225,9 @@ async fn branch_workspace_lookup(workspace: &str) -> Result<WorkspaceLookup, Str
             workspace
         ));
     }
-    if !lookup.workspace.ready() {
-        return Err(format!("workspace {workspace} is not ready"));
+    if !lookup.workspace.is_ready() {
+        bootstrap::start_workspace_startup_reconcile_if_needed(lookup.workspace.clone());
+        return Err(workspaces::workspace_not_ready_error(&lookup.workspace));
     }
     Ok(lookup)
 }

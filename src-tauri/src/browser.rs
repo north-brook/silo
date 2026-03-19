@@ -1,3 +1,4 @@
+use crate::bootstrap;
 use crate::browser_loopback::BrowserLoopbackManager;
 use crate::router::RouterManager;
 use crate::state::{
@@ -111,8 +112,9 @@ async fn create_browser_tab(
     url: Option<String>,
 ) -> Result<BrowserCreateResult, String> {
     let lookup = workspaces::find_workspace(&workspace).await?;
-    if !lookup.workspace.ready() {
-        return Err(format!("workspace {workspace} is not ready"));
+    if !lookup.workspace.is_ready() {
+        bootstrap::start_workspace_startup_reconcile_if_needed(lookup.workspace.clone());
+        return Err(workspaces::workspace_not_ready_error(&lookup.workspace));
     }
 
     let existing_names = lookup
@@ -151,8 +153,9 @@ pub async fn browser_mount_tab(
     visible: bool,
 ) -> Result<BrowserMountResult, String> {
     let lookup = workspaces::find_workspace(&workspace).await?;
-    if !lookup.workspace.ready() {
-        return Err(format!("workspace {workspace} is not ready"));
+    if !lookup.workspace.is_ready() {
+        bootstrap::start_workspace_startup_reconcile_if_needed(lookup.workspace.clone());
+        return Err(workspaces::workspace_not_ready_error(&lookup.workspace));
     }
 
     let mut session = resolve_browser_session(state.inner(), &lookup, &workspace, &attachment_id)?;
