@@ -5,7 +5,7 @@ use crate::remote::{
 };
 use crate::state::{active_session_metadata_entries, WorkspaceMetadataManager};
 use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
-use crate::AppRuntime;
+use crate::{emit_workspace_state_changed, AppRuntime};
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -401,45 +401,83 @@ pub fn terminal_detach_terminal(
 }
 
 #[tauri::command]
-pub async fn terminal_kill_terminal(
+pub fn terminal_kill_terminal(
+    app: AppHandle<AppRuntime>,
     state: State<'_, TerminalManager>,
     workspace_state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
     attachment_id: String,
 ) -> Result<TerminalKillResult, String> {
-    let lookup = workspaces::find_workspace(&workspace).await?;
-    let result = run_remote_command(
-        &lookup,
-        &run_terminal_user_command(&format!("zmx kill {}", shell_quote(&attachment_id))),
-    )
-    .await?;
-    if !result.success {
-        return Err(remote_command_error(
-            "failed to kill terminal session",
-            &result.stderr,
-        ));
+    let attachment_id = attachment_id.trim().to_string();
+    if attachment_id.is_empty() {
+        return Err("terminal attachment_id must not be empty".to_string());
     }
+
+    let key = AttachmentKey {
+        workspace: workspace.clone(),
+        name: attachment_id.clone(),
+    };
+    if let Some(attachment) = state.remove_by_key(&key) {
+        kill_local_attachment(&attachment)?;
+    }
+
     workspace_state.remove_workspace_session(&workspace, "terminal", &attachment_id);
     if workspace_state.clear_active_workspace_session_if_matches(
         &workspace,
         "terminal",
         &attachment_id,
-        lookup.workspace.active_session(),
+        None,
     ) {
-        workspace_state.enqueue(
-            &workspace,
-            Some(lookup.clone()),
-            active_session_metadata_entries(None),
-        );
+        workspace_state.enqueue(&workspace, None, active_session_metadata_entries(None));
     }
+    emit_workspace_state_changed(&app, &workspace);
 
-    let key = AttachmentKey {
-        workspace,
-        name: attachment_id,
-    };
-    if let Some(attachment) = state.remove_by_key(&key) {
-        kill_local_attachment(&attachment)?;
-    }
+    let workspace_for_kill = workspace.clone();
+    let attachment_for_kill = attachment_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let lookup = match workspaces::find_workspace(&workspace_for_kill).await {
+            Ok(lookup) => lookup,
+            Err(error) => {
+                log::warn!(
+                    "failed to resolve workspace {} for terminal close {}: {}",
+                    workspace_for_kill,
+                    attachment_for_kill,
+                    error
+                );
+                return;
+            }
+        };
+
+        let result = match run_remote_command(
+            &lookup,
+            &run_terminal_user_command(&format!(
+                "zmx kill {}",
+                shell_quote(&attachment_for_kill)
+            )),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                log::warn!(
+                    "background terminal kill failed workspace={} attachment_id={}: {}",
+                    workspace_for_kill,
+                    attachment_for_kill,
+                    error
+                );
+                return;
+            }
+        };
+
+        if !result.success {
+            log::warn!(
+                "background terminal kill reported failure workspace={} attachment_id={}: {}",
+                workspace_for_kill,
+                attachment_for_kill,
+                remote_command_error("failed to kill terminal session", &result.stderr)
+            );
+        }
+    });
 
     Ok(TerminalKillResult { killed: true })
 }
