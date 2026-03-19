@@ -13,6 +13,8 @@
 		"tauri:cef:update": "cargo update --manifest-path src-tauri/Cargo.toml && cargo install tauri-cli --git https://github.com/tauri-apps/tauri --branch feat/cef --force",
 		"check": "bun x @biomejs/biome check .",
 		"check:fix": "bun x @biomejs/biome check --write .",
+		"driver": "tsx driver/cli.ts",
+		"silo-driver": "tsx driver/cli.ts",
 		"e2e:preflight": "bun scripts/e2e-live-preflight.ts",
 		"e2e": "bun run e2e:preflight && bunx playwright test",
 		"e2e:headed": "bun run e2e:preflight && bunx playwright test --headed",
@@ -71,6 +73,7 @@
 		"@types/node": "^24.3.0",
 		"@types/react": "^19.1.8",
 		"@types/react-dom": "^19.1.6",
+		"tsx": "^4.20.5",
 		"typescript": "~5.8.3",
 		"vite": "^7.1.3"
 	}

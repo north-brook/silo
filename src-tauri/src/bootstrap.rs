@@ -17,10 +17,11 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 const REMOTE_BOOTSTRAP_STATE_FILE: &str = "/home/silo/.silo/workspace-bootstrap-state";
 const REMOTE_BOOTSTRAP_LOCK_DIR: &str = "/home/silo/.silo/workspace-bootstrap.lock";
+const REMOTE_BOOTSTRAP_LOG_FILE: &str = "/home/silo/.silo/bootstrap.log";
 const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
 const REMOTE_WORKSPACE_AGENT_PIDFILE: &str = "/home/silo/.silo/workspace-agent/daemon.pid";
 const REMOTE_WORKSPACE_AGENT_SHELL_FILE: &str = "/home/silo/.silo/workspace-agent-shell.sh";
-const WORKSPACE_BOOTSTRAP_VERSION: &str = "13";
+const WORKSPACE_BOOTSTRAP_VERSION: &str = "15";
 const STARTUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 const INSTANCE_RUNNING_POLL_ATTEMPTS: usize = 180;
 const SSH_READY_POLL_ATTEMPTS: usize = 120;
@@ -335,6 +336,13 @@ async fn bootstrap_workspace_until_ready(lookup: &WorkspaceLookup) -> Result<(),
         match bootstrap_workspace(lookup).await {
             Ok(()) => return Ok(()),
             Err(error) if should_retry_template_bootstrap(&error) => {
+                log::warn!(
+                    "workspace {} bootstrap attempt {}/{} failed with retryable error: {}",
+                    lookup.workspace.name(),
+                    attempt + 1,
+                    BOOTSTRAP_RETRY_ATTEMPTS,
+                    error
+                );
                 if attempt + 1 == BOOTSTRAP_RETRY_ATTEMPTS {
                     return Err(error);
                 }
@@ -551,6 +559,7 @@ if git -C \"$WORKSPACE_DIR\" show-ref --verify --quiet \"refs/heads/$WORKSPACE_B
     format!(
         "set -euo pipefail\n\
 WORKSPACE_DIR={workspace_dir}\n\
+WORKSPACE_NAME={workspace_name}\n\
 REMOTE_URL={remote_url}\n\
 TARGET_BRANCH={target_branch}\n\
 WORKSPACE_BRANCH={workspace_branch}\n\
@@ -559,7 +568,14 @@ GIT_USER_EMAIL={git_user_email}\n\
 mkdir -p \"$HOME/.silo\"\n\
 chmod 700 \"$HOME/.silo\"\n\
 LOCK_DIR={lock_dir}\n\
+BOOTSTRAP_LOG_PATH={log_path}\n\
 ASKPASS_PATH=\"$HOME/.silo/git-askpass.sh\"\n\
+bootstrap_log() {{\n\
+  local message=\"$1\"\n\
+  local timestamp\n\
+  timestamp=\"$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf 'unknown-time')\"\n\
+  printf '[%s][silo-bootstrap][%s] %s\\n' \"$timestamp\" \"$WORKSPACE_NAME\" \"$message\" | tee -a \"$BOOTSTRAP_LOG_PATH\" >&2\n\
+}}\n\
 cleanup() {{\n\
   rm -rf \"$LOCK_DIR\"\n\
 }}\n\
@@ -574,6 +590,7 @@ if [ ! -d \"$LOCK_DIR\" ]; then\n\
   echo 'timed out waiting for workspace bootstrap lock' >&2\n\
   exit 1\n\
 fi\n\
+trap 'status=$?; if [ \"$status\" -ne 0 ]; then bootstrap_log \"failed exit_status=$status line=${{LINENO:-unknown}} command=${{BASH_COMMAND:-unknown}}\"; fi; cleanup' EXIT\n\
 BOOT_ID=\"$(cat /proc/sys/kernel/random/boot_id)\"\n\
 STATE_PATH={state_path}\n\
 SIGNATURE={signature}\n\
@@ -581,9 +598,11 @@ if [ -f \"$STATE_PATH\" ]; then\n\
   CURRENT_BOOT_ID=\"$(sed -n '1p' \"$STATE_PATH\")\"\n\
   CURRENT_SIGNATURE=\"$(sed -n '2,$p' \"$STATE_PATH\")\"\n\
   if [ \"$CURRENT_BOOT_ID\" = \"$BOOT_ID\" ] && [ \"$CURRENT_SIGNATURE\" = \"$SIGNATURE\" ]; then\n\
+    bootstrap_log 'bootstrap state already up to date'\n\
     exit 0\n\
   fi\n\
 fi\n\
+bootstrap_log 'step=write_credentials'\n\
 cat > \"$ASKPASS_PATH\" <<'EOF_GIT_ASKPASS'\n\
 #!/bin/sh\n\
 case \"$1\" in\n\
@@ -616,6 +635,7 @@ printf '%s\\n' {claude_state_json} > \"$HOME/.claude.json\"\n\
 chmod 700 \"$HOME/.codex\" \"$HOME/.claude\"\n\
 chmod 600 \"$HOME/.codex/auth.json\" \"$HOME/.codex/config.toml\" \"$HOME/.claude/settings.json\" \"$HOME/.claude.json\"\n\
 rm -f \"$HOME/.gitconfig.lock\"\n\
+bootstrap_log 'step=configure_git'\n\
 if [ -n \"$GIT_USER_NAME\" ] && [ \"$(git config --global --get user.name || true)\" != \"$GIT_USER_NAME\" ]; then\n\
   git config --global user.name \"$GIT_USER_NAME\"\n\
 fi\n\
@@ -625,17 +645,23 @@ fi\n\
 if ! git config --global --get-all safe.directory 2>/dev/null | grep -Fxq \"$WORKSPACE_DIR\"; then\n\
   git config --global --add safe.directory \"$WORKSPACE_DIR\"\n\
 fi\n\
+bootstrap_log 'step=sync_repository'\n\
 {branch_setup}\n\
+bootstrap_log 'step=sync_env_files'\n\
 {env_file_sync}\n\
 {cli_update}\
-{agent_install}",
+bootstrap_log 'step=install_workspace_agent'\n\
+{agent_install}\
+bootstrap_log 'step=completed'\n",
         workspace_dir = shell_quote(TERMINAL_WORKSPACE_DIR),
+        workspace_name = shell_quote(lookup.workspace.name()),
         remote_url = shell_quote(&bootstrap.remote_url),
         target_branch = shell_quote(&bootstrap.target_branch),
         workspace_branch = shell_quote(bootstrap.workspace_branch.as_deref().unwrap_or("")),
         git_user_name = shell_quote(&bootstrap.git_user_name),
         git_user_email = shell_quote(&bootstrap.git_user_email),
         lock_dir = shell_quote(REMOTE_BOOTSTRAP_LOCK_DIR),
+        log_path = shell_quote(REMOTE_BOOTSTRAP_LOG_FILE),
         state_path = shell_quote(REMOTE_BOOTSTRAP_STATE_FILE),
         signature = shell_quote(&bootstrap_signature),
         credentials_path = shell_quote(REMOTE_CREDENTIALS_FILE),
@@ -780,14 +806,13 @@ fn workspace_cli_update_script() -> String {
     String::from(
         "if command -v brew >/dev/null 2>&1; then\n\
   eval \"$(brew shellenv)\"\n\
+  bootstrap_log 'step=brew_update'\n\
   brew update\n\
-  if brew list --formula codex >/dev/null 2>&1; then\n\
-    brew upgrade codex\n\
-  else\n\
-    brew install codex\n\
-  fi\n\
+  bootstrap_log 'step=install_codex'\n\
+  brew install codex\n\
 fi\n\
 if command -v curl >/dev/null 2>&1; then\n\
+  bootstrap_log 'step=install_claude'\n\
   curl -fsSL https://claude.ai/install.sh | bash\n\
 fi\n",
     )
@@ -1289,9 +1314,11 @@ mod tests {
     fn workspace_cli_update_script_refreshes_codex_and_claude() {
         let script = workspace_cli_update_script();
 
+        assert!(script.contains("bootstrap_log 'step=brew_update'"));
+        assert!(script.contains("bootstrap_log 'step=install_codex'"));
+        assert!(script.contains("bootstrap_log 'step=install_claude'"));
         assert!(script.contains("brew update"));
         assert!(script.contains("brew install codex"));
-        assert!(script.contains("brew upgrade codex"));
         assert!(script.contains("https://claude.ai/install.sh"));
     }
 

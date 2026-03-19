@@ -79,6 +79,20 @@ When adding new live e2e coverage:
 3. Add cleanup for every created cloud or GitHub resource in the test harness
 4. Keep the suite small enough that engineers will actually run it
 
+## Driver
+
+Use the repo-local `driver/` CLI when you need programmatic verification against the real desktop app.
+
+- Prefer `bun run driver -- ...` for interactive inspection, scripted verification, and coding-agent automation against the live CEF app
+- Use it to verify the actual rendered UI and app state before and after changes instead of reasoning only from source
+- Start with read-heavy commands such as `help`, `status`, `app.status`, `app.service-status`, `snapshot`, `text`, `attr`, `exists`, and `count`
+- Use write commands such as `click`, `type`, `press`, and `wait-for` to drive a real workflow when inspection alone is not enough
+- Prefer the higher-level app commands when they exist; use lower-level selector-driven commands as the escape hatch
+- Keep sessions explicit and clean them up when finished with `bun run driver -- close`
+- If a command fails, read the stderr help text first, then inspect the JSON error payload and session artifacts
+
+The driver is intended to make programmatic verification cheap and routine. Use it to confirm behavior in the running app, not just to automate tests.
+
 ## Cloud VMs
 
 Do not hardcode VM names. Discover them from `gcloud`.
