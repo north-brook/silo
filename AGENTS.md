@@ -19,6 +19,8 @@ Keep this file durable. Prefer guidance on how to discover the current state of 
 - Tauri Rust check: `cd src-tauri && cargo check`
 - Tauri Rust tests: `cd src-tauri && cargo test --lib`
 - Agent tests: `cd tools/workspace-agent && cargo test`
+- Live e2e preflight: `bun run e2e:preflight`
+- Live e2e smoke: `bun run e2e`
 
 Use Bun for JS/TS tasks in this repo.
 
@@ -35,10 +37,47 @@ Many bugs that look like frontend issues are actually stale VM state, agent stat
 
 ## Local Logs
 
-- Tauri/plugin logs live under `~/.silo/logs`
+- By default, Tauri/plugin logs live under `~/.silo/logs`
+- When `SILO_STATE_DIR` is set, app-local logs live under `$SILO_STATE_DIR/logs`
 - Start by listing recent log files: `ls -lt ~/.silo/logs | head`
 - Tail the newest log: `tail -n 200 ~/.silo/logs/<file>`
 - If the UI is behaving oddly, also inspect the terminal that launched `bun run tauri dev`
+
+## Local State
+
+Silo stores app-local state under `.silo`. For normal development this is usually `~/.silo`.
+
+- Use `SILO_STATE_DIR` when you need isolated app state without changing the real user home directory
+- Prefer this for e2e runs so logs, browser profiles, config, and generated service account keys do not mix with your normal local state
+- Keep real `HOME`-backed credentials and tools intact for live-service tests unless the task explicitly requires a separate auth context
+
+## Testing Approach
+
+Prefer a small number of high-value tests over a large mocked suite.
+
+- Default to unit and integration tests for deterministic logic in Rust and TypeScript
+- Add e2e tests only for workflows where confidence depends on the full desktop app and real external systems
+- Prefer one real journey that crosses the frontend, Tauri backend, and cloud control plane over many narrow UI-only tests
+- Avoid broad mock layers for `gcloud`, `gh`, or workspace lifecycle unless the task is specifically about failure injection or an unavailable dependency
+- Keep live e2e tests serial and minimal; they are expensive and operationally sensitive
+
+## Live E2E
+
+The current e2e direction is Playwright attached to the CEF runtime over CDP, not WebDriver.
+
+- Use Playwright for desktop e2e against the real CEF webview content
+- Enable CDP with `SILO_CEF_REMOTE_DEBUGGING_PORT`
+- Keep app-local state isolated with `SILO_STATE_DIR`
+- Run `bun run e2e:preflight` before live e2e to verify local tools, auth, and source state
+- On macOS, close any existing `Silo.app` instance before running live e2e; the app is single-instance and a second launch can be redirected into the existing process
+- When a live test fails, inspect the per-run artifacts under `test-results/e2e/` first, then check the isolated state directory logs for that run
+
+When adding new live e2e coverage:
+
+1. Prefer a real user journey that validates an externally observable result
+2. Verify important side effects with the real CLI or control plane, not only through frontend state
+3. Add cleanup for every created cloud or GitHub resource in the test harness
+4. Keep the suite small enough that engineers will actually run it
 
 ## Cloud VMs
 
