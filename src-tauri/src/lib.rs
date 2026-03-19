@@ -24,6 +24,13 @@ use tauri::{AppHandle, Cef, Emitter, Manager};
 
 pub type AppRuntime = Cef;
 const MAIN_SHELL_LABEL: &str = "main";
+pub(crate) const WORKSPACE_STATE_EVENT_NAME: &str = "workspace://state";
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkspaceStateEvent {
+    workspace: String,
+}
 
 const MENU_ID_NEW_WORKSPACE: &str = "new_workspace";
 const MENU_ID_OPEN_PROJECT: &str = "open_project";
@@ -67,6 +74,15 @@ const SHORTCUT_EVENT_JUMP_TO_WORKSPACE: &str = "silo://jump-to-workspace";
 
 fn emit_shortcut_event(app_handle: &AppHandle<AppRuntime>, event: &str) {
     let _ = app_handle.emit(event, ());
+}
+
+pub(crate) fn emit_workspace_state_changed(app_handle: &AppHandle<AppRuntime>, workspace: &str) {
+    let _ = app_handle.emit(
+        WORKSPACE_STATE_EVENT_NAME,
+        WorkspaceStateEvent {
+            workspace: workspace.to_string(),
+        },
+    );
 }
 
 fn emit_workspace_jump_event(app_handle: &AppHandle<AppRuntime>, index: u8) {
