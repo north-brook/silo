@@ -62,12 +62,17 @@ function GCloudStatus() {
 					<button
 						type="button"
 						onClick={() => authenticate.mutate()}
+						data-testid="setup-status-gcloud"
+						data-status-label={label}
+						aria-label={label}
 						className={`flex items-center ${authenticate.isPending ? "animate-pulse" : "opacity-50 hover:opacity-100 transition-opacity duration-150"}`}
 					>
 						{icon}
 					</button>
 				) : (
 					<span
+						data-testid="setup-status-gcloud"
+						data-status-label={label}
 						style={{ opacity: active ? 1 : 0.5 }}
 						className="flex items-center"
 					>
@@ -126,12 +131,17 @@ function GHStatus() {
 					<button
 						type="button"
 						onClick={() => authenticate.mutate()}
+						data-testid="setup-status-github"
+						data-status-label={label}
+						aria-label={label}
 						className={`flex items-center ${authenticate.isPending ? "animate-pulse" : "opacity-50 hover:opacity-100 transition-opacity duration-150"}`}
 					>
 						{icon}
 					</button>
 				) : (
 					<span
+						data-testid="setup-status-github"
+						data-status-label={label}
 						style={{ opacity: active ? 1 : 0.5 }}
 						className="flex items-center"
 					>
@@ -176,12 +186,21 @@ function CodexStatus() {
 					<button
 						type="button"
 						onClick={() => authenticate.mutate()}
+						data-testid="setup-status-codex"
+						data-status-label={label}
+						aria-label={label}
 						className={`flex items-center ${authenticate.isPending ? "animate-pulse" : "opacity-50 hover:opacity-100 transition-opacity duration-150"}`}
 					>
 						{icon}
 					</button>
 				) : (
-					<span className="flex items-center">{icon}</span>
+					<span
+						data-testid="setup-status-codex"
+						data-status-label={label}
+						className="flex items-center"
+					>
+						{icon}
+					</span>
 				)}
 			</TooltipTrigger>
 			<TooltipContent side="bottom">{label}</TooltipContent>
@@ -221,12 +240,21 @@ function ClaudeStatus() {
 					<button
 						type="button"
 						onClick={() => authenticate.mutate()}
+						data-testid="setup-status-claude"
+						data-status-label={label}
+						aria-label={label}
 						className={`flex items-center ${authenticate.isPending ? "animate-pulse" : "opacity-50 hover:opacity-100 transition-opacity duration-150"}`}
 					>
 						{icon}
 					</button>
 				) : (
-					<span className="flex items-center">{icon}</span>
+					<span
+						data-testid="setup-status-claude"
+						data-status-label={label}
+						className="flex items-center"
+					>
+						{icon}
+					</span>
 				)}
 			</TooltipTrigger>
 			<TooltipContent side="bottom">{label}</TooltipContent>

@@ -1,12 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import type { LucideIcon } from "lucide-react";
 import { FolderOpen, Plus } from "lucide-react";
-import { SiloIcon } from "@/shared/ui/icons/silo";
+import { StatusIcons } from "@/dashboard/setup-status";
+import type { ListedProject } from "@/projects/api";
 import { useNewWorkspace } from "@/projects/sidebar/new-workspace";
 import { useOpenProject } from "@/projects/sidebar/open-project";
-import { StatusIcons } from "@/dashboard/setup-status";
 import { invoke } from "@/shared/lib/invoke";
-import type { ListedProject } from "@/projects/api";
+import { SiloIcon } from "@/shared/ui/icons/silo";
 
 function Kbd({ children }: { children: React.ReactNode }) {
 	return (
@@ -34,6 +34,7 @@ function ActionRow({
 			type="button"
 			onClick={onClick}
 			disabled={disabled}
+			data-testid={`dashboard-action-${label.toLowerCase().replace(/\s+/g, "-")}`}
 			className="flex items-center gap-3 w-full px-1 py-2.5 text-sm text-text-muted hover:text-text-bright transition-colors disabled:opacity-50 cursor-pointer"
 		>
 			<Icon size={16} className="shrink-0" />
