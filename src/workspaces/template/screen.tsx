@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Check, Globe, Terminal } from "lucide-react";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { ClaudeIcon } from "@/shared/ui/icons/claude";
 import { CodexIcon } from "@/shared/ui/icons/codex";
@@ -10,6 +10,7 @@ import { SiloIcon } from "@/shared/ui/icons/silo";
 import { Loader } from "@/shared/ui/loader";
 import { toast } from "@/shared/ui/toaster";
 import { invoke } from "@/shared/lib/invoke";
+import { type WorkspaceLifecycle } from "@/workspaces/api";
 import {
 	type SessionRouteState,
 	workspaceSessionHref,
@@ -24,7 +25,6 @@ interface Step {
 type ConfigStep = {
 	label: string;
 	icon: ReactNode;
-	delay: number;
 };
 
 const ICON_SIZE = 12;
@@ -32,70 +32,47 @@ const CONFIG_STEPS: ConfigStep[] = [
 	{
 		label: "Configuring git",
 		icon: <GHIcon height={ICON_SIZE} />,
-		delay: 2_000,
 	},
 	{
 		label: "Configuring codex",
 		icon: <CodexIcon height={ICON_SIZE} />,
-		delay: 2_000,
 	},
 	{
 		label: "Configuring claude code",
 		icon: <ClaudeIcon height={ICON_SIZE} />,
-		delay: 2_000,
 	},
 	{
 		label: "Configuring chrome",
 		icon: <Globe size={ICON_SIZE} />,
-		delay: 30_000,
 	},
 ];
 
 function useProvisioningSteps(
 	status: string,
-	ready: boolean,
+	lifecycle: WorkspaceLifecycle,
 ): { steps: Step[]; allDone: boolean } {
-	const [configIndex, setConfigIndex] = useState(-1);
-
 	const isRunning = status === "RUNNING";
-	const isProvisioning = status === "STAGING" || status === "PROVISIONING";
+	const phase = lifecycle.phase;
 
-	// VM-derived step states
 	const vmProvisionState: Step["state"] = isRunning
 		? "done"
-		: isProvisioning
+		: status === "STAGING" || status === "PROVISIONING"
 			? "active"
 			: "pending";
-	const vmStartState: Step["state"] = isRunning
-		? "done"
-		: vmProvisionState === "done"
+	const configState: Step["state"] =
+		phase === "bootstrapping" || phase === "waiting_for_observer" || phase === "ready"
+			? phase === "bootstrapping"
+				? "active"
+				: "done"
+			: phase === "waiting_for_ssh"
+				? "pending"
+				: "pending";
+	const secureAccessState: Step["state"] =
+		phase === "waiting_for_observer"
 			? "active"
-			: "pending";
-
-	// Start config timers once VM is running
-	useEffect(() => {
-		if (!isRunning) return;
-		setConfigIndex(0);
-
-		const timers: ReturnType<typeof setTimeout>[] = [];
-		let cumulative = 0;
-		for (let i = 0; i < CONFIG_STEPS.length; i++) {
-			cumulative += CONFIG_STEPS[i].delay;
-			timers.push(setTimeout(() => setConfigIndex(i + 1), cumulative));
-		}
-
-		return () => {
-			for (const t of timers) clearTimeout(t);
-		};
-	}, [isRunning]);
-
-	// "Configuring secure access" runs until ready
-	const configsDone = configIndex >= CONFIG_STEPS.length;
-	const secureAccessState: Step["state"] = ready
-		? "done"
-		: configsDone
-			? "active"
-			: "pending";
+			: phase === "ready"
+				? "done"
+				: "pending";
 
 	const steps: Step[] = [
 		{
@@ -104,18 +81,24 @@ function useProvisioningSteps(
 			state: vmProvisionState,
 		},
 		{
-			label: "Starting virtual machine",
+			label: "Waiting for SSH",
 			icon: <GCloudIcon height={ICON_SIZE} />,
-			state: vmStartState,
+			state:
+				phase === "waiting_for_ssh"
+					? "active"
+					: phase === "bootstrapping" ||
+						  phase === "waiting_for_observer" ||
+						  phase === "ready"
+						? "done"
+						: vmProvisionState === "done"
+							? "active"
+							: "pending",
 		},
-		...CONFIG_STEPS.map(({ label, icon }, i) => {
-			let state: Step["state"] = ready ? "done" : "pending";
-			if (!ready) {
-				if (configIndex > i) state = "done";
-				else if (configIndex === i) state = "active";
-			}
-			return { label, icon, state };
-		}),
+		...CONFIG_STEPS.map(({ label, icon }) => ({
+			label,
+			icon,
+			state: configState,
+		})),
 		{
 			label: "Configuring secure access",
 			icon: <GCloudIcon height={ICON_SIZE} />,
@@ -123,7 +106,7 @@ function useProvisioningSteps(
 		},
 	];
 
-	const allDone = ready;
+	const allDone = phase === "ready";
 
 	return { steps, allDone };
 }
@@ -159,20 +142,20 @@ function StepRow({ step }: { step: Step }) {
 }
 
 export function TemplatingWorkspace({
-	ready,
+	lifecycle,
 	status,
 	workspace,
 	project,
 }: {
 	isRunning: boolean;
-	ready: boolean;
+	lifecycle: WorkspaceLifecycle;
 	status: string;
 	workspace: string;
 	project: string | null;
 }) {
 	const navigate = useNavigate();
 	const queryClient = useQueryClient();
-	const { steps, allDone } = useProvisioningSteps(status, ready);
+	const { steps, allDone } = useProvisioningSteps(status, lifecycle);
 
 	const createTerminal = useMutation({
 		mutationFn: () =>
