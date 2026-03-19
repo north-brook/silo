@@ -7,9 +7,9 @@ At a high level:
 - the frontend is a Vite app
 - the desktop shell and backend are Tauri + Rust
 - cloud workspaces are remote VMs managed through `gcloud`
-- a small Rust daemon, `workspace-agent`, runs inside each workspace VM and reports VM-side state back to the app
+- a small Rust daemon, `workspace-agent`, runs inside each workspace VM
 
-Keep this file durable. Prefer guidance on how to discover the current state of the system over documenting specific metadata keys, VM names, or other implementation details that are likely to change.
+Keep this file durable. Prefer guidance on how to discover the current state of the system over specific details that are likely to change.
 
 ## Fast checks
 

@@ -5,15 +5,12 @@ use crate::state::{
     active_session_metadata_entries, browser_session_metadata_key, WorkspaceMetadataEntry,
     WorkspaceMetadataManager, BROWSER_LAST_ACTIVE_METADATA_KEY,
 };
-use crate::state_paths;
 use crate::terminal;
 use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
 use crate::{emit_workspace_state_changed, AppRuntime};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::net::IpAddr;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::webview::{NewWindowResponse, PageLoadEvent, Url, WebviewBuilder};
 use tauri::{
@@ -639,7 +636,6 @@ impl BrowserManager {
         let workspace_for_popup = workspace.to_string();
         let builder = WebviewBuilder::new(label.clone(), WebviewUrl::External(destination))
             .devtools(true)
-            .data_directory(browser_webview_data_directory(workspace)?)
             .initialization_script(browser_state_sync_script(workspace, attachment_id))
             .on_page_load(move |webview, payload| {
                 handle_page_load(
@@ -1122,22 +1118,6 @@ fn emit_browser_state_changed(
         },
     )
     .map_err(|error| format!("failed to emit browser state event: {error}"))
-}
-
-fn browser_webview_data_directory(workspace: &str) -> Result<PathBuf, String> {
-    let path = state_paths::app_state_dir()?.join("browser-webviews").join(
-        workspace
-            .to_ascii_lowercase()
-            .chars()
-            .map(|character| match character {
-                'a'..='z' | '0'..='9' => character,
-                _ => '-',
-            })
-            .collect::<String>(),
-    );
-    fs::create_dir_all(&path)
-        .map_err(|error| format!("failed to create browser webview directory: {error}"))?;
-    Ok(path)
 }
 
 fn resolve_browser_session(
