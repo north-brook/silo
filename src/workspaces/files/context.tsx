@@ -104,6 +104,42 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 		workspaceSessionsRef.current = workspaceSessions;
 	}, [workspaceSessions]);
 
+	useEffect(() => {
+		const persistedIds = new Set(
+			workspaceSessions
+				.filter((session) => session.type === "file")
+				.map((session) => session.attachment_id),
+		);
+		const removedIds: string[] = [];
+		setLocalSessions((previous) => {
+			const next = previous.filter((session) => {
+				if (!session.persistentAttachmentId) {
+					return true;
+				}
+				const keep = persistedIds.has(session.persistentAttachmentId);
+				if (!keep) {
+					removedIds.push(session.attachment_id);
+				}
+				return keep;
+			});
+			return next.length === previous.length ? previous : next;
+		});
+		if (removedIds.length === 0) {
+			return;
+		}
+		setSessionStates((previous) => {
+			let changed = false;
+			const next = { ...previous };
+			for (const attachmentId of removedIds) {
+				if (attachmentId in next) {
+					delete next[attachmentId];
+					changed = true;
+				}
+			}
+			return changed ? next : previous;
+		});
+	}, [workspaceSessions]);
+
 	const setSessionState = useCallback<
 		FileSessionsContextValue["setSessionState"]
 	>((attachmentId, next) => {
