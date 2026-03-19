@@ -20,7 +20,7 @@ const REMOTE_BOOTSTRAP_LOCK_DIR: &str = "/home/silo/.silo/workspace-bootstrap.lo
 const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
 const REMOTE_WORKSPACE_AGENT_PIDFILE: &str = "/home/silo/.silo/workspace-agent/daemon.pid";
 const REMOTE_WORKSPACE_AGENT_SHELL_FILE: &str = "/home/silo/.silo/workspace-agent-shell.sh";
-const WORKSPACE_BOOTSTRAP_VERSION: &str = "11";
+const WORKSPACE_BOOTSTRAP_VERSION: &str = "13";
 const STARTUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 const INSTANCE_RUNNING_POLL_ATTEMPTS: usize = 180;
 const SSH_READY_POLL_ATTEMPTS: usize = 120;
@@ -491,6 +491,7 @@ fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBoo
     let gh_hosts_yml = gh_hosts_yml(&bootstrap.gh_username, &bootstrap.gh_token);
     let bootstrap_signature = workspace_bootstrap_signature(lookup.workspace.name(), bootstrap);
     let agent_install = workspace_agent_install_script(lookup);
+    let cli_update = workspace_cli_update_script();
     let env_file_sync = if lookup.workspace.is_template() {
         workspace_env_file_sync_script(&bootstrap.env_files)
     } else {
@@ -626,6 +627,7 @@ if ! git config --global --get-all safe.directory 2>/dev/null | grep -Fxq \"$WOR
 fi\n\
 {branch_setup}\n\
 {env_file_sync}\n\
+{cli_update}\
 {agent_install}",
         workspace_dir = shell_quote(TERMINAL_WORKSPACE_DIR),
         remote_url = shell_quote(&bootstrap.remote_url),
@@ -645,6 +647,7 @@ fi\n\
         claude_state_json = shell_quote(&claude_state_json),
         branch_setup = branch_setup,
         env_file_sync = env_file_sync,
+        cli_update = cli_update,
         agent_install = agent_install,
     )
 }
@@ -773,10 +776,36 @@ pub(crate) fn workspace_env_file_sync_script(env_files: &[BootstrapEnvFile]) -> 
     script
 }
 
+fn workspace_cli_update_script() -> String {
+    String::from(
+        "if command -v brew >/dev/null 2>&1; then\n\
+  eval \"$(brew shellenv)\"\n\
+  brew update\n\
+  if brew list --formula codex >/dev/null 2>&1; then\n\
+    brew upgrade codex\n\
+  else\n\
+    brew install codex\n\
+  fi\n\
+fi\n\
+if command -v curl >/dev/null 2>&1; then\n\
+  curl -fsSL https://claude.ai/install.sh | bash\n\
+fi\n",
+    )
+}
+
 fn workspace_agent_install_script(lookup: &WorkspaceLookup) -> String {
+    workspace_agent_install_script_for_target(
+        lookup.workspace.name(),
+        &lookup.gcloud_project,
+        lookup.workspace.zone(),
+    )
+}
+
+fn workspace_agent_install_script_for_target(instance: &str, project: &str, zone: &str) -> String {
     let bin_path = shell_quote(REMOTE_WORKSPACE_AGENT_BIN);
-    let pidfile = shell_quote(REMOTE_WORKSPACE_AGENT_PIDFILE);
+    let bin_tmp_path = shell_quote(&format!("{REMOTE_WORKSPACE_AGENT_BIN}.new"));
     let shell_path = shell_quote(REMOTE_WORKSPACE_AGENT_SHELL_FILE);
+    let shell_tmp_path = shell_quote(&format!("{REMOTE_WORKSPACE_AGENT_SHELL_FILE}.new"));
     let encoded_binary = BASE64_STANDARD.encode(WORKSPACE_AGENT_BIN_BYTES);
     let shell_script = workspace_agent_shell_script();
     let encoded_shell = BASE64_STANDARD.encode(shell_script.as_bytes());
@@ -784,24 +813,64 @@ fn workspace_agent_install_script(lookup: &WorkspaceLookup) -> String {
     let mut script =
         "install -d -m 0700 \"$HOME/.silo\" \"$HOME/.silo/bin\" \"$HOME/.silo/workspace-agent\"\n"
             .to_string();
+    script.push_str(&workspace_agent_stop_script());
     script.push_str(&format!(
-        "cat <<'EOF_AGENT_BIN' | base64 --decode > {bin_path}\n{encoded_binary}\nEOF_AGENT_BIN\n",
+        "cat <<'EOF_AGENT_BIN' | base64 --decode > {bin_tmp_path}\n{encoded_binary}\nEOF_AGENT_BIN\n",
+        bin_tmp_path = bin_tmp_path,
     ));
-    script.push_str(&format!("chmod 0755 {bin_path}\n"));
     script.push_str(&format!(
-        "cat <<'EOF_AGENT_SHELL' | base64 --decode > {shell_path}\n{encoded_shell}\nEOF_AGENT_SHELL\n",
+        "chmod 0755 {bin_tmp_path}\n\
+mv {bin_tmp_path} {bin_path}\n\
+cat <<'EOF_AGENT_SHELL' | base64 --decode > {shell_tmp_path}\n{encoded_shell}\nEOF_AGENT_SHELL\n",
+        bin_tmp_path = bin_tmp_path,
+        bin_path = bin_path,
+        shell_tmp_path = shell_tmp_path,
     ));
-    script.push_str(&format!("chmod 0755 {shell_path}\n"));
     script.push_str(&format!(
-        "if [ -f {pidfile} ]; then kill \"$(cat {pidfile})\" 2>/dev/null || true; rm -f {pidfile}; fi\n",
+        "chmod 0755 {shell_tmp_path}\n\
+mv {shell_tmp_path} {shell_path}\n",
+        shell_tmp_path = shell_tmp_path,
+        shell_path = shell_path,
     ));
     script.push_str(&format!(
         "nohup {bin_path} daemon --instance {instance} --project {project} --zone {zone} >/dev/null 2>&1 < /dev/null &\n",
-        instance = shell_quote(lookup.workspace.name()),
-        project = shell_quote(&lookup.gcloud_project),
-        zone = shell_quote(lookup.workspace.zone()),
+        instance = shell_quote(instance),
+        project = shell_quote(project),
+        zone = shell_quote(zone),
     ));
     script
+}
+
+fn workspace_agent_stop_script() -> String {
+    let bin_path = shell_quote(REMOTE_WORKSPACE_AGENT_BIN);
+    let pidfile = shell_quote(REMOTE_WORKSPACE_AGENT_PIDFILE);
+    format!(
+        "AGENT_PIDS=\"\"\n\
+if [ -f {pidfile} ]; then\n\
+  AGENT_PIDS=\"$(cat {pidfile} 2>/dev/null || true)\"\n\
+fi\n\
+if command -v pgrep >/dev/null 2>&1; then\n\
+  EXTRA_AGENT_PIDS=\"$(pgrep -f {bin_path} 2>/dev/null || true)\"\n\
+  if [ -n \"$EXTRA_AGENT_PIDS\" ]; then\n\
+    AGENT_PIDS=\"$AGENT_PIDS\n$EXTRA_AGENT_PIDS\"\n\
+  fi\n\
+fi\n\
+for PID in $(printf '%s\\n' \"$AGENT_PIDS\" | awk 'NF' | sort -u); do\n\
+  if kill -0 \"$PID\" 2>/dev/null; then\n\
+    kill \"$PID\" 2>/dev/null || true\n\
+    for _ in $(seq 1 50); do\n\
+      if ! kill -0 \"$PID\" 2>/dev/null; then\n\
+        break\n\
+      fi\n\
+      sleep 0.1\n\
+    done\n\
+    if kill -0 \"$PID\" 2>/dev/null; then\n\
+      kill -9 \"$PID\" 2>/dev/null || true\n\
+    fi\n\
+  fi\n\
+done\n\
+rm -f {pidfile}\n",
+    )
 }
 
 fn ensure_workspace_agent_running_command(lookup: &WorkspaceLookup) -> String {
@@ -1067,7 +1136,10 @@ pub(crate) fn persist_workspace_bootstrap_state_command(signature: &str) -> Stri
 }
 
 pub(crate) fn clear_template_runtime_state_command() -> String {
-    "rm -rf \"$HOME/.silo\"".to_string()
+    format!(
+        "set -e\n{}rm -rf \"$HOME/.silo\"",
+        workspace_agent_stop_script()
+    )
 }
 
 #[cfg(test)]
@@ -1125,11 +1197,34 @@ mod tests {
     }
 
     #[test]
-    fn clear_template_runtime_state_command_removes_remote_silo_dir() {
-        assert_eq!(
-            clear_template_runtime_state_command(),
-            "rm -rf \"$HOME/.silo\""
+    fn workspace_agent_install_script_stops_agent_before_replacing_binary() {
+        let script = workspace_agent_install_script_for_target(
+            "demo-silo-alpha",
+            "demo-project",
+            "us-east4-c",
         );
+        let stop_index = script
+            .find("kill \"$PID\"")
+            .expect("script should stop an existing agent before replacing it");
+        let write_index = script
+            .find("base64 --decode > '/home/silo/.silo/bin/workspace-agent.new'")
+            .expect("script should write the replacement agent to a temp file");
+        let move_index = script
+            .find("mv '/home/silo/.silo/bin/workspace-agent.new' '/home/silo/.silo/bin/workspace-agent'")
+            .expect("script should atomically replace the agent binary");
+
+        assert!(stop_index < write_index);
+        assert!(write_index < move_index);
+    }
+
+    #[test]
+    fn clear_template_runtime_state_command_stops_agent_and_removes_remote_silo_dir() {
+        let command = clear_template_runtime_state_command();
+
+        assert!(command.starts_with("set -e\nAGENT_PIDS="));
+        assert!(command.contains("pgrep -f '/home/silo/.silo/bin/workspace-agent'"));
+        assert!(command.contains("rm -f '/home/silo/.silo/workspace-agent/daemon.pid'"));
+        assert!(command.ends_with("rm -rf \"$HOME/.silo\""));
     }
 
     #[test]
@@ -1188,6 +1283,16 @@ mod tests {
         assert!(script.contains("mkdir -p '/home/silo/workspace/apps/web'"));
         assert!(script.contains("base64 --decode > '/home/silo/workspace/apps/web/.env.local'"));
         assert!(script.contains("chmod 600 '/home/silo/workspace/apps/web/.env.local'"));
+    }
+
+    #[test]
+    fn workspace_cli_update_script_refreshes_codex_and_claude() {
+        let script = workspace_cli_update_script();
+
+        assert!(script.contains("brew update"));
+        assert!(script.contains("brew install codex"));
+        assert!(script.contains("brew upgrade codex"));
+        assert!(script.contains("https://claude.ai/install.sh"));
     }
 
     #[test]
