@@ -80,33 +80,32 @@ function WorkspaceStateProviderInner({
 		}
 
 		let disposed = false;
-		let unlisten: (() => void | Promise<void>) | null = null;
+		const unlisteners: Array<() => void | Promise<void>> = [];
 
-		const disposeListener = (
-			nextUnlisten: (() => void | Promise<void>) | null,
-		) => {
-			if (!nextUnlisten) {
-				return;
+		const disposeListeners = () => {
+			for (const unlisten of unlisteners) {
+				void Promise.resolve(unlisten()).catch(() => {});
 			}
-			void Promise.resolve(nextUnlisten()).catch(() => {});
 		};
 
-		void listen<{ workspace: string }>("browser://state", (event) => {
-			if (disposed || event.payload.workspace !== workspaceName) {
-				return;
-			}
-			invalidateWorkspace();
-		}).then((nextUnlisten) => {
-			if (disposed) {
-				disposeListener(nextUnlisten);
-				return;
-			}
-			unlisten = nextUnlisten;
-		});
+		for (const eventName of ["browser://state", "workspace://state"]) {
+			void listen<{ workspace: string }>(eventName, (event) => {
+				if (disposed || event.payload.workspace !== workspaceName) {
+					return;
+				}
+				invalidateWorkspace();
+			}).then((nextUnlisten) => {
+				if (disposed) {
+					void Promise.resolve(nextUnlisten()).catch(() => {});
+					return;
+				}
+				unlisteners.push(nextUnlisten);
+			});
+		}
 
 		return () => {
 			disposed = true;
-			disposeListener(unlisten);
+			disposeListeners();
 		};
 	}, [invalidateWorkspace, workspaceName]);
 

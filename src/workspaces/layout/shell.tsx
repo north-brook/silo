@@ -24,7 +24,7 @@ import {
 	useFileSessions,
 } from "@/workspaces/files/context";
 import { fileIconForPath } from "@/workspaces/files/icons";
-import { GitSidebarProvider, useGitSidebar } from "@/workspaces/git/context";
+import { GitSidebarProvider } from "@/workspaces/git/context";
 import { GitSidebar } from "@/workspaces/git/sidebar";
 import { useSessionHosts } from "@/workspaces/hosts/provider";
 import { TopBar } from "@/workspaces/layout/top-bar";
@@ -114,6 +114,21 @@ function fileTabPresentation(session: WorkspaceSession) {
 		icon: <Icon size={12} />,
 		label: session.name.trim() || session.path?.trim() || "file",
 	};
+}
+
+function isLocalOnlyFileSession(
+	session: DisplayWorkspaceSession,
+	workspaceSessions: WorkspaceSession[],
+) {
+	return (
+		session.type === "file" &&
+		!session.persistentAttachmentId &&
+		!workspaceSessions.some(
+			(candidate) =>
+				candidate.type === "file" &&
+				candidate.attachment_id === session.attachment_id,
+		)
+	);
 }
 
 function findLiveNeighbor(
@@ -359,7 +374,10 @@ function WorkspaceShellInner() {
 				}
 			}
 
-			if (session.preview) {
+			if (
+				session.preview ||
+				isLocalOnlyFileSession(session, workspaceSessions)
+			) {
 				clearSession(session.attachment_id);
 				return;
 			}
@@ -377,6 +395,7 @@ function WorkspaceShellInner() {
 			currentWorkspaceHref,
 			clearSession,
 			killSession,
+			workspaceSessions,
 		],
 	);
 
@@ -697,14 +716,7 @@ function WorkspaceTab({
 }) {
 	const navigate = useNavigate();
 	const { getSessionState } = useFileSessions();
-	const { diff } = useGitSidebar();
 	const fileState = getSessionState(session.attachment_id);
-	const diffInfo =
-		session.type === "file" && session.path
-			? ([...(diff ? [diff.local, diff.remote] : [])]
-					.flatMap((section) => section.files)
-					.find((file) => file.path === session.path) ?? null)
-			: null;
 
 	const { icon, label } =
 		session.type === "browser"
@@ -749,21 +761,6 @@ function WorkspaceTab({
 					? "bg-surface text-text-bright border-r-border-light border-b-surface"
 					: "text-text border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text-bright"
 			}`}
-			style={
-				session.type === "file"
-					? {
-							boxShadow: `inset 2px 0 0 ${
-								diffInfo?.status === "added"
-									? "rgba(52, 211, 153, 0.8)"
-									: diffInfo?.status === "deleted"
-										? "rgba(248, 113, 113, 0.8)"
-										: diffInfo
-											? "rgba(252, 211, 77, 0.8)"
-											: "rgba(30, 32, 40, 1)"
-							}`,
-						}
-					: undefined
-			}
 		>
 			{icon}
 			<span className={`max-w-36 truncate ${session.preview ? "italic" : ""}`}>
