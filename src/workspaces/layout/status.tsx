@@ -1,9 +1,10 @@
 import { Box, GitBranch } from "lucide-react";
 import { Loader } from "@/shared/ui/loader";
+import { type WorkspaceLifecycle } from "@/workspaces/api";
 
 interface WorkspaceStatus {
 	status: string;
-	ready?: boolean;
+	lifecycle: WorkspaceLifecycle;
 	working?: boolean | null;
 	unread?: boolean;
 	isTemplate?: boolean;
@@ -27,7 +28,7 @@ export function WorkspaceIndicator({
 	const isStopping =
 		workspace.optimisticStopping || workspace.status === "STOPPING";
 	const isRunning = workspace.status === "RUNNING";
-	const isCreating = isRunning && !workspace.ready;
+	const isCreating = isRunning && workspace.lifecycle.phase !== "ready";
 
 	if (isSuspending) return <Loader className="text-yellow-400" />;
 	if (isStopping) return <Loader className="text-error" />;
@@ -48,12 +49,26 @@ export function workspaceStatusLabel(workspace: WorkspaceStatus): string {
 	const isRunning = workspace.status === "RUNNING";
 	const isStopped =
 		workspace.status === "TERMINATED" || workspace.status === "STOPPED";
-	const isCreating = isRunning && !workspace.ready;
+	const isCreating = isRunning && workspace.lifecycle.phase !== "ready";
 
 	if (isSuspending) return "Suspending...";
 	if (isSuspended) return "Suspended";
 	if (isStarting || isCreating) return "Creating...";
 	if (isStopping) return "Stopping...";
+	if (isRunning && workspace.lifecycle.phase !== "ready") {
+		switch (workspace.lifecycle.phase) {
+			case "waiting_for_ssh":
+				return "Waiting for SSH...";
+			case "bootstrapping":
+				return "Preparing...";
+			case "waiting_for_observer":
+				return "Starting services...";
+			case "failed":
+				return "Startup failed";
+			default:
+				return "Starting...";
+		}
+	}
 	if (isRunning && workspace.working) return "Working";
 	if (isRunning) return "Running";
 	if (isStopped) return "Stopped";

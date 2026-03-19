@@ -17,7 +17,11 @@ import {
 	type WorkspaceRouteState,
 	workspaceHref,
 } from "@/workspaces/routes/paths";
-import { isTemplateWorkspace, type Workspace } from "@/workspaces/api";
+import {
+	isTemplateWorkspace,
+	type Workspace,
+	workspaceIsReady,
+} from "@/workspaces/api";
 import { useGitSidebar } from "@/workspaces/git/context";
 import { GitSidebarToggle } from "@/workspaces/git/toggle";
 import Image from "@/shared/ui/image";
@@ -143,7 +147,7 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 					<span className="text-text">Template</span>
 				</div>
 				<div data-tauri-drag-region className="h-full flex-1" />
-				{workspace.ready && (
+				{workspaceIsReady(workspace) && (
 					<button
 						type="button"
 						disabled={save.isPending}
