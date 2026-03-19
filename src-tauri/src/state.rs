@@ -1,9 +1,10 @@
+use crate::templates::{TemplateOperationStatus, TemplateState};
 use crate::workspaces::{
     self, Workspace, WorkspaceActiveSession, WorkspaceLookup, WorkspaceSession,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkspaceMetadataEntry {
@@ -18,16 +19,25 @@ struct PendingWorkspaceMetadata {
     worker_running: bool,
 }
 
+#[derive(Debug, Clone)]
+struct TransientTemplateState {
+    state: TemplateState,
+    cached_at: Instant,
+}
+
 #[derive(Clone, Default)]
 pub struct WorkspaceMetadataManager {
     metadata: Arc<Mutex<HashMap<String, PendingWorkspaceMetadata>>>,
     sessions: Arc<Mutex<HashMap<String, HashMap<String, Option<WorkspaceSession>>>>>,
     active_sessions: Arc<Mutex<HashMap<String, Option<WorkspaceActiveSession>>>>,
+    template_states: Arc<Mutex<HashMap<String, TransientTemplateState>>>,
+    template_reconciles: Arc<Mutex<HashMap<String, bool>>>,
 }
 
 const WORKSPACE_METADATA_FLUSH_DELAY: Duration = Duration::from_millis(40);
 const WORKSPACE_METADATA_BACKGROUND_RETRY_ATTEMPTS: usize = 2;
 const WORKSPACE_METADATA_BACKGROUND_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const TEMPLATE_TRANSIENT_STATE_TTL: Duration = Duration::from_secs(6);
 pub(crate) const BROWSER_LAST_ACTIVE_METADATA_KEY: &str = "browser-last-active";
 pub(crate) const BROWSER_SESSION_METADATA_PREFIX: &str = "browser-session-";
 pub(crate) const FILE_LAST_ACTIVE_METADATA_KEY: &str = "file-last-active";
@@ -370,6 +380,62 @@ impl WorkspaceMetadataManager {
             .into_iter()
             .map(|workspace| self.apply_workspace_state(workspace))
             .collect()
+    }
+
+    pub(crate) fn cache_transient_template_state(&self, state: TemplateState) {
+        let Ok(mut template_states) = self.template_states.lock() else {
+            return;
+        };
+        template_states.insert(
+            state.project.clone(),
+            TransientTemplateState {
+                state,
+                cached_at: Instant::now(),
+            },
+        );
+    }
+
+    pub(crate) fn recent_transient_template_state(&self, project: &str) -> Option<TemplateState> {
+        let Ok(mut template_states) = self.template_states.lock() else {
+            return None;
+        };
+        let cached = template_states.get(project)?.clone();
+        let expired = cached.cached_at.elapsed() > TEMPLATE_TRANSIENT_STATE_TTL
+            || cached
+                .state
+                .operation
+                .as_ref()
+                .is_none_or(|operation| operation.status == TemplateOperationStatus::Running);
+        if expired {
+            template_states.remove(project);
+            return None;
+        }
+        Some(cached.state)
+    }
+
+    pub(crate) fn clear_transient_template_state(&self, project: &str) {
+        let Ok(mut template_states) = self.template_states.lock() else {
+            return;
+        };
+        template_states.remove(project);
+    }
+
+    pub(crate) fn begin_template_reconcile(&self, project: &str) -> bool {
+        let Ok(mut template_reconciles) = self.template_reconciles.lock() else {
+            return false;
+        };
+        if template_reconciles.get(project).copied().unwrap_or(false) {
+            return false;
+        }
+        template_reconciles.insert(project.to_string(), true);
+        true
+    }
+
+    pub(crate) fn finish_template_reconcile(&self, project: &str) {
+        let Ok(mut template_reconciles) = self.template_reconciles.lock() else {
+            return;
+        };
+        template_reconciles.remove(project);
     }
 }
 
