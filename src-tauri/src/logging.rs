@@ -77,7 +77,8 @@ fn create_session_log_with_stem(
     let file_stem = match file_stem_override {
         Some(file_stem) => file_stem,
         None => {
-            let local_now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+            let local_now =
+                OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
             local_now
                 .format(SESSION_FILE_STEM_FORMAT)
                 .map_err(|error| format!("failed to format log timestamp: {error}"))?
