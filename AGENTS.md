@@ -39,9 +39,23 @@ Many bugs that look like frontend issues are actually stale VM state, agent stat
 
 - By default, Tauri/plugin logs live under `~/.silo/logs`
 - When `SILO_STATE_DIR` is set, app-local logs live under `$SILO_STATE_DIR/logs`
+- Driver-launched runs emit a trace bundle under the source Silo home, usually `~/.silo/traces/<trace-id>/`
 - Start by listing recent log files: `ls -lt ~/.silo/logs | head`
 - Tail the newest log: `tail -n 200 ~/.silo/logs/<file>`
+- For driver runs, inspect `manifest.json` in the trace directory first, then read `driver.jsonl`, `app.log`, and `video-metadata.json`
 - If the UI is behaving oddly, also inspect the terminal that launched `bun run tauri dev`
+
+## Trace Bundles
+
+Driver-launched verification runs produce a trace bundle under the active Silo home, usually `~/.silo/traces/<trace-id>/`.
+
+- Treat the trace bundle as the primary observability unit for automation runs
+- Start with `manifest.json` to discover the exact log and artifact paths for that run
+- `driver.jsonl` records driver command attempts in order
+- `app.log` is the app/session log for that run
+- `video.mp4` and `video-metadata.json` capture the rendered UI for the run
+- Global driver CLI history lives at `~/.silo/traces/driver-history.jsonl`
+- Prefer inspecting one trace bundle over manually correlating files across `test-results/` and state directories
 
 ## Local State
 
@@ -70,7 +84,7 @@ The current e2e direction is Playwright attached to the CEF runtime over CDP, no
 - Keep app-local state isolated with `SILO_STATE_DIR`
 - Run `bun run e2e:preflight` before live e2e to verify local tools, auth, and source state
 - On macOS, close any existing `Silo.app` instance before running live e2e; the app is single-instance and a second launch can be redirected into the existing process
-- When a live test fails, inspect the per-run artifacts under `test-results/e2e/` first, then check the isolated state directory logs for that run
+- When a live test or driver run fails, inspect the matching trace bundle under `~/.silo/traces/<trace-id>/` first, then check `test-results/e2e/` or isolated state directories if needed
 
 When adding new live e2e coverage:
 
@@ -85,11 +99,13 @@ Use the repo-local `driver/` CLI when you need programmatic verification against
 
 - Prefer `bun run driver -- ...` for interactive inspection, scripted verification, and coding-agent automation against the live CEF app
 - Use it to verify the actual rendered UI and app state before and after changes instead of reasoning only from source
-- Start with read-heavy commands such as `help`, `status`, `app.status`, `app.service-status`, `snapshot`, `text`, `attr`, `exists`, and `count`
+- Start with read-heavy commands such as `help`, `history`, `status`, `app.status`, `app.service-status`, `video.status`, `snapshot`, `text`, `attr`, `exists`, and `count`
 - Use write commands such as `click`, `type`, `press`, and `wait-for` to drive a real workflow when inspection alone is not enough
 - Prefer the higher-level app commands when they exist; use lower-level selector-driven commands as the escape hatch
+- Use explicit `--id` values when you want a stable trace name under `~/.silo/traces/`
 - Keep sessions explicit and clean them up when finished with `bun run driver -- close`
-- If a command fails, read the stderr help text first, then inspect the JSON error payload and session artifacts
+- Driver-launched sessions record `video.mp4` automatically and finalize it on `bun run driver -- close`
+- If a command fails, read the stderr help text first, then inspect the JSON error payload and the matching trace bundle
 
 The driver is intended to make programmatic verification cheap and routine. Use it to confirm behavior in the running app, not just to automate tests.
 
