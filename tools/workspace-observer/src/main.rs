@@ -23,6 +23,7 @@ const DEFAULT_ROWS: u16 = 24;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const TURN_OUTPUT_IDLE_TIMEOUT: Duration = Duration::from_secs(6);
 const INITIAL_PROMPT_STARTUP_GRACE: Duration = Duration::from_secs(6);
+const HEARTBEAT_PUBLISH_INTERVAL: TimeDuration = TimeDuration::seconds(15);
 const FIFO_MODE: u32 = 0o622;
 const AUTO_SUSPEND_IDLE_THRESHOLD: TimeDuration = TimeDuration::hours(4);
 const POLL_MISS_THRESHOLD_UNMANAGED: u16 = 3;
@@ -35,6 +36,8 @@ const TERMINAL_LAST_WORKING_METADATA_KEY: &str = "terminal-last-working";
 const TERMINAL_SESSION_METADATA_PREFIX: &str = "terminal-session-";
 const TERMINAL_UNREAD_METADATA_KEY: &str = "terminal-unread";
 const TERMINAL_WORKING_METADATA_KEY: &str = "terminal-working";
+const WORKSPACE_OBSERVER_HEARTBEAT_METADATA_KEY: &str =
+    "workspace-observer-heartbeat-at";
 const WORKSPACE_ROOT: &str = "/home/silo/workspace";
 
 fn main() {
@@ -467,6 +470,7 @@ struct PublishedState {
     branch: Option<String>,
     working: bool,
     unread: bool,
+    heartbeat_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_active: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -780,10 +784,22 @@ fn build_published_state(state: &ObserverState) -> PublishedState {
         branch: state.branch.clone(),
         working,
         unread,
+        heartbeat_at: heartbeat_timestamp(),
         last_active: state.last_active.clone(),
         last_working: state.last_working.clone(),
         terminals,
     }
+}
+
+fn heartbeat_timestamp() -> String {
+    let now = OffsetDateTime::now_utc();
+    let seconds = now.unix_timestamp();
+    let bucket = HEARTBEAT_PUBLISH_INTERVAL.whole_seconds().max(1);
+    let rounded = seconds - seconds.rem_euclid(bucket);
+    OffsetDateTime::from_unix_timestamp(rounded)
+        .unwrap_or(now)
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
 fn touch_last_active(state: &mut ObserverState) {
@@ -1466,6 +1482,11 @@ fn flat_metadata_items(
         TERMINAL_LAST_WORKING_METADATA_KEY,
         published.last_working.as_deref(),
     );
+    update_metadata_item(
+        &mut items,
+        WORKSPACE_OBSERVER_HEARTBEAT_METADATA_KEY,
+        Some(published.heartbeat_at.as_str()),
+    );
     for terminal in &published.terminals {
         let key = format!(
             "{TERMINAL_SESSION_METADATA_PREFIX}{}",
@@ -1925,6 +1946,7 @@ mod tests {
             branch: Some("feature/inbox".to_string()),
             working: false,
             unread: true,
+            heartbeat_at: "2026-03-14T00:00:00Z".to_string(),
             last_active: Some("2026-03-14T00:00:00Z".to_string()),
             last_working: Some("2026-03-14T01:00:00Z".to_string()),
             terminals: vec![PublishedSession {
