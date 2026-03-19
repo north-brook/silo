@@ -1,19 +1,19 @@
 use crate::bootstrap;
 use crate::config::ConfigStore;
+use crate::state::WorkspaceMetadataManager;
 use crate::workspaces::{
-    self, ResolvedGcloudConfig, SnapshotTemplate, TemplateWorkspace, Workspace,
+    self, ResolvedGcloudConfig, Snapshot, SnapshotTemplate, TemplateWorkspace,
+    TEMPLATE_OPERATION_ID_LABEL_KEY, TEMPLATE_OPERATION_KIND_LABEL_KEY,
+    TEMPLATE_OPERATION_PHASE_LABEL_KEY,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 
-const TEMPLATE_STATE_FILE_NAME: &str = "template-state.json";
-const TEMPLATE_STATE_DIR_NAME: &str = ".silo";
+const LEGACY_TEMPLATE_STATE_FILE_NAME: &str = "template-state.json";
+const LEGACY_TEMPLATE_STATE_DIR_NAME: &str = ".silo";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -22,6 +22,17 @@ pub enum TemplateOperationKind {
     Edit,
     Save,
     Delete,
+}
+
+impl TemplateOperationKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Edit => "edit",
+            Self::Save => "save",
+            Self::Delete => "delete",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,207 +70,6 @@ pub struct TemplateState {
     pub operation: Option<TemplateOperation>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct TemplateOperationFile {
-    operations: HashMap<String, TemplateOperation>,
-}
-
-#[derive(Clone)]
-pub struct TemplateOperationManager {
-    inner: Arc<TemplateOperationManagerInner>,
-}
-
-struct TemplateOperationManagerInner {
-    state_path: PathBuf,
-    operations: Mutex<HashMap<String, TemplateOperation>>,
-    in_flight: Mutex<HashSet<String>>,
-}
-
-impl TemplateOperationManager {
-    pub fn load() -> Result<Self, String> {
-        let home_dir = env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| "HOME environment variable is not set".to_string())?;
-        let state_path = home_dir
-            .join(TEMPLATE_STATE_DIR_NAME)
-            .join(TEMPLATE_STATE_FILE_NAME);
-        let operations = load_operations(&state_path)?;
-
-        Ok(Self {
-            inner: Arc::new(TemplateOperationManagerInner {
-                state_path,
-                operations: Mutex::new(operations),
-                in_flight: Mutex::new(HashSet::new()),
-            }),
-        })
-    }
-
-    pub fn resume_running_operations(&self) {
-        let running_projects = self
-            .inner
-            .operations
-            .lock()
-            .map(|operations| {
-                operations
-                    .values()
-                    .filter(|operation| operation.status == TemplateOperationStatus::Running)
-                    .map(|operation| operation.project.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
-        for project in running_projects {
-            self.start_reconcile(&project);
-        }
-    }
-
-    fn get_operation(&self, project: &str) -> Result<Option<TemplateOperation>, String> {
-        self.inner
-            .operations
-            .lock()
-            .map(|operations| operations.get(project).cloned())
-            .map_err(|_| "template operation lock poisoned".to_string())
-    }
-
-    fn set_operation(&self, operation: TemplateOperation) -> Result<(), String> {
-        let mut operations = self
-            .inner
-            .operations
-            .lock()
-            .map_err(|_| "template operation lock poisoned".to_string())?;
-        operations.insert(operation.project.clone(), operation);
-        persist_operations(&self.inner.state_path, &operations)
-    }
-
-    fn mutate_operation<F>(&self, project: &str, mutator: F) -> Result<TemplateOperation, String>
-    where
-        F: FnOnce(&mut TemplateOperation),
-    {
-        let mut operations = self
-            .inner
-            .operations
-            .lock()
-            .map_err(|_| "template operation lock poisoned".to_string())?;
-        let operation = operations
-            .get_mut(project)
-            .ok_or_else(|| format!("template operation missing for project {project}"))?;
-        mutator(operation);
-        operation.updated_at = workspaces::current_rfc3339_timestamp();
-        let operation = operation.clone();
-        persist_operations(&self.inner.state_path, &operations)?;
-        Ok(operation)
-    }
-
-    fn begin_operation(
-        &self,
-        project: &str,
-        kind: TemplateOperationKind,
-        phase: &str,
-        detail: Option<&str>,
-    ) -> Result<TemplateOperation, String> {
-        let operation = TemplateOperation {
-            project: project.to_string(),
-            workspace_name: workspaces::generate_template_workspace_name(project),
-            kind,
-            status: TemplateOperationStatus::Running,
-            phase: phase.to_string(),
-            detail: detail.map(str::to_string),
-            last_error: None,
-            snapshot_name: None,
-            updated_at: workspaces::current_rfc3339_timestamp(),
-        };
-        self.set_operation(operation.clone())?;
-        Ok(operation)
-    }
-
-    fn update_phase(
-        &self,
-        project: &str,
-        phase: &str,
-        detail: Option<&str>,
-    ) -> Result<TemplateOperation, String> {
-        self.mutate_operation(project, |operation| {
-            operation.phase = phase.to_string();
-            operation.detail = detail.map(str::to_string);
-            operation.last_error = None;
-        })
-    }
-
-    fn update_snapshot(
-        &self,
-        project: &str,
-        snapshot_name: &str,
-    ) -> Result<TemplateOperation, String> {
-        self.mutate_operation(project, |operation| {
-            operation.snapshot_name = Some(snapshot_name.to_string());
-        })
-    }
-
-    fn complete_operation(
-        &self,
-        project: &str,
-        phase: &str,
-        detail: Option<&str>,
-    ) -> Result<TemplateOperation, String> {
-        self.mutate_operation(project, |operation| {
-            operation.status = TemplateOperationStatus::Completed;
-            operation.phase = phase.to_string();
-            operation.detail = detail.map(str::to_string);
-            operation.last_error = None;
-        })
-    }
-
-    fn fail_operation(
-        &self,
-        project: &str,
-        phase: &str,
-        error: &str,
-    ) -> Result<TemplateOperation, String> {
-        self.mutate_operation(project, |operation| {
-            operation.status = TemplateOperationStatus::Failed;
-            operation.phase = phase.to_string();
-            operation.detail = Some("Template operation failed".to_string());
-            operation.last_error = Some(error.to_string());
-        })
-    }
-
-    fn start_reconcile(&self, project: &str) {
-        let inserted = self
-            .inner
-            .in_flight
-            .lock()
-            .map(|mut in_flight| in_flight.insert(project.to_string()))
-            .unwrap_or(false);
-        if !inserted {
-            return;
-        }
-
-        let manager = self.clone();
-        let project = project.to_string();
-        tauri::async_runtime::spawn(async move {
-            let result = reconcile_template_operation(manager.clone(), &project).await;
-            if let Err(error) = result {
-                log::warn!(
-                    "template operation reconcile failed for project {}: {}",
-                    project,
-                    error
-                );
-                let failed_phase = manager
-                    .get_operation(&project)
-                    .ok()
-                    .flatten()
-                    .map(|operation| operation.phase)
-                    .unwrap_or_else(|| "failed".to_string());
-                let _ = manager.fail_operation(&project, &failed_phase, &error);
-            }
-
-            if let Ok(mut in_flight) = manager.inner.in_flight.lock() {
-                in_flight.remove(&project);
-            }
-        });
-    }
-}
-
 #[tauri::command]
 pub async fn templates_list_templates() -> Result<Vec<SnapshotTemplate>, String> {
     workspaces::list_template_snapshots().await
@@ -268,61 +78,24 @@ pub async fn templates_list_templates() -> Result<Vec<SnapshotTemplate>, String>
 #[tauri::command]
 pub async fn templates_get_state(
     project: String,
-    manager: State<'_, TemplateOperationManager>,
+    manager: State<'_, WorkspaceMetadataManager>,
 ) -> Result<TemplateState, String> {
-    let gcloud = resolve_project_gcloud_config(&project)?;
-    let workspace_name = workspaces::generate_template_workspace_name(&project);
-    let workspace_present =
-        workspaces::find_workspace_in_project(&workspace_name, &gcloud.account, &gcloud.project)
-            .await?
-            .is_some();
-    let snapshot_name =
-        workspaces::latest_template_snapshot_name(&gcloud.account, &gcloud.project, &project)
-            .await?;
-    let operation = manager.get_operation(&project)?;
-
-    Ok(TemplateState {
-        project,
-        workspace_name,
-        workspace_present,
-        snapshot_name,
-        operation,
-    })
+    let state = derive_template_state(&project, manager.inner()).await?;
+    maybe_start_operation_reconcile(&state, manager.inner());
+    Ok(state)
 }
 
 #[tauri::command]
 pub async fn templates_create_template(
     project: String,
-    manager: State<'_, TemplateOperationManager>,
+    manager: State<'_, WorkspaceMetadataManager>,
 ) -> Result<TemplateWorkspace, String> {
-    manager.begin_operation(
-        &project,
-        TemplateOperationKind::Create,
-        "ensuring_template_workspace",
-        Some("Creating template workspace"),
-    )?;
+    manager.clear_transient_template_state(&project);
 
     let workspace_name = workspaces::generate_template_workspace_name(&project);
-    let workspace = match ensure_template_workspace_for_operation(
-        &project,
-        TemplateOperationKind::Create,
-    )
-    .await
-    {
-        Ok(workspace) => workspace,
-        Err(error) => {
-            let _ = manager.fail_operation(&project, "ensuring_template_workspace", &error);
-            return Err(error);
-        }
-    };
-
-    manager.update_phase(
-        &project,
-        "waiting_for_template_ready",
-        Some("Waiting for template workspace bootstrap"),
-    )?;
+    let workspace =
+        ensure_template_workspace_for_operation(&project, TemplateOperationKind::Create).await?;
     bootstrap::start_template_bootstrap(workspace_name);
-    manager.start_reconcile(&project);
 
     Ok(workspace)
 }
@@ -330,36 +103,14 @@ pub async fn templates_create_template(
 #[tauri::command]
 pub async fn templates_edit_template(
     project: String,
-    manager: State<'_, TemplateOperationManager>,
+    manager: State<'_, WorkspaceMetadataManager>,
 ) -> Result<TemplateWorkspace, String> {
-    manager.begin_operation(
-        &project,
-        TemplateOperationKind::Edit,
-        "ensuring_template_workspace",
-        Some("Creating template workspace from snapshot"),
-    )?;
+    manager.clear_transient_template_state(&project);
 
     let workspace_name = workspaces::generate_template_workspace_name(&project);
-    let workspace = match ensure_template_workspace_for_operation(
-        &project,
-        TemplateOperationKind::Edit,
-    )
-    .await
-    {
-        Ok(workspace) => workspace,
-        Err(error) => {
-            let _ = manager.fail_operation(&project, "ensuring_template_workspace", &error);
-            return Err(error);
-        }
-    };
-
-    manager.update_phase(
-        &project,
-        "waiting_for_template_ready",
-        Some("Waiting for template workspace bootstrap"),
-    )?;
+    let workspace =
+        ensure_template_workspace_for_operation(&project, TemplateOperationKind::Edit).await?;
     bootstrap::start_template_bootstrap(workspace_name);
-    manager.start_reconcile(&project);
 
     Ok(workspace)
 }
@@ -367,121 +118,359 @@ pub async fn templates_edit_template(
 #[tauri::command]
 pub async fn templates_save_template(
     project: String,
-    manager: State<'_, TemplateOperationManager>,
+    manager: State<'_, WorkspaceMetadataManager>,
 ) -> Result<TemplateOperation, String> {
-    let operation = manager.begin_operation(
-        &project,
-        TemplateOperationKind::Save,
+    manager.clear_transient_template_state(&project);
+
+    let lookup = find_template_workspace_lookup(&project)
+        .await?
+        .ok_or_else(|| format!("template workspace not found for project {project}"))?;
+    let snapshot_name = lookup
+        .workspace
+        .template_operation()
+        .and_then(|operation| {
+            (operation.kind == TemplateOperationKind::Save.as_str())
+                .then(|| operation.snapshot_name.clone())
+                .flatten()
+        })
+        .unwrap_or_else(|| workspaces::generate_template_snapshot_name(&project));
+
+    workspaces::set_template_operation_in_lookup(
+        lookup,
+        TemplateOperationKind::Save.as_str(),
         "waiting_for_template_ready",
         Some("Waiting for template workspace bootstrap"),
-    )?;
-    manager.start_reconcile(&project);
+        None,
+        Some(&snapshot_name),
+    )
+    .await?;
+
+    let operation = TemplateOperation {
+        project: project.clone(),
+        workspace_name: workspaces::generate_template_workspace_name(&project),
+        kind: TemplateOperationKind::Save,
+        status: TemplateOperationStatus::Running,
+        phase: "waiting_for_template_ready".to_string(),
+        detail: Some("Waiting for template workspace bootstrap".to_string()),
+        last_error: None,
+        snapshot_name: Some(snapshot_name),
+        updated_at: workspaces::current_rfc3339_timestamp(),
+    };
+
+    start_template_operation_reconcile_if_needed(project, manager.inner().clone());
     Ok(operation)
 }
 
 #[tauri::command]
 pub async fn templates_delete_template(
     project: String,
-    manager: State<'_, TemplateOperationManager>,
+    manager: State<'_, WorkspaceMetadataManager>,
 ) -> Result<TemplateOperation, String> {
-    let operation = manager.begin_operation(
-        &project,
-        TemplateOperationKind::Delete,
-        "deleting_template_workspace",
-        Some("Deleting template workspace"),
-    )?;
-    manager.start_reconcile(&project);
+    manager.clear_transient_template_state(&project);
+
+    let gcloud = resolve_project_gcloud_config(&project)?;
+    let workspace_name = workspaces::generate_template_workspace_name(&project);
+    let workspace_lookup = find_template_workspace_lookup(&project).await?;
+
+    if let Some(lookup) = workspace_lookup {
+        workspaces::set_template_operation_in_lookup(
+            lookup,
+            TemplateOperationKind::Delete.as_str(),
+            "deleting_snapshots",
+            Some("Deleting template snapshots"),
+            None,
+            None,
+        )
+        .await?;
+    } else {
+        let snapshots = workspaces::list_template_snapshots_in_project(
+            &gcloud.account,
+            &gcloud.project,
+            &project,
+        )
+        .await?;
+        if snapshots.is_empty() {
+            return Err(format!("template not found for project {project}"));
+        }
+
+        let operation_id = template_operation_id();
+        tag_snapshots_for_delete(&gcloud, &snapshots, &operation_id, "deleting-snapshots").await?;
+    }
+
+    let operation = TemplateOperation {
+        project: project.clone(),
+        workspace_name,
+        kind: TemplateOperationKind::Delete,
+        status: TemplateOperationStatus::Running,
+        phase: "deleting_snapshots".to_string(),
+        detail: Some("Deleting template snapshots".to_string()),
+        last_error: None,
+        snapshot_name: None,
+        updated_at: workspaces::current_rfc3339_timestamp(),
+    };
+
+    start_template_operation_reconcile_if_needed(project, manager.inner().clone());
     Ok(operation)
 }
 
-async fn reconcile_template_operation(
-    manager: TemplateOperationManager,
+pub(crate) fn remove_legacy_template_state_file() {
+    let Some(home_dir) = env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    let path = home_dir
+        .join(LEGACY_TEMPLATE_STATE_DIR_NAME)
+        .join(LEGACY_TEMPLATE_STATE_FILE_NAME);
+    if !path.exists() {
+        return;
+    }
+
+    match fs::remove_file(&path) {
+        Ok(()) => log::info!("removed legacy template state file {}", path.display()),
+        Err(error) => log::warn!(
+            "failed to remove legacy template state file {}: {}",
+            path.display(),
+            error
+        ),
+    }
+}
+
+pub(crate) fn resume_running_template_operations(manager: WorkspaceMetadataManager) {
+    tauri::async_runtime::spawn(async move {
+        let config = match ConfigStore::new().and_then(|store| store.load()) {
+            Ok(config) => config,
+            Err(error) => {
+                log::warn!("failed to load config while resuming template operations: {error}");
+                return;
+            }
+        };
+
+        for project in config.projects.keys() {
+            match derive_template_state(project, &manager).await {
+                Ok(state) => maybe_start_operation_reconcile(&state, &manager),
+                Err(error) => {
+                    log::warn!(
+                        "failed to derive template state while resuming project {}: {}",
+                        project,
+                        error
+                    );
+                }
+            }
+        }
+    });
+}
+
+fn maybe_start_operation_reconcile(state: &TemplateState, manager: &WorkspaceMetadataManager) {
+    if state
+        .operation
+        .as_ref()
+        .is_some_and(|operation| operation.status == TemplateOperationStatus::Running)
+    {
+        start_template_operation_reconcile_if_needed(state.project.clone(), manager.clone());
+    }
+}
+
+pub(crate) fn start_template_operation_reconcile_if_needed(
+    project: String,
+    manager: WorkspaceMetadataManager,
+) {
+    if !manager.begin_template_reconcile(&project) {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        let result = reconcile_template_operation(&project, &manager).await;
+        if let Err(error) = result {
+            log::warn!(
+                "template operation reconcile failed for project {}: {}",
+                project,
+                error
+            );
+            if let Err(failure_error) =
+                record_template_operation_failure(&project, &manager, &error).await
+            {
+                log::warn!(
+                    "failed to record template operation failure for project {}: {}",
+                    project,
+                    failure_error
+                );
+            }
+        }
+
+        manager.finish_template_reconcile(&project);
+    });
+}
+
+async fn derive_template_state(
     project: &str,
+    manager: &WorkspaceMetadataManager,
+) -> Result<TemplateState, String> {
+    let gcloud = resolve_project_gcloud_config(project)?;
+    let workspace_name = workspaces::generate_template_workspace_name(project);
+    let workspace = find_template_workspace(&workspace_name, &gcloud).await?;
+    let snapshots =
+        workspaces::list_template_snapshots_in_project(&gcloud.account, &gcloud.project, project)
+            .await?;
+    let snapshot_name = snapshots
+        .iter()
+        .find(|snapshot| snapshot.status == "READY")
+        .map(|snapshot| snapshot.name.clone());
+
+    let operation = workspace
+        .as_ref()
+        .and_then(|workspace| derive_workspace_operation(project, &workspace_name, workspace))
+        .or_else(|| derive_snapshot_operation(project, &workspace_name, &snapshots));
+
+    let mut state = TemplateState {
+        project: project.to_string(),
+        workspace_name,
+        workspace_present: workspace.is_some(),
+        snapshot_name,
+        operation,
+    };
+
+    if state.operation.is_none() {
+        if let Some(cached) = manager.recent_transient_template_state(project) {
+            state.operation = cached.operation;
+            if state.snapshot_name.is_none() {
+                state.snapshot_name = cached.snapshot_name;
+            }
+        }
+    }
+
+    Ok(state)
+}
+
+fn derive_workspace_operation(
+    project: &str,
+    workspace_name: &str,
+    workspace: &TemplateWorkspace,
+) -> Option<TemplateOperation> {
+    let operation = workspace.template_operation()?;
+    let kind = parse_operation_kind(&operation.kind)?;
+    let status = if operation.phase == "failed" {
+        TemplateOperationStatus::Failed
+    } else {
+        TemplateOperationStatus::Running
+    };
+
+    Some(TemplateOperation {
+        project: project.to_string(),
+        workspace_name: workspace_name.to_string(),
+        kind,
+        status,
+        phase: operation.phase.clone(),
+        detail: operation.detail.clone(),
+        last_error: operation.last_error.clone(),
+        snapshot_name: operation.snapshot_name.clone(),
+        updated_at: operation
+            .updated_at
+            .clone()
+            .unwrap_or_else(workspaces::current_rfc3339_timestamp),
+    })
+}
+
+fn derive_snapshot_operation(
+    project: &str,
+    workspace_name: &str,
+    snapshots: &[Snapshot],
+) -> Option<TemplateOperation> {
+    let snapshot = snapshots
+        .iter()
+        .find(|snapshot| snapshot.template_operation_kind.as_deref() == Some("delete"))?;
+    let phase = snapshot
+        .template_operation_phase
+        .clone()
+        .unwrap_or_else(|| "deleting_snapshots".to_string())
+        .replace('-', "_");
+    let status = if phase == "failed" {
+        TemplateOperationStatus::Failed
+    } else {
+        TemplateOperationStatus::Running
+    };
+
+    Some(TemplateOperation {
+        project: project.to_string(),
+        workspace_name: workspace_name.to_string(),
+        kind: TemplateOperationKind::Delete,
+        status: status.clone(),
+        phase,
+        detail: Some(match status {
+            TemplateOperationStatus::Failed => "Template operation failed".to_string(),
+            TemplateOperationStatus::Running => "Deleting template snapshots".to_string(),
+            TemplateOperationStatus::Completed => "Template deleted".to_string(),
+        }),
+        last_error: None,
+        snapshot_name: None,
+        updated_at: workspaces::current_rfc3339_timestamp(),
+    })
+}
+
+async fn reconcile_template_operation(
+    project: &str,
+    manager: &WorkspaceMetadataManager,
 ) -> Result<(), String> {
-    let operation = manager
-        .get_operation(project)?
-        .ok_or_else(|| format!("template operation missing for project {project}"))?;
+    let state = derive_template_state(project, manager).await?;
+    let Some(operation) = state.operation else {
+        return Ok(());
+    };
     if operation.status != TemplateOperationStatus::Running {
         return Ok(());
     }
 
     match operation.kind {
-        TemplateOperationKind::Create | TemplateOperationKind::Edit => {
-            reconcile_template_prepare_operation(manager, project, operation.kind).await
+        TemplateOperationKind::Save => {
+            reconcile_template_save_operation(project, &operation, manager).await
         }
-        TemplateOperationKind::Save => reconcile_template_save_operation(manager, project).await,
         TemplateOperationKind::Delete => {
-            reconcile_template_delete_operation(manager, project).await
+            reconcile_template_delete_operation(project, &operation, manager).await
         }
+        TemplateOperationKind::Create | TemplateOperationKind::Edit => Ok(()),
     }
-}
-
-async fn reconcile_template_prepare_operation(
-    manager: TemplateOperationManager,
-    project: &str,
-    kind: TemplateOperationKind,
-) -> Result<(), String> {
-    manager.update_phase(
-        project,
-        "ensuring_template_workspace",
-        Some(match kind {
-            TemplateOperationKind::Create => "Creating template workspace",
-            TemplateOperationKind::Edit => "Creating template workspace from snapshot",
-            TemplateOperationKind::Save | TemplateOperationKind::Delete => {
-                "Preparing template workspace"
-            }
-        }),
-    )?;
-    let workspace_name = workspaces::generate_template_workspace_name(project);
-    let _workspace = ensure_template_workspace_for_operation(project, kind).await?;
-    bootstrap::start_template_bootstrap(workspace_name.clone());
-    manager.update_phase(
-        project,
-        "waiting_for_template_ready",
-        Some("Waiting for template workspace bootstrap"),
-    )?;
-    bootstrap::wait_for_template_bootstrap(&workspace_name).await?;
-    manager.complete_operation(project, "ready_for_edit", Some("Template workspace ready"))?;
-    Ok(())
 }
 
 async fn reconcile_template_save_operation(
-    manager: TemplateOperationManager,
     project: &str,
+    operation: &TemplateOperation,
+    manager: &WorkspaceMetadataManager,
 ) -> Result<(), String> {
     let gcloud = resolve_project_gcloud_config(project)?;
     let workspace_name = workspaces::generate_template_workspace_name(project);
-    let phase = manager
-        .get_operation(project)?
-        .map(|operation| operation.phase)
-        .unwrap_or_else(|| "waiting_for_template_ready".to_string());
+    let snapshot_name = operation
+        .snapshot_name
+        .clone()
+        .ok_or_else(|| format!("template save missing snapshot name for project {project}"))?;
 
-    if save_phase_rank(&phase) <= save_phase_rank("clearing_runtime_state") {
-        manager.update_phase(
-            project,
-            "waiting_for_template_ready",
-            Some("Waiting for template workspace bootstrap"),
-        )?;
+    if save_phase_rank(&operation.phase) <= save_phase_rank("clearing_runtime_state") {
         bootstrap::wait_for_template_bootstrap(&workspace_name).await?;
-        manager.update_phase(
-            project,
+        let lookup = find_template_workspace_lookup(project)
+            .await?
+            .ok_or_else(|| format!("template workspace not found for project {project}"))?;
+        workspaces::set_template_operation_in_lookup(
+            lookup.clone(),
+            TemplateOperationKind::Save.as_str(),
             "clearing_runtime_state",
             Some("Removing template-only runtime state"),
-        )?;
+            None,
+            Some(&snapshot_name),
+        )
+        .await?;
         bootstrap::clear_template_runtime_state(&workspace_name).await?;
     }
 
-    let phase = manager
-        .get_operation(project)?
-        .map(|operation| operation.phase)
-        .unwrap_or_else(|| "stopping_vm".to_string());
     let mut boot_disk = None;
-    if save_phase_rank(&phase) <= save_phase_rank("deleting_old_snapshots") {
-        manager.update_phase(
-            project,
+    if save_phase_rank(&operation.phase) <= save_phase_rank("stopping_vm") {
+        let lookup = find_template_workspace_lookup(project)
+            .await?
+            .ok_or_else(|| format!("template workspace not found for project {project}"))?;
+        workspaces::set_template_operation_in_lookup(
+            lookup.clone(),
+            TemplateOperationKind::Save.as_str(),
             "stopping_vm",
             Some("Stopping template virtual machine"),
-        )?;
+            None,
+            Some(&snapshot_name),
+        )
+        .await?;
         boot_disk = Some(
             workspaces::ensure_template_workspace_terminated(
                 &gcloud.account,
@@ -493,68 +482,96 @@ async fn reconcile_template_save_operation(
         );
     }
 
-    let mut operation = manager
-        .get_operation(project)?
-        .ok_or_else(|| format!("template operation missing for project {project}"))?;
-    if operation.snapshot_name.is_none() {
-        let boot_disk = boot_disk.ok_or_else(|| {
-            format!("template save for project {project} is missing the template boot disk")
-        })?;
-        manager.update_phase(
-            project,
+    if save_phase_rank(&operation.phase) <= save_phase_rank("creating_snapshot") {
+        let lookup = find_template_workspace_lookup(project)
+            .await?
+            .ok_or_else(|| format!("template workspace not found for project {project}"))?;
+        workspaces::set_template_operation_in_lookup(
+            lookup.clone(),
+            TemplateOperationKind::Save.as_str(),
             "creating_snapshot",
             Some("Creating template snapshot"),
-        )?;
-        let snapshot_name = workspaces::create_template_snapshot_for_disk(
+            None,
+            Some(&snapshot_name),
+        )
+        .await?;
+        if workspaces::describe_snapshot_if_exists_in_project(
+            &snapshot_name,
+            &gcloud.account,
+            &gcloud.project,
+        )
+        .await?
+        .is_none()
+        {
+            workspaces::create_template_snapshot_for_disk_named(
+                &gcloud.account,
+                &gcloud.project,
+                project,
+                &snapshot_name,
+                boot_disk.as_deref().ok_or_else(|| {
+                    format!("template save missing boot disk for project {project}")
+                })?,
+                &gcloud.zone,
+            )
+            .await?;
+        }
+    }
+
+    if save_phase_rank(&operation.phase) <= save_phase_rank("waiting_for_snapshot_ready") {
+        let lookup = find_template_workspace_lookup(project)
+            .await?
+            .ok_or_else(|| format!("template workspace not found for project {project}"))?;
+        workspaces::set_template_operation_in_lookup(
+            lookup.clone(),
+            TemplateOperationKind::Save.as_str(),
+            "waiting_for_snapshot_ready",
+            Some("Waiting for template snapshot"),
+            None,
+            Some(&snapshot_name),
+        )
+        .await?;
+        workspaces::wait_for_template_snapshot_ready(
+            &gcloud.account,
+            &gcloud.project,
+            &snapshot_name,
+        )
+        .await?;
+    }
+
+    if save_phase_rank(&operation.phase) <= save_phase_rank("deleting_old_snapshots") {
+        let lookup = find_template_workspace_lookup(project)
+            .await?
+            .ok_or_else(|| format!("template workspace not found for project {project}"))?;
+        workspaces::set_template_operation_in_lookup(
+            lookup.clone(),
+            TemplateOperationKind::Save.as_str(),
+            "deleting_old_snapshots",
+            Some("Removing previous template snapshots"),
+            None,
+            Some(&snapshot_name),
+        )
+        .await?;
+        workspaces::delete_old_template_snapshots(
             &gcloud.account,
             &gcloud.project,
             project,
-            &boot_disk,
-            &gcloud.zone,
+            &snapshot_name,
         )
         .await?;
-        manager.update_snapshot(project, &snapshot_name)?;
-        operation = manager
-            .get_operation(project)?
-            .ok_or_else(|| format!("template operation missing for project {project}"))?;
     }
 
-    manager.update_phase(
-        project,
-        "waiting_for_snapshot_ready",
-        Some("Waiting for template snapshot"),
-    )?;
-    workspaces::wait_for_template_snapshot_ready(
-        &gcloud.account,
-        &gcloud.project,
-        operation
-            .snapshot_name
-            .as_deref()
-            .ok_or_else(|| format!("template snapshot missing for project {project}"))?,
-    )
-    .await?;
-
-    manager.update_phase(
-        project,
-        "deleting_old_snapshots",
-        Some("Removing previous template snapshots"),
-    )?;
-    workspaces::delete_old_template_snapshots(
-        &gcloud.account,
-        &gcloud.project,
-        project,
-        operation
-            .snapshot_name
-            .as_deref()
-            .ok_or_else(|| format!("template snapshot missing for project {project}"))?,
-    )
-    .await?;
-
-    manager.update_phase(
-        project,
+    let lookup = find_template_workspace_lookup(project)
+        .await?
+        .ok_or_else(|| format!("template workspace not found for project {project}"))?;
+    workspaces::set_template_operation_in_lookup(
+        lookup.clone(),
+        TemplateOperationKind::Save.as_str(),
         "deleting_template_workspace",
         Some("Deleting template workspace"),
-    )?;
+        None,
+        Some(&snapshot_name),
+    )
+    .await?;
     workspaces::delete_template_workspace_if_exists(
         &gcloud.account,
         &gcloud.project,
@@ -563,38 +580,184 @@ async fn reconcile_template_save_operation(
     )
     .await?;
 
-    manager.complete_operation(project, "completed", Some("Template saved"))?;
+    manager.cache_transient_template_state(TemplateState {
+        project: project.to_string(),
+        workspace_name,
+        workspace_present: false,
+        snapshot_name: Some(snapshot_name.clone()),
+        operation: Some(TemplateOperation {
+            project: project.to_string(),
+            workspace_name: workspaces::generate_template_workspace_name(project),
+            kind: TemplateOperationKind::Save,
+            status: TemplateOperationStatus::Completed,
+            phase: "completed".to_string(),
+            detail: Some("Template saved".to_string()),
+            last_error: None,
+            snapshot_name: Some(snapshot_name),
+            updated_at: workspaces::current_rfc3339_timestamp(),
+        }),
+    });
+
     Ok(())
 }
 
 async fn reconcile_template_delete_operation(
-    manager: TemplateOperationManager,
     project: &str,
+    operation: &TemplateOperation,
+    manager: &WorkspaceMetadataManager,
+) -> Result<(), String> {
+    let gcloud = resolve_project_gcloud_config(project)?;
+    let workspace_name = workspaces::generate_template_workspace_name(project);
+    let workspace_lookup = find_template_workspace_lookup(project).await?;
+
+    match workspace_lookup {
+        Some(lookup) => {
+            if delete_phase_rank(&operation.phase) <= delete_phase_rank("deleting_snapshots") {
+                workspaces::set_template_operation_in_lookup(
+                    lookup.clone(),
+                    TemplateOperationKind::Delete.as_str(),
+                    "deleting_snapshots",
+                    Some("Deleting template snapshots"),
+                    None,
+                    None,
+                )
+                .await?;
+                workspaces::delete_template_snapshots(&gcloud.account, &gcloud.project, project)
+                    .await?;
+            }
+
+            workspaces::set_template_operation_in_lookup(
+                lookup.clone(),
+                TemplateOperationKind::Delete.as_str(),
+                "deleting_template_workspace",
+                Some("Deleting template workspace"),
+                None,
+                None,
+            )
+            .await?;
+            workspaces::delete_template_workspace_if_exists(
+                &gcloud.account,
+                &gcloud.project,
+                &workspace_name,
+                &gcloud.zone,
+            )
+            .await?;
+        }
+        None => {
+            let snapshots = workspaces::list_template_snapshots_in_project(
+                &gcloud.account,
+                &gcloud.project,
+                project,
+            )
+            .await?;
+            let delete_snapshots = snapshots
+                .iter()
+                .filter(|snapshot| snapshot.template_operation_kind.as_deref() == Some("delete"))
+                .map(|snapshot| snapshot.name.clone())
+                .collect::<Vec<_>>();
+            if !delete_snapshots.is_empty() {
+                for snapshot_name in delete_snapshots {
+                    let result = workspaces::run_gcloud(
+                        &gcloud.account,
+                        &gcloud.project,
+                        workspaces::delete_snapshot_args(&snapshot_name),
+                    )
+                    .await?;
+                    if !result.success {
+                        return Err(format!(
+                            "failed to delete template snapshot {}: {}",
+                            snapshot_name,
+                            result.stderr.trim()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    manager.cache_transient_template_state(TemplateState {
+        project: project.to_string(),
+        workspace_name,
+        workspace_present: false,
+        snapshot_name: None,
+        operation: Some(TemplateOperation {
+            project: project.to_string(),
+            workspace_name: workspaces::generate_template_workspace_name(project),
+            kind: TemplateOperationKind::Delete,
+            status: TemplateOperationStatus::Completed,
+            phase: "completed".to_string(),
+            detail: Some("Template deleted".to_string()),
+            last_error: None,
+            snapshot_name: None,
+            updated_at: workspaces::current_rfc3339_timestamp(),
+        }),
+    });
+
+    Ok(())
+}
+
+async fn record_template_operation_failure(
+    project: &str,
+    manager: &WorkspaceMetadataManager,
+    error: &str,
 ) -> Result<(), String> {
     let gcloud = resolve_project_gcloud_config(project)?;
     let workspace_name = workspaces::generate_template_workspace_name(project);
 
-    manager.update_phase(
-        project,
-        "deleting_template_workspace",
-        Some("Deleting template workspace"),
-    )?;
-    workspaces::delete_template_workspace_if_exists(
-        &gcloud.account,
-        &gcloud.project,
-        &workspace_name,
-        &gcloud.zone,
-    )
-    .await?;
+    if let Some(lookup) = find_template_workspace_lookup(project).await? {
+        let kind = lookup
+            .workspace
+            .template_operation()
+            .map(|operation| operation.kind.clone())
+            .unwrap_or_else(|| "save".to_string());
+        let snapshot_name = lookup
+            .workspace
+            .template_operation()
+            .and_then(|operation| operation.snapshot_name.clone());
+        return workspaces::set_template_operation_in_lookup(
+            lookup,
+            &kind,
+            "failed",
+            Some("Template operation failed"),
+            Some(error),
+            snapshot_name.as_deref(),
+        )
+        .await;
+    }
 
-    manager.update_phase(
-        project,
-        "deleting_snapshots",
-        Some("Deleting template snapshots"),
-    )?;
-    workspaces::delete_template_snapshots(&gcloud.account, &gcloud.project, project).await?;
+    let snapshots =
+        workspaces::list_template_snapshots_in_project(&gcloud.account, &gcloud.project, project)
+            .await?;
+    let delete_snapshots = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.template_operation_kind.as_deref() == Some("delete"))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !delete_snapshots.is_empty() {
+        let operation_id = delete_snapshots
+            .first()
+            .and_then(|snapshot| snapshot.template_operation_id.clone())
+            .unwrap_or_else(template_operation_id);
+        tag_snapshots_for_delete(&gcloud, &delete_snapshots, &operation_id, "failed").await?;
+        manager.cache_transient_template_state(TemplateState {
+            project: project.to_string(),
+            workspace_name,
+            workspace_present: false,
+            snapshot_name: None,
+            operation: Some(TemplateOperation {
+                project: project.to_string(),
+                workspace_name: workspaces::generate_template_workspace_name(project),
+                kind: TemplateOperationKind::Delete,
+                status: TemplateOperationStatus::Failed,
+                phase: "failed".to_string(),
+                detail: Some("Template operation failed".to_string()),
+                last_error: Some(error.to_string()),
+                snapshot_name: None,
+                updated_at: workspaces::current_rfc3339_timestamp(),
+            }),
+        });
+    }
 
-    manager.complete_operation(project, "completed", Some("Template deleted"))?;
     Ok(())
 }
 
@@ -604,16 +767,8 @@ async fn ensure_template_workspace_for_operation(
 ) -> Result<TemplateWorkspace, String> {
     let gcloud = resolve_project_gcloud_config(project)?;
     let workspace_name = workspaces::generate_template_workspace_name(project);
-    if let Some(existing) =
-        workspaces::find_workspace_in_project(&workspace_name, &gcloud.account, &gcloud.project)
-            .await?
-    {
-        return match existing {
-            Workspace::Template(workspace) => Ok(workspace),
-            Workspace::Branch(_) => Err(format!(
-                "workspace name is already in use for project {project}: {workspace_name}"
-            )),
-        };
+    if let Some(existing) = find_template_workspace(&workspace_name, &gcloud).await? {
+        return Ok(existing);
     }
 
     match kind {
@@ -636,11 +791,97 @@ async fn ensure_template_workspace_for_operation(
     }
 }
 
+async fn find_template_workspace(
+    workspace_name: &str,
+    gcloud: &ResolvedGcloudConfig,
+) -> Result<Option<TemplateWorkspace>, String> {
+    let workspace =
+        workspaces::find_workspace_in_project(workspace_name, &gcloud.account, &gcloud.project)
+            .await?;
+    let Some(workspace) = workspace else {
+        return Ok(None);
+    };
+
+    match workspace {
+        crate::workspaces::Workspace::Template(workspace) => Ok(Some(workspace)),
+        crate::workspaces::Workspace::Branch(_) => Err(format!(
+            "workspace name is already in use for template workspace {workspace_name}"
+        )),
+    }
+}
+
+async fn find_template_workspace_lookup(
+    project: &str,
+) -> Result<Option<crate::workspaces::WorkspaceLookup>, String> {
+    let gcloud = resolve_project_gcloud_config(project)?;
+    let workspace_name = workspaces::generate_template_workspace_name(project);
+    let workspace =
+        workspaces::find_workspace_in_project(&workspace_name, &gcloud.account, &gcloud.project)
+            .await?;
+    let Some(workspace) = workspace else {
+        return Ok(None);
+    };
+
+    match workspace {
+        crate::workspaces::Workspace::Template(workspace) => {
+            Ok(Some(crate::workspaces::WorkspaceLookup {
+                workspace: crate::workspaces::Workspace::Template(workspace),
+                account: gcloud.account,
+                gcloud_project: gcloud.project,
+            }))
+        }
+        crate::workspaces::Workspace::Branch(_) => Err(format!(
+            "workspace name is already in use for project {project}: {workspace_name}"
+        )),
+    }
+}
+
 fn resolve_project_gcloud_config(project: &str) -> Result<ResolvedGcloudConfig, String> {
     let config = ConfigStore::new()
         .and_then(|store| store.load())
         .map_err(|error| error.to_string())?;
     workspaces::resolve_project_gcloud_config(&config, project)
+}
+
+fn parse_operation_kind(value: &str) -> Option<TemplateOperationKind> {
+    match value {
+        "create" => Some(TemplateOperationKind::Create),
+        "edit" => Some(TemplateOperationKind::Edit),
+        "save" => Some(TemplateOperationKind::Save),
+        "delete" => Some(TemplateOperationKind::Delete),
+        _ => None,
+    }
+}
+
+fn template_operation_id() -> String {
+    workspaces::current_rfc3339_timestamp()
+        .chars()
+        .filter(|character| character.is_ascii_digit())
+        .collect()
+}
+
+async fn tag_snapshots_for_delete(
+    gcloud: &ResolvedGcloudConfig,
+    snapshots: &[Snapshot],
+    operation_id: &str,
+    phase: &str,
+) -> Result<(), String> {
+    for snapshot in snapshots {
+        workspaces::update_template_snapshot_labels(
+            &gcloud.account,
+            &gcloud.project,
+            &snapshot.name,
+            &[
+                (TEMPLATE_OPERATION_KIND_LABEL_KEY, "delete"),
+                (TEMPLATE_OPERATION_PHASE_LABEL_KEY, phase),
+                (TEMPLATE_OPERATION_ID_LABEL_KEY, operation_id),
+            ],
+            &[],
+        )
+        .await?;
+    }
+
+    Ok(())
 }
 
 fn save_phase_rank(phase: &str) -> usize {
@@ -657,52 +898,11 @@ fn save_phase_rank(phase: &str) -> usize {
     }
 }
 
-fn load_operations(path: &PathBuf) -> Result<HashMap<String, TemplateOperation>, String> {
-    if !path.exists() {
-        return Ok(HashMap::new());
+fn delete_phase_rank(phase: &str) -> usize {
+    match phase {
+        "deleting_snapshots" => 0,
+        "deleting_template_workspace" => 1,
+        "completed" => 2,
+        _ => 0,
     }
-
-    let contents = fs::read_to_string(path)
-        .map_err(|error| format!("failed to read template state {}: {error}", path.display()))?;
-    let state: TemplateOperationFile = serde_json::from_str(&contents)
-        .map_err(|error| format!("failed to parse template state {}: {error}", path.display()))?;
-    Ok(state.operations)
-}
-
-fn persist_operations(
-    path: &PathBuf,
-    operations: &HashMap<String, TemplateOperation>,
-) -> Result<(), String> {
-    let state = TemplateOperationFile {
-        operations: operations.clone(),
-    };
-    let contents = serde_json::to_string_pretty(&state)
-        .map_err(|error| format!("failed to serialize template state: {error}"))?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "failed to create template state directory {}: {error}",
-                parent.display()
-            )
-        })?;
-    }
-
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let temp_path = path.with_extension(format!("tmp-{}-{nanos}", std::process::id()));
-    fs::write(&temp_path, contents).map_err(|error| {
-        format!(
-            "failed to write template state temp file {}: {error}",
-            temp_path.display()
-        )
-    })?;
-    fs::rename(&temp_path, path).map_err(|error| {
-        format!(
-            "failed to replace template state file {}: {error}",
-            path.display()
-        )
-    })?;
-    Ok(())
 }
