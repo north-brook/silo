@@ -41,10 +41,6 @@ const CONFIG_STEPS: ConfigStep[] = [
 		label: "Configuring claude code",
 		icon: <ClaudeIcon height={ICON_SIZE} />,
 	},
-	{
-		label: "Configuring chrome",
-		icon: <Globe size={ICON_SIZE} />,
-	},
 ];
 
 function useProvisioningSteps(
