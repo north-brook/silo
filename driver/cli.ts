@@ -1,10 +1,12 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { BrowserContext, Locator, Page } from "@playwright/test";
 import { readAppServiceStatuses, readAppStatus, waitForAppReady } from "./app";
+import { defaultSourceStateDir, traceHistoryLogPath } from "./paths";
 import { isPidRunning } from "./processes";
 import {
 	connectToDriverSession,
+	DriverLaunchError,
 	disconnectFromDriverSession,
 	launchDriverSession,
 	stopLaunchedSession,
@@ -17,6 +19,7 @@ import {
 	writeSessionRecord,
 } from "./session-store";
 import type { ConsoleEntry, DriverSessionRecord } from "./types";
+import { ensureDirectory } from "./utils";
 
 type ParsedArgs = {
 	command: string;
@@ -32,6 +35,17 @@ type CommandDefinition = {
 	usage: string[];
 	examples: string[];
 	handler: CommandHandler;
+};
+
+type DriverCommandLogEntry = {
+	argv: string[];
+	command: string;
+	durationMs: number;
+	error: string | null;
+	flags: Record<string, string | boolean>;
+	ok: boolean;
+	pid: number;
+	startedAt: string;
 };
 
 type ConnectedCommandTarget = {
@@ -152,6 +166,10 @@ function booleanFlag(args: ParsedArgs, name: string) {
 }
 
 function latestSessionLog(session: DriverSessionRecord) {
+	if (typeof session.appLogPath === "string" && existsSync(session.appLogPath)) {
+		return session.appLogPath;
+	}
+
 	const logsDir = path.join(session.stateDir, "logs");
 	const latest = readdirSync(logsDir)
 		.filter((entry) => entry.endsWith(".log"))
@@ -356,6 +374,90 @@ function trimText(value: string, raw: boolean) {
 	return raw ? value : value.trim();
 }
 
+function globalDriverCommandLogPath(sourceStateDir: string) {
+	return traceHistoryLogPath(sourceStateDir);
+}
+
+function readCommandLogEntries(commandLogPath: string) {
+	if (!existsSync(commandLogPath)) {
+		return [] as DriverCommandLogEntry[];
+	}
+
+	return readFileSync(commandLogPath, "utf8")
+		.split("\n")
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0)
+		.map((line) => JSON.parse(line) as DriverCommandLogEntry);
+}
+
+function writeCommandLogEntry(commandLogPath: string, entry: DriverCommandLogEntry) {
+	ensureDirectory(path.dirname(commandLogPath));
+	appendFileSync(commandLogPath, `${JSON.stringify(entry)}\n`);
+}
+
+function sessionFromResult(result: CommandResult) {
+	const candidate = result.session;
+	if (!candidate || typeof candidate !== "object") {
+		return undefined;
+	}
+
+	return candidate as DriverSessionRecord;
+}
+
+function resolveLoggingSession(args: ParsedArgs) {
+	if (
+		args.command === "launch"
+		|| args.command === "help"
+		|| args.command === "history"
+		|| args.command === "sessions.list"
+	) {
+		return undefined;
+	}
+
+	try {
+		return resolveSessionRecord(
+			typeof flag(args, "session") === "string"
+				? (flag(args, "session") as string)
+				: undefined,
+		);
+	} catch {
+		return undefined;
+	}
+}
+
+function logCommandAttempt(
+	args: ParsedArgs,
+	argv: string[],
+	startedAt: string,
+	startedAtMs: number,
+	options: {
+		error: string | null;
+		result?: CommandResult;
+		session?: DriverSessionRecord;
+	},
+) {
+	const session = options.result ? sessionFromResult(options.result) ?? options.session : options.session;
+	const sourceStateDir = session?.sourceStateDir
+		?? (typeof flag(args, "source-state-dir") === "string"
+			? (flag(args, "source-state-dir") as string)
+			: defaultSourceStateDir);
+	const entry: DriverCommandLogEntry = {
+		argv,
+		command: args.command,
+		durationMs: Date.now() - startedAtMs,
+		error: options.error,
+		flags: Object.fromEntries(args.flags),
+		ok: options.error === null,
+		pid: process.pid,
+		startedAt,
+	};
+
+	writeCommandLogEntry(globalDriverCommandLogPath(sourceStateDir), entry);
+	if (session && typeof session.driverLogPath === "string") {
+		writeCommandLogEntry(session.driverLogPath, entry);
+	}
+}
+
 async function assertLocatorState(
 	locator: Locator,
 	state: "attached" | "detached" | "hidden" | "visible",
@@ -457,7 +559,12 @@ const commandDefinitions: Record<string, CommandDefinition> = {
 				};
 			} catch (error) {
 				if (launched) {
-					await stopLaunchedSession(launched.session);
+					const session = launched.session;
+					await stopLaunchedSession(session);
+					throw new DriverLaunchError(
+						error instanceof Error ? error.message : String(error),
+						session,
+					);
 				}
 				throw error;
 			} finally {
@@ -540,6 +647,44 @@ const commandDefinitions: Record<string, CommandDefinition> = {
 					tauriRunning: isPidRunning(session.tauriPid),
 					viteRunning: session.vitePid ? isPidRunning(session.vitePid) : null,
 				})),
+			};
+		},
+	},
+	history: {
+		summary: "Read recent driver command attempts from the command log.",
+		usage: [
+			"bun run driver -- history",
+			"bun run driver -- history --limit 20",
+		],
+		examples: [
+			"bun run driver -- history",
+			"bun run driver -- history --limit 50 --command help",
+		],
+		async handler(args) {
+			const limit = optionalNumberFlag(args, "limit") ?? 20;
+			const command =
+				typeof flag(args, "command") === "string"
+					? (flag(args, "command") as string)
+					: undefined;
+			const session =
+				typeof flag(args, "session") === "string"
+					? resolveSessionRecord(flag(args, "session") as string)
+					: undefined;
+			const sourceStateDir =
+				typeof flag(args, "source-state-dir") === "string"
+					? (flag(args, "source-state-dir") as string)
+					: session?.sourceStateDir ?? defaultSourceStateDir;
+			const commandLogPath =
+				(typeof session?.driverLogPath === "string" ? session.driverLogPath : null)
+				?? globalDriverCommandLogPath(sourceStateDir);
+			const entries = readCommandLogEntries(commandLogPath)
+				.filter((entry) => (command ? entry.command === command : true))
+				.slice(-limit)
+				.reverse();
+
+			return {
+				commandLogPath,
+				entries,
 			};
 		},
 	},
@@ -1282,14 +1427,32 @@ function printError(error: unknown) {
 }
 
 async function main() {
-	const args = parseCommand(process.argv.slice(2));
-	assertKnownCommand(args.command);
-	const handler = commandDefinitions[args.command].handler;
-	const result = await handler(args);
-	printJson(result);
+	const argv = process.argv.slice(2);
+	const startedAt = new Date().toISOString();
+	const startedAtMs = Date.now();
+	const args = parseCommand(argv);
+	const session = resolveLoggingSession(args);
+
+	try {
+		assertKnownCommand(args.command);
+		const handler = commandDefinitions[args.command].handler;
+		const result = await handler(args);
+		printJson(result);
+		logCommandAttempt(args, argv, startedAt, startedAtMs, {
+			error: null,
+			result,
+			session,
+		});
+	} catch (error) {
+		const errorSession =
+			error instanceof DriverLaunchError ? error.session : session;
+		printError(error);
+		logCommandAttempt(args, argv, startedAt, startedAtMs, {
+			error: error instanceof Error ? error.message : String(error),
+			session: errorSession,
+		});
+		process.exitCode = 1;
+	}
 }
 
-void main().catch((error) => {
-	printError(error);
-	process.exitCode = 1;
-});
+void main();
