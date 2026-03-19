@@ -22,6 +22,16 @@ interface TreeNode {
 	type: "directory" | "file";
 }
 
+type DiffInfo = { additions: number; deletions: number; status: string };
+type DirStatus = {
+	additions: number;
+	deletions: number;
+	fileCount: number;
+	hasAdded: boolean;
+	hasDeleted: boolean;
+	hasModified: boolean;
+};
+
 export function GitFilesTab() {
 	const navigate = useNavigate();
 	const { workspaceName: workspace, project } = useWorkspaceRouteParams();
@@ -35,10 +45,7 @@ export function GitFilesTab() {
 		refetchInterval: 5000,
 	});
 	const diffByPath = useMemo(() => {
-		const entries = new Map<
-			string,
-			{ additions: number; deletions: number; status: string }
-		>();
+		const entries = new Map<string, DiffInfo>();
 		for (const section of diff ? [diff.local, diff.remote] : []) {
 			for (const file of section.files) {
 				entries.set(file.path, {
@@ -50,6 +57,33 @@ export function GitFilesTab() {
 		}
 		return entries;
 	}, [diff]);
+
+	const dirStatusByPath = useMemo(() => {
+		const statuses = new Map<string, DirStatus>();
+		for (const [filePath, info] of diffByPath) {
+			const parts = filePath.split("/");
+			for (let i = 1; i < parts.length; i++) {
+				const dirPath = parts.slice(0, i).join("/");
+				const existing = statuses.get(dirPath) ?? {
+					additions: 0,
+					deletions: 0,
+					fileCount: 0,
+					hasAdded: false,
+					hasDeleted: false,
+					hasModified: false,
+				};
+				existing.additions += info.additions;
+				existing.deletions += info.deletions;
+				existing.fileCount += 1;
+				if (info.status === "added") existing.hasAdded = true;
+				else if (info.status === "deleted") existing.hasDeleted = true;
+				else existing.hasModified = true;
+				statuses.set(dirPath, existing);
+			}
+		}
+		return statuses;
+	}, [diffByPath]);
+
 	const tree = useMemo(
 		() => buildTree(filesQuery.data ?? []),
 		[filesQuery.data],
@@ -75,7 +109,7 @@ export function GitFilesTab() {
 	}
 
 	return (
-		<div className="py-1.5">
+		<div className="py-1">
 			{Array.from(tree.children.values())
 				.sort(compareTreeNodes)
 				.map((node) => (
@@ -83,6 +117,7 @@ export function GitFilesTab() {
 						key={node.path}
 						depth={0}
 						diffByPath={diffByPath}
+						dirStatusByPath={dirStatusByPath}
 						expandedPaths={expandedPaths}
 						node={node}
 						onFileOpen={async (path, persistent) => {
@@ -117,19 +152,63 @@ export function GitFilesTab() {
 	);
 }
 
+function TreeGuideLines({ depth }: { depth: number }) {
+	if (depth === 0) return null;
+	return (
+		<>
+			{Array.from({ length: depth }, (_, i) => (
+				<span
+					key={i}
+					className="absolute top-0 bottom-0 w-px bg-border-light"
+					style={{ left: `${i * 12 + 14}px` }}
+				/>
+			))}
+		</>
+	);
+}
+
+function dirStatusType(
+	status: DirStatus,
+): "added" | "deleted" | "modified" {
+	if (status.hasModified || (status.hasAdded && status.hasDeleted))
+		return "modified";
+	if (status.hasAdded) return "added";
+	if (status.hasDeleted) return "deleted";
+	return "modified";
+}
+
+function gitRowStyle(status: "added" | "deleted" | "modified" | null) {
+	if (!status) return {};
+	const colors = {
+		added: {
+			border: "rgba(52, 211, 153, 0.5)",
+			bg: "rgba(52, 211, 153, 0.04)",
+		},
+		deleted: {
+			border: "rgba(248, 113, 113, 0.5)",
+			bg: "rgba(248, 113, 113, 0.04)",
+		},
+		modified: {
+			border: "rgba(252, 211, 77, 0.5)",
+			bg: "rgba(252, 211, 77, 0.04)",
+		},
+	};
+	const { border, bg } = colors[status];
+	return { boxShadow: `inset 2px 0 0 ${border}`, backgroundColor: bg };
+}
+
 function TreeRow({
 	depth,
 	diffByPath,
+	dirStatusByPath,
 	expandedPaths,
 	node,
 	onFileOpen,
 	onToggleFolder,
 }: {
 	depth: number;
-	diffByPath: Map<
-		string,
-		{ additions: number; deletions: number; status: string }
-	>;
+	diffByPath: Map<string, DiffInfo>;
+	dirStatusByPath: Map<string, DirStatus>;
 	expandedPaths: ReadonlySet<string>;
 	node: TreeNode;
 	onFileOpen: (path: string, persistent: boolean) => Promise<void>;
@@ -138,20 +217,36 @@ function TreeRow({
 	if (node.type === "directory") {
 		const open = expandedPaths.has(node.path);
 		const FolderIcon = open ? FolderOpenIcon : FolderClosedIcon;
+		const folderDiff = dirStatusByPath.get(node.path);
+
 		return (
 			<div>
 				<button
 					type="button"
 					onClick={() => onToggleFolder(node.path)}
-					className="w-full flex items-center gap-1.5 px-3 py-1 text-[11px] text-text hover:bg-btn-hover transition-colors"
-					style={{ paddingLeft: `${depth * 14 + 12}px` }}
+					className="relative w-full flex items-center gap-1.5 px-3 py-[3px] text-[11px] text-text hover:bg-btn-hover transition-colors"
+					style={{
+						paddingLeft: `${depth * 12 + 8}px`,
+						...gitRowStyle(
+							folderDiff ? dirStatusType(folderDiff) : null,
+						),
+					}}
 				>
+					<TreeGuideLines depth={depth} />
 					<ChevronRight
 						size={11}
-						className={`shrink-0 text-text-muted transition-transform ${open ? "rotate-90" : ""}`}
+						className={`shrink-0 text-text-muted transition-transform duration-150 ${open ? "rotate-90" : ""}`}
 					/>
-					<FolderIcon size={12} className="shrink-0 text-text-muted" />
+					<FolderIcon
+						size={12}
+						className="shrink-0 text-text-muted"
+					/>
 					<span className="truncate">{node.name}</span>
+					{folderDiff && (
+						<span className="shrink-0 ml-auto text-[10px] tabular-nums text-text-muted">
+							{folderDiff.fileCount}
+						</span>
+					)}
 				</button>
 				{open &&
 					Array.from(node.children.values())
@@ -161,6 +256,7 @@ function TreeRow({
 								key={child.path}
 								depth={depth + 1}
 								diffByPath={diffByPath}
+								dirStatusByPath={dirStatusByPath}
 								expandedPaths={expandedPaths}
 								node={child}
 								onFileOpen={onFileOpen}
@@ -183,31 +279,32 @@ function TreeRow({
 			onDoubleClick={() => {
 				void onFileOpen(node.path, true);
 			}}
-			className="w-full flex items-center justify-between gap-2 px-3 py-1 text-[11px] text-text hover:bg-btn-hover transition-colors"
-			style={{ paddingLeft: `${depth * 14 + 28}px` }}
+			className="relative w-full flex items-center justify-between gap-2 px-3 py-[3px] text-[11px] text-text hover:bg-btn-hover transition-colors"
+			style={{
+				paddingLeft: `${depth * 12 + 25}px`,
+				...gitRowStyle(
+					diff
+						? diff.status === "added"
+							? "added"
+							: diff.status === "deleted"
+								? "deleted"
+								: "modified"
+						: null,
+				),
+			}}
 		>
-			<span className="min-w-0 flex items-center gap-2">
-				<span
-					className={`w-1.5 h-1.5 rounded-full ${
-						diff?.status === "added"
-							? "bg-emerald-400"
-							: diff?.status === "deleted"
-								? "bg-red-400"
-								: diff
-									? "bg-amber-300"
-									: "bg-border-hover"
-					}`}
-				/>
+			<TreeGuideLines depth={depth} />
+			<span className="min-w-0 flex items-center gap-1.5">
 				<Icon size={12} className="shrink-0 text-text-muted" />
 				<span className="truncate">{node.name}</span>
 			</span>
 			{diff && (
-				<span className="shrink-0 flex items-center gap-1 text-[10px] text-text-muted">
+				<span className="shrink-0 flex items-center gap-1 text-[10px]">
 					{diff.additions > 0 && (
-						<span className="text-emerald-400">+{diff.additions}</span>
+						<span className="text-emerald-400/80">+{diff.additions}</span>
 					)}
 					{diff.deletions > 0 && (
-						<span className="text-red-400">-{diff.deletions}</span>
+						<span className="text-red-400/80">-{diff.deletions}</span>
 					)}
 				</span>
 			)}

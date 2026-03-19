@@ -8,11 +8,14 @@ import {
 	useContext,
 	useEffect,
 	useMemo,
+	useRef,
 	useState,
 } from "react";
+import { toast } from "@/shared/ui/toaster";
 import type { WorkspaceSession } from "@/workspaces/api";
 import {
 	filesGetWatchedState,
+	filesCloseSession,
 	filesOpenSession,
 	filesSetWatchedPaths,
 	type WatchedFileState,
@@ -32,6 +35,7 @@ export interface DisplayWorkspaceSession extends WorkspaceSession {
 
 interface OpenFileTabOptions {
 	path: string;
+	localFirst?: boolean;
 	persistent: boolean;
 	workspace: string;
 	workspaceSessions: WorkspaceSession[];
@@ -86,6 +90,19 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 	const [sessionStates, setSessionStates] = useState<
 		Record<string, FileTabState>
 	>({});
+	const localSessionsRef = useRef(localSessions);
+	const workspaceSessionsRef = useRef(workspaceSessions);
+	const pendingPersistentOpensRef = useRef(
+		new Map<string, { path: string; workspace: string }>(),
+	);
+
+	useEffect(() => {
+		localSessionsRef.current = localSessions;
+	}, [localSessions]);
+
+	useEffect(() => {
+		workspaceSessionsRef.current = workspaceSessions;
+	}, [workspaceSessions]);
 
 	const setSessionState = useCallback<
 		FileSessionsContextValue["setSessionState"]
@@ -109,6 +126,7 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 	}, []);
 
 	const clearSession = useCallback((attachmentId: string) => {
+		pendingPersistentOpensRef.current.delete(attachmentId);
 		setLocalSessions((current) =>
 			current.filter((session) => session.attachment_id !== attachmentId),
 		);
@@ -217,16 +235,131 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 		[watchedStateQuery.data],
 	);
 
+	const startPersistentOpenInBackground = useCallback(
+		({
+			attachmentId,
+			path,
+			workspace,
+		}: {
+			attachmentId: string;
+			path: string;
+			workspace: string;
+		}) => {
+			const pending = pendingPersistentOpensRef.current;
+			if (pending.has(attachmentId)) {
+				return;
+			}
+			pending.set(attachmentId, { path, workspace });
+
+			void (async () => {
+				try {
+					const result = await filesOpenSession(workspace, path);
+					let sessionStillOpen = false;
+					setLocalSessions((previous) =>
+						previous.map((session) => {
+							if (session.attachment_id !== attachmentId) {
+								return session;
+							}
+							sessionStillOpen = true;
+							return {
+								...session,
+								persistentAttachmentId: result.attachment_id,
+								preview: false,
+							};
+						}),
+					);
+
+					if (!sessionStillOpen) {
+						const hasReplacementSession =
+							localSessionsRef.current.some(
+								(session) =>
+									session.type === "file" &&
+									session.path === path &&
+									(session.attachment_id !== attachmentId ||
+										session.persistentAttachmentId === result.attachment_id),
+							) ||
+							workspaceSessionsRef.current.some(
+								(session) =>
+									session.type === "file" &&
+									session.path === path &&
+									session.attachment_id === result.attachment_id,
+							);
+						if (!hasReplacementSession) {
+							void filesCloseSession(
+								workspace,
+								result.attachment_id,
+							).catch(() => {});
+						}
+						return;
+					}
+
+					void queryClient.invalidateQueries({
+						queryKey: ["workspaces_get_workspace", workspace],
+					});
+				} catch (error) {
+					if (!localSessionsRef.current.some(
+						(session) => session.attachment_id === attachmentId,
+					)) {
+						return;
+					}
+					toast({
+						variant: "error",
+						title: "File tab not persisted",
+						description:
+							error instanceof Error
+								? error.message
+								: "The file opened locally, but metadata sync failed.",
+					});
+				} finally {
+					pending.delete(attachmentId);
+				}
+			})();
+		},
+		[queryClient],
+	);
+
 	const openFileTab = useCallback<FileSessionsContextValue["openFileTab"]>(
-		async ({ path, persistent, workspace, workspaceSessions }) => {
+		async ({
+			path,
+			persistent,
+			workspace,
+			workspaceSessions,
+			localFirst = false,
+		}) => {
 			const localExisting = localSessions.find(
 				(session) => session.path === path,
 			);
 			if (localExisting) {
-				if (!persistent || !localExisting.preview) {
+				if (
+					!persistent ||
+					!localExisting.preview ||
+					(localFirst && !localExisting.persistentAttachmentId)
+				) {
+					if (persistent && localFirst) {
+						setLocalSessions((previous) =>
+							previous.map((session) =>
+								session.attachment_id === localExisting.attachment_id
+									? {
+											...session,
+											preview: false,
+										}
+									: session,
+							),
+						);
+						if (!localExisting.persistentAttachmentId) {
+							startPersistentOpenInBackground({
+								attachmentId: localExisting.attachment_id,
+								path,
+								workspace,
+							});
+						}
+					}
 					return {
 						attachmentId: localExisting.attachment_id,
-						preview: !!localExisting.preview,
+						preview:
+							persistent && localFirst
+								? false
+								: !!localExisting.preview,
 					};
 				}
 
@@ -279,13 +412,31 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 				return { attachmentId: previewAttachmentId, preview: true };
 			}
 
+			if (localFirst) {
+				const attachmentId = createLocalAttachmentId();
+				setLocalSessions((previous) => [
+					...previous,
+					createLocalSession(path, attachmentId, false),
+				]);
+				setSessionStates((previous) => ({
+					...previous,
+					[attachmentId]: defaultTabState,
+				}));
+				startPersistentOpenInBackground({
+					attachmentId,
+					path,
+					workspace,
+				});
+				return { attachmentId, preview: false };
+			}
+
 			const result = await filesOpenSession(workspace, path);
 			await queryClient.invalidateQueries({
 				queryKey: ["workspaces_get_workspace", workspace],
 			});
 			return { attachmentId: result.attachment_id, preview: false };
 		},
-		[localSessions, queryClient],
+		[localSessions, queryClient, startPersistentOpenInBackground],
 	);
 
 	const promotePreviewTab = useCallback<

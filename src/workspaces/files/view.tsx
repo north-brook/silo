@@ -12,8 +12,19 @@ import { rust } from "@codemirror/lang-rust";
 import { sql } from "@codemirror/lang-sql";
 import { xml } from "@codemirror/lang-xml";
 import { yaml } from "@codemirror/lang-yaml";
-import type { Extension } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import {
+	RangeSetBuilder,
+	StateField,
+	type EditorState,
+	type Extension,
+} from "@codemirror/state";
+import {
+	Decoration,
+	type DecorationSet,
+	EditorView,
+} from "@codemirror/view";
+import { tags as t } from "@lezer/highlight";
 import {
 	type QueryClient,
 	useMutation,
@@ -26,6 +37,7 @@ import {
 	type ReactNode,
 	useCallback,
 	useEffect,
+	useMemo,
 	useRef,
 	useState,
 } from "react";
@@ -38,50 +50,210 @@ import {
 	filesSave,
 } from "@/workspaces/files/api";
 import { useFileSessions } from "@/workspaces/files/context";
+import { useGitSidebar } from "@/workspaces/git/context";
 import { useWorkspaceSessionRouteParams } from "@/workspaces/routes/params";
 import { fileSessionHref } from "@/workspaces/routes/paths";
 import { useWorkspaceSessions } from "@/workspaces/state";
 
-const editorTheme = EditorView.theme({
-	"&": {
-		height: "100%",
-		backgroundColor: "var(--color-surface)",
-		color: "var(--color-text-bright)",
-		fontSize: "12px",
+const editorTheme = EditorView.theme(
+	{
+		"&": {
+			height: "100%",
+			backgroundColor: "var(--color-surface)",
+			color: "var(--color-text)",
+			fontSize: "12px",
+		},
+		".cm-scroller": {
+			fontFamily: "var(--font-mono)",
+			overflow: "auto",
+		},
+		".cm-content": {
+			caretColor: "var(--color-text-bright)",
+		},
+		".cm-gutters": {
+			backgroundColor: "var(--color-surface)",
+			borderRight: "none",
+			color: "var(--color-text-placeholder)",
+		},
+		".cm-activeLineGutter": {
+			backgroundColor: "transparent",
+			color: "var(--color-text-muted)",
+		},
+		".cm-activeLine": {
+			backgroundColor: "rgba(255, 255, 255, 0.02)",
+		},
+		".cm-selectionBackground, .cm-content ::selection": {
+			backgroundColor: "rgba(99, 140, 255, 0.15) !important",
+		},
+		".cm-cursor, .cm-dropCursor": {
+			borderLeftColor: "var(--color-text-bright)",
+		},
+		".cm-matchingBracket": {
+			backgroundColor: "rgba(99, 140, 255, 0.12)",
+			outline: "none",
+		},
+		".cm-diff-added": {
+			backgroundColor: "rgba(52, 211, 153, 0.06)",
+			boxShadow: "inset 2px 0 0 rgba(52, 211, 153, 0.5)",
+		},
+		".cm-diff-modified": {
+			backgroundColor: "rgba(252, 211, 77, 0.06)",
+			boxShadow: "inset 2px 0 0 rgba(252, 211, 77, 0.5)",
+		},
 	},
-	".cm-editor": {
-		height: "100%",
-		backgroundColor: "var(--color-surface)",
+	{ dark: true },
+);
+
+const highlightStyle = HighlightStyle.define([
+	{ tag: [t.keyword, t.operatorKeyword, t.modifier], color: "#b898d4" },
+	{ tag: [t.string, t.special(t.string), t.regexp], color: "#8fbc8f" },
+	{
+		tag: [t.typeName, t.className, t.tagName, t.namespace],
+		color: "#7ca8cc",
 	},
-	".cm-scroller": {
-		height: "100%",
-		fontFamily: "var(--font-mono)",
-		overflow: "auto",
-		padding: "12px 0",
-		backgroundColor: "var(--color-surface)",
+	{ tag: [t.number, t.bool, t.null, t.atom, t.self], color: "#cc9876" },
+	{ tag: t.constant(t.name), color: "#cc9876" },
+	{
+		tag: [t.function(t.variableName), t.function(t.propertyName)],
+		color: "#dce4f0",
 	},
-	".cm-content": {
-		minHeight: "100%",
-		caretColor: "var(--color-text-bright)",
+	{ tag: t.definition(t.variableName), color: "#dce4f0" },
+	{ tag: [t.variableName, t.propertyName], color: "#b0b8c8" },
+	{ tag: t.definition(t.propertyName), color: "#b0b8c8" },
+	{ tag: t.operator, color: "#828da0" },
+	{ tag: [t.punctuation, t.separator, t.bracket], color: "#6b7394" },
+	{
+		tag: [t.comment, t.lineComment, t.blockComment],
+		color: "#4a5068",
+		fontStyle: "italic",
 	},
-	".cm-gutters": {
-		backgroundColor: "var(--color-surface)",
-		borderRight: "1px solid var(--color-border-light)",
-		color: "var(--color-text-muted)",
-	},
-	".cm-activeLine": {
-		backgroundColor: "rgba(99, 140, 255, 0.06)",
-	},
-	".cm-activeLineGutter": {
-		backgroundColor: "rgba(99, 140, 255, 0.08)",
-	},
-	".cm-selectionBackground, .cm-content ::selection": {
-		backgroundColor: "rgba(99, 140, 255, 0.22)",
-	},
-	".cm-cursor, .cm-dropCursor": {
-		borderLeftColor: "var(--color-text-bright)",
-	},
-});
+	{ tag: [t.meta, t.annotation], color: "#6b7394" },
+	{ tag: t.attributeName, color: "#b898d4" },
+	{ tag: t.attributeValue, color: "#8fbc8f" },
+	{ tag: t.heading, fontWeight: "bold", color: "#dce4f0" },
+	{ tag: t.strong, fontWeight: "bold" },
+	{ tag: t.emphasis, fontStyle: "italic" },
+	{ tag: t.link, color: "#638cff", textDecoration: "underline" },
+	{ tag: t.url, color: "#638cff" },
+	{ tag: t.inserted, color: "#8fbc8f" },
+	{ tag: t.deleted, color: "#f87171" },
+	{ tag: t.changed, color: "#cc9876" },
+	{ tag: t.escape, color: "#cc9876" },
+	{ tag: t.invalid, color: "#f87171" },
+]);
+
+// --- Diff line decorations (from git patch) ---
+
+const addedLineDeco = Decoration.line({ class: "cm-diff-added" });
+const modifiedLineDeco = Decoration.line({ class: "cm-diff-modified" });
+
+function parsePatchChangedLines(
+	patch: string,
+): Map<number, "added" | "modified"> {
+	const result = new Map<number, "added" | "modified">();
+	const lines = patch.split("\n");
+
+	let newLine = 0;
+	let pendingDeletions = 0;
+	let pendingAdditions: number[] = [];
+
+	const flushBlock = () => {
+		if (pendingAdditions.length === 0) {
+			pendingDeletions = 0;
+			return;
+		}
+		const modifiedCount = Math.min(pendingDeletions, pendingAdditions.length);
+		for (let i = 0; i < pendingAdditions.length; i++) {
+			result.set(
+				pendingAdditions[i],
+				i < modifiedCount ? "modified" : "added",
+			);
+		}
+		pendingDeletions = 0;
+		pendingAdditions = [];
+	};
+
+	for (const line of lines) {
+		if (line.startsWith("@@")) {
+			const hunkMatch = line.match(
+				/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/,
+			);
+			if (hunkMatch) {
+				flushBlock();
+				newLine = Number.parseInt(hunkMatch[1], 10);
+			}
+			continue;
+		}
+
+		if (newLine === 0) continue;
+
+		if (line.startsWith("+")) {
+			pendingAdditions.push(newLine);
+			newLine++;
+		} else if (line.startsWith("-")) {
+			pendingDeletions++;
+		} else if (line.startsWith("\\")) {
+			// "\ No newline at end of file" marker
+		} else if (line.startsWith(" ")) {
+			flushBlock();
+			newLine++;
+		} else if (line === "") {
+			// Empty context line (git may omit space prefix)
+			flushBlock();
+			newLine++;
+		} else {
+			// Non-hunk line (next file header, etc.)
+			flushBlock();
+			newLine = 0;
+		}
+	}
+
+	flushBlock();
+	return result;
+}
+
+function createPatchDiffExtension(
+	changedLines: Map<number, "added" | "modified">,
+): Extension {
+	return StateField.define<DecorationSet>({
+		create(state) {
+			return buildPatchDecorations(changedLines, state);
+		},
+		update(value, tr) {
+			if (!tr.docChanged) return value;
+			return value.map(tr.changes);
+		},
+		provide(field) {
+			return EditorView.decorations.from(field);
+		},
+	});
+}
+
+function buildPatchDecorations(
+	changedLines: Map<number, "added" | "modified">,
+	state: EditorState,
+): DecorationSet {
+	if (changedLines.size === 0) return Decoration.none;
+
+	const builder = new RangeSetBuilder<Decoration>();
+	const doc = state.doc;
+
+	for (let i = 1; i <= doc.lines; i++) {
+		const status = changedLines.get(i);
+		if (status) {
+			const line = doc.line(i);
+			builder.add(
+				line.from,
+				line.from,
+				status === "added" ? addedLineDeco : modifiedLineDeco,
+			);
+		}
+	}
+
+	return builder.finish();
+}
+
+// --- Component ---
 
 export function WorkspaceFileSessionView() {
 	const navigate = useNavigate();
@@ -98,6 +270,7 @@ export function WorkspaceFileSessionView() {
 		resolveSession,
 		setSessionState,
 	} = useFileSessions();
+	const { diff: gitDiff } = useGitSidebar();
 	const session = resolveSession(sessions, attachmentId);
 	const path = session?.path ?? null;
 	const watchedFile = getWatchedFileState(path);
@@ -118,6 +291,31 @@ export function WorkspaceFileSessionView() {
 	});
 
 	const dirty = buffer !== savedContent;
+
+	// Parse git diff patch for the current file to get changed line numbers
+	const changedLines = useMemo(() => {
+		if (!gitDiff || !path) return null;
+		// Check both local and remote sections
+		for (const section of [gitDiff.local, gitDiff.remote]) {
+			const file = section.files.find((f) => f.path === path);
+			if (file?.patch) {
+				return parsePatchChangedLines(file.patch);
+			}
+		}
+		return null;
+	}, [gitDiff, path]);
+
+	const extensions = useMemo(
+		() => [
+			syntaxHighlighting(highlightStyle),
+			EditorView.lineWrapping,
+			...(changedLines && changedLines.size > 0
+				? [createPatchDiffExtension(changedLines)]
+				: []),
+			languageExtensionForPath(path ?? ""),
+		],
+		[changedLines, path],
+	);
 
 	useEffect(() => {
 		if (!path) {
@@ -203,6 +401,16 @@ export function WorkspaceFileSessionView() {
 		},
 		onSuccess: async (result, variables) => {
 			if (result.status === "saved") {
+				queryClient.setQueryData<FileReadResult>(
+					["files_read", workspace, path],
+					(current) => ({
+						path: path ?? current?.path ?? "",
+						exists: true,
+						binary: false,
+						revision: result.revision ?? baseRevision,
+						content: variables.content,
+					}),
+				);
 				setSavedContent(variables.content);
 				setBuffer(variables.content);
 				setBaseRevision(result.revision ?? baseRevision);
@@ -212,7 +420,9 @@ export function WorkspaceFileSessionView() {
 					dirty: false,
 					saving: false,
 				});
-				await invalidateFileQueries(queryClient, workspace, path);
+				await invalidateFileQueries(queryClient, workspace, path, {
+					includeRead: false,
+				});
 				return;
 			}
 
@@ -365,7 +575,7 @@ export function WorkspaceFileSessionView() {
 				</div>
 			)}
 			<div
-				className="flex-1 min-h-0 overflow-hidden bg-surface"
+				className="flex-1 min-h-0 relative overflow-hidden bg-surface"
 				onFocusCapture={() => {
 					void promotePreview();
 				}}
@@ -392,8 +602,15 @@ export function WorkspaceFileSessionView() {
 				) : (
 					<CodeMirror
 						value={buffer}
-						height="100%"
-						extensions={[editorTheme, languageExtensionForPath(path)]}
+						style={{
+							position: "absolute",
+							top: 0,
+							left: 0,
+							right: 0,
+							bottom: 0,
+						}}
+						theme={editorTheme}
+						extensions={extensions}
 						basicSetup={{
 							foldGutter: false,
 							highlightActiveLine: true,
@@ -440,9 +657,12 @@ async function invalidateFileQueries(
 	queryClient: QueryClient,
 	workspace: string,
 	path: string | null,
+	options?: {
+		includeRead?: boolean;
+	},
 ) {
 	await Promise.all([
-		path
+		(options?.includeRead ?? true) && path
 			? queryClient.invalidateQueries({
 					queryKey: ["files_read", workspace, path],
 				})
