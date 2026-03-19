@@ -243,24 +243,42 @@ pub fn browser_kill_tab(
     workspace: String,
     attachment_id: String,
 ) -> Result<BrowserKillResult, String> {
-    let _ = state.close_webview(&app, &workspace, &attachment_id)?;
+    let _ = state.hide_webview(&app, &workspace, &attachment_id)?;
     let _ = state.remove_cached_session(&workspace, &attachment_id)?;
     let cached_sessions = state.cache_sessions_for_workspace(&workspace)?;
     let remaining_sessions = cached_sessions;
     enqueue_browser_metadata_remove(metadata.inner(), &workspace, None, &attachment_id);
-    if metadata.clear_active_workspace_session_if_matches(
+    let cleared_active_session = metadata.clear_active_workspace_session_if_matches(
         &workspace,
         BROWSER_KIND,
         &attachment_id,
         None,
-    ) {
+    );
+    if cleared_active_session {
         metadata.enqueue(&workspace, None, active_session_metadata_entries(None));
     }
-    emit_workspace_state_changed(&app, &workspace);
+    emit_workspace_state_changed(
+        &app,
+        &workspace,
+        Some((BROWSER_KIND, &attachment_id)),
+        cleared_active_session,
+    );
 
     let manager = state.inner().clone();
+    let app_for_cleanup = app.clone();
     let workspace_for_cleanup = workspace.clone();
+    let attachment_for_cleanup = attachment_id.clone();
     tauri::async_runtime::spawn(async move {
+        if let Err(error) =
+            manager.close_webview(&app_for_cleanup, &workspace_for_cleanup, &attachment_for_cleanup)
+        {
+            log::warn!(
+                "failed to close browser webview for workspace {} attachment_id={}: {}",
+                workspace_for_cleanup,
+                attachment_for_cleanup,
+                error
+            );
+        }
         if let Err(error) = manager
             .loopback_router
             .release_unused_workspace_routes(&workspace_for_cleanup, &remaining_sessions)

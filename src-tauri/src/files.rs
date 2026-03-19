@@ -199,12 +199,13 @@ pub fn files_close_session(
         return Err("file attachment_id must not be empty".to_string());
     }
 
-    if state.clear_active_workspace_session_if_matches(
+    let cleared_active_session = state.clear_active_workspace_session_if_matches(
         &workspace,
         "file",
         &attachment_id,
         None,
-    ) {
+    );
+    if cleared_active_session {
         state.enqueue(
             &workspace,
             None,
@@ -213,7 +214,12 @@ pub fn files_close_session(
     }
 
     enqueue_file_metadata_remove(state.inner(), &workspace, None, &attachment_id);
-    emit_workspace_state_changed(&app, &workspace);
+    emit_workspace_state_changed(
+        &app,
+        &workspace,
+        Some(("file", &attachment_id)),
+        cleared_active_session,
+    );
     Ok(())
 }
 

@@ -425,15 +425,21 @@ pub fn terminal_kill_terminal(
     }
 
     workspace_state.remove_workspace_session(&workspace, "terminal", &attachment_id);
-    if workspace_state.clear_active_workspace_session_if_matches(
+    let cleared_active_session = workspace_state.clear_active_workspace_session_if_matches(
         &workspace,
         "terminal",
         &attachment_id,
         None,
-    ) {
+    );
+    if cleared_active_session {
         workspace_state.enqueue(&workspace, None, active_session_metadata_entries(None));
     }
-    emit_workspace_state_changed(&app, &workspace);
+    emit_workspace_state_changed(
+        &app,
+        &workspace,
+        Some(("terminal", &attachment_id)),
+        cleared_active_session,
+    );
 
     let workspace_for_kill = workspace.clone();
     let attachment_for_kill = attachment_id.clone();

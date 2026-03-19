@@ -30,6 +30,9 @@ pub(crate) const WORKSPACE_STATE_EVENT_NAME: &str = "workspace://state";
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WorkspaceStateEvent {
     workspace: String,
+    cleared_active_session: bool,
+    removed_session_attachment_id: Option<String>,
+    removed_session_kind: Option<String>,
 }
 
 const MENU_ID_NEW_WORKSPACE: &str = "new_workspace";
@@ -76,11 +79,22 @@ fn emit_shortcut_event(app_handle: &AppHandle<AppRuntime>, event: &str) {
     let _ = app_handle.emit(event, ());
 }
 
-pub(crate) fn emit_workspace_state_changed(app_handle: &AppHandle<AppRuntime>, workspace: &str) {
+pub(crate) fn emit_workspace_state_changed(
+    app_handle: &AppHandle<AppRuntime>,
+    workspace: &str,
+    removed_session: Option<(&str, &str)>,
+    cleared_active_session: bool,
+) {
+    let (removed_session_kind, removed_session_attachment_id) = removed_session
+        .map(|(kind, attachment_id)| (Some(kind.to_string()), Some(attachment_id.to_string())))
+        .unwrap_or((None, None));
     let _ = app_handle.emit(
         WORKSPACE_STATE_EVENT_NAME,
         WorkspaceStateEvent {
             workspace: workspace.to_string(),
+            cleared_active_session,
+            removed_session_attachment_id,
+            removed_session_kind,
         },
     );
 }
