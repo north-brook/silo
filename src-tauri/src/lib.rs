@@ -214,6 +214,8 @@ pub fn run() {
     let browser_manager = browser::BrowserManager::new(loopback_router.clone());
     let browser_loopback_manager = browser_loopback::BrowserLoopbackManager::new(loopback_router);
     let browser_loopback_resolver = browser_loopback_manager.clone();
+    let template_operation_manager = templates::TemplateOperationManager::load()
+        .unwrap_or_else(|error| panic!("failed to initialize template operation manager: {error}"));
 
     let _ = tauri_runtime_cef::set_loopback_request_resolver(std::sync::Arc::new(
         move |webview_label, original_url| {
@@ -226,6 +228,7 @@ pub fn run() {
         .manage(browser_manager)
         .manage(browser_loopback_manager)
         .manage(state::WorkspaceMetadataManager::default())
+        .manage(template_operation_manager.clone())
         .manage(terminal::TerminalManager::default())
         .plugin(logging_plugin)
         .plugin(tauri_plugin_opener::init())
@@ -244,6 +247,8 @@ pub fn run() {
             } else {
                 log::warn!("session file logging is unavailable; using stdout only");
             }
+
+            template_operation_manager.resume_running_operations();
 
             // Native accelerators ensure app shortcuts still work when focus moves to child webviews.
             {
@@ -537,6 +542,7 @@ pub fn run() {
             projects::projects_update_project,
             projects::projects_reorder_projects,
             templates::templates_list_templates,
+            templates::templates_get_state,
             templates::templates_create_template,
             templates::templates_edit_template,
             templates::templates_save_template,

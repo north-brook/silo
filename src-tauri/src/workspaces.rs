@@ -471,7 +471,7 @@ pub(crate) struct Snapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct InstanceState {
+pub(crate) struct InstanceState {
     status: String,
     boot_disk: String,
 }
@@ -1524,22 +1524,21 @@ where
     .map_err(|error| format!("gcloud task failed: {error}"))?
 }
 
-pub(crate) async fn stop_and_snapshot_template_workspace(
-    account: String,
-    gcloud_project: String,
-    project: String,
-    workspace_name: String,
-    zone: String,
-) -> Result<(), String> {
+pub(crate) async fn ensure_template_workspace_terminated(
+    account: &str,
+    gcloud_project: &str,
+    workspace_name: &str,
+    zone: &str,
+) -> Result<String, String> {
     let instance =
-        describe_instance_in_project(&workspace_name, &account, &gcloud_project, &zone).await?;
+        describe_instance_in_project(workspace_name, account, gcloud_project, zone).await?;
     let instance = if instance.status == INSTANCE_STATUS_TERMINATED {
         instance
     } else {
         let stop_result = run_gcloud(
-            &account,
-            &gcloud_project,
-            stop_workspace_args(&workspace_name, &zone),
+            account,
+            gcloud_project,
+            stop_workspace_args(workspace_name, zone),
         )
         .await?;
 
@@ -1550,13 +1549,51 @@ pub(crate) async fn stop_and_snapshot_template_workspace(
             ));
         }
 
-        wait_for_instance_terminated(&account, &gcloud_project, &workspace_name, &zone).await?
+        wait_for_instance_terminated(account, gcloud_project, workspace_name, zone).await?
     };
-    let snapshot_name = generate_template_snapshot_name(&project);
+
+    Ok(instance.boot_disk)
+}
+
+pub(crate) async fn delete_template_workspace_if_exists(
+    account: &str,
+    gcloud_project: &str,
+    workspace_name: &str,
+    _zone: &str,
+) -> Result<(), String> {
+    let workspace = find_workspace_in_project(workspace_name, account, gcloud_project).await?;
+    let Some(workspace) = workspace else {
+        return Ok(());
+    };
+
+    let delete_result = run_gcloud(
+        account,
+        gcloud_project,
+        delete_workspace_args(workspace_name, workspace.zone()),
+    )
+    .await?;
+    if !delete_result.success {
+        return Err(gcloud_error(
+            "failed to delete template workspace",
+            &delete_result.stderr,
+        ));
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn create_template_snapshot_for_disk(
+    account: &str,
+    gcloud_project: &str,
+    project: &str,
+    source_disk: &str,
+    zone: &str,
+) -> Result<String, String> {
+    let snapshot_name = generate_template_snapshot_name(project);
     let snapshot_result = run_gcloud(
-        &account,
-        &gcloud_project,
-        create_template_snapshot_args(&snapshot_name, &instance.boot_disk, &zone, &project),
+        account,
+        gcloud_project,
+        create_template_snapshot_args(&snapshot_name, source_disk, zone, project),
     )
     .await?;
 
@@ -1567,16 +1604,23 @@ pub(crate) async fn stop_and_snapshot_template_workspace(
         ));
     }
 
-    wait_for_snapshot_ready(&account, &gcloud_project, &snapshot_name).await?;
+    Ok(snapshot_name)
+}
 
-    let snapshots = list_template_snapshots_in_project(&account, &gcloud_project, &project).await?;
+pub(crate) async fn delete_old_template_snapshots(
+    account: &str,
+    gcloud_project: &str,
+    project: &str,
+    keep_snapshot_name: &str,
+) -> Result<(), String> {
+    let snapshots = list_template_snapshots_in_project(account, gcloud_project, project).await?;
     for snapshot in snapshots
         .into_iter()
-        .filter(|snapshot| snapshot.name != snapshot_name)
+        .filter(|snapshot| snapshot.name != keep_snapshot_name)
     {
         let delete_result = run_gcloud(
-            &account,
-            &gcloud_project,
+            account,
+            gcloud_project,
             delete_snapshot_args(&snapshot.name),
         )
         .await?;
@@ -1596,15 +1640,34 @@ pub(crate) async fn stop_and_snapshot_template_workspace(
         }
     }
 
-    log::info!(
-        "template workspace {} snapshot refresh started with snapshot {}",
-        workspace_name,
-        snapshot_name
-    );
     Ok(())
 }
 
-async fn wait_for_instance_terminated(
+pub(crate) async fn delete_template_snapshots(
+    account: &str,
+    gcloud_project: &str,
+    project: &str,
+) -> Result<(), String> {
+    let snapshots = list_template_snapshots_in_project(account, gcloud_project, project).await?;
+    for snapshot in snapshots {
+        let delete_result = run_gcloud(
+            account,
+            gcloud_project,
+            delete_snapshot_args(&snapshot.name),
+        )
+        .await?;
+        if !delete_result.success {
+            return Err(gcloud_error(
+                "failed to delete template snapshot",
+                &delete_result.stderr,
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn wait_for_instance_terminated(
     account: &str,
     gcloud_project: &str,
     workspace_name: &str,
@@ -1628,7 +1691,7 @@ async fn wait_for_instance_terminated(
     ))
 }
 
-async fn describe_instance_in_project(
+pub(crate) async fn describe_instance_in_project(
     name: &str,
     account: &str,
     project: &str,
@@ -1669,7 +1732,7 @@ pub(crate) async fn latest_template_snapshot_name(
     )
 }
 
-async fn wait_for_snapshot_ready(
+pub(crate) async fn wait_for_template_snapshot_ready(
     account: &str,
     project: &str,
     snapshot_name: &str,
