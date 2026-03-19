@@ -17,6 +17,7 @@ import { invoke } from "@/shared/lib/invoke";
 import {
 	isTemplateWorkspace,
 	type Workspace,
+	type WorkspaceActiveSession,
 	type WorkspaceSession,
 	workspaceIsReady,
 	workspaceSessions,
@@ -39,6 +40,13 @@ const WorkspaceStateContext = createContext<WorkspaceStateContextValue>({
 	isMissing: false,
 	invalidateWorkspace: () => {},
 });
+
+interface WorkspaceStateEventPayload {
+	workspace: string;
+	clearedActiveSession: boolean;
+	removedSessionAttachmentId?: string | null;
+	removedSessionKind?: string | null;
+}
 
 function WorkspaceStateProviderInner({
 	children,
@@ -75,6 +83,87 @@ function WorkspaceStateProviderInner({
 		});
 	}, [queryClient, workspaceName]);
 
+	const applyWorkspaceStateEvent = useCallback(
+		(
+			current: Workspace | null | undefined,
+			event: WorkspaceStateEventPayload,
+		): Workspace | null | undefined => {
+			if (!current) {
+				return current;
+			}
+
+			const nextActiveSession: WorkspaceActiveSession | null | undefined =
+				event.clearedActiveSession
+					? null
+					: current.active_session ?? null;
+
+			if (
+				!event.removedSessionAttachmentId ||
+				!event.removedSessionKind
+			) {
+				if (nextActiveSession === current.active_session) {
+					return current;
+				}
+				return {
+					...current,
+					active_session: nextActiveSession,
+				};
+			}
+
+			const removeSession = (sessions: WorkspaceSession[]) =>
+				sessions.filter(
+					(session) =>
+						!(
+							session.type === event.removedSessionKind &&
+							session.attachment_id === event.removedSessionAttachmentId
+						),
+				);
+
+			const nextTerminals = removeSession(current.terminals);
+			const nextBrowsers = removeSession(current.browsers);
+			const nextFiles = removeSession(current.files);
+			const assistantPresent = nextTerminals.some(
+				(session) => session.working != null || session.unread != null,
+			);
+			const nextWorking = assistantPresent
+				? nextTerminals.some((session) => session.working === true)
+				: null;
+			const nextUnread = nextTerminals.some(
+				(session) => session.unread === true,
+			);
+
+			if (
+				nextTerminals.length === current.terminals.length &&
+				nextBrowsers.length === current.browsers.length &&
+				nextFiles.length === current.files.length &&
+				nextActiveSession === current.active_session
+			) {
+				return current;
+			}
+
+			if (isTemplateWorkspace(current)) {
+				return {
+					...current,
+					active_session: nextActiveSession,
+					terminals: nextTerminals,
+					browsers: nextBrowsers,
+					files: nextFiles,
+				};
+			}
+
+			return {
+				...current,
+				active_session: nextActiveSession,
+				terminals: nextTerminals,
+				browsers: nextBrowsers,
+				files: nextFiles,
+				unread: nextUnread,
+				working: nextWorking,
+			};
+		},
+		[],
+	);
+
 	useEffect(() => {
 		if (!workspaceName) {
 			return;
@@ -89,26 +178,44 @@ function WorkspaceStateProviderInner({
 			}
 		};
 
-		for (const eventName of ["browser://state", "workspace://state"]) {
-			void listen<{ workspace: string }>(eventName, (event) => {
+		void listen<{ workspace: string }>("browser://state", (event) => {
+			if (disposed || event.payload.workspace !== workspaceName) {
+				return;
+			}
+			invalidateWorkspace();
+		}).then((nextUnlisten) => {
+			if (disposed) {
+				void Promise.resolve(nextUnlisten()).catch(() => {});
+				return;
+			}
+			unlisteners.push(nextUnlisten);
+		});
+
+		void listen<WorkspaceStateEventPayload>(
+			"workspace://state",
+			(event) => {
 				if (disposed || event.payload.workspace !== workspaceName) {
 					return;
 				}
+				queryClient.setQueryData<Workspace | null>(
+					["workspaces_get_workspace", workspaceName],
+					(current) => applyWorkspaceStateEvent(current, event.payload) ?? null,
+				);
 				invalidateWorkspace();
-			}).then((nextUnlisten) => {
-				if (disposed) {
-					void Promise.resolve(nextUnlisten()).catch(() => {});
-					return;
-				}
-				unlisteners.push(nextUnlisten);
-			});
-		}
+			},
+		).then((nextUnlisten) => {
+			if (disposed) {
+				void Promise.resolve(nextUnlisten()).catch(() => {});
+				return;
+			}
+			unlisteners.push(nextUnlisten);
+		});
 
 		return () => {
 			disposed = true;
 			disposeListeners();
 		};
-	}, [invalidateWorkspace, workspaceName]);
+	}, [applyWorkspaceStateEvent, invalidateWorkspace, queryClient, workspaceName]);
 
 	const workspace = workspaceQuery.data ?? null;
 	const isMissing =
