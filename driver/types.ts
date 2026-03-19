@@ -6,6 +6,15 @@ export type DriverSessionRecord = {
 	artifactsDir: string;
 	stateDir: string;
 	sourceStateDir: string;
+	traceId: string;
+	traceDir: string;
+	manifestPath: string;
+	driverLogPath: string;
+	appLogPath: string;
+	tauriStdoutPath: string;
+	tauriStderrPath: string;
+	viteStdoutPath: string | null;
+	viteStderrPath: string | null;
 	cdpPort: number;
 	cdpUrl: string;
 	tauriPid: number;
