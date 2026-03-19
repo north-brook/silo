@@ -27,6 +27,8 @@ pub(crate) const WORKSPACE_LIFECYCLE_UPDATED_AT_METADATA_KEY: &str =
     "workspace-lifecycle-updated-at";
 pub(crate) const WORKSPACE_AGENT_HEARTBEAT_METADATA_KEY: &str = "workspace-agent-heartbeat-at";
 const STARTUP_FAILURE_RETRY_COOLDOWN: Duration = Duration::from_secs(15);
+const METADATA_DELIMITER_CANDIDATES: &[&str] = &["|", ";", "#", "@@", "SILO_METADATA_DELIM"];
+const MAX_WORKSPACE_METADATA_VALUE_LEN: usize = 512;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
@@ -2176,17 +2178,34 @@ pub(crate) fn workspace_lifecycle_metadata_entries(
         },
         WorkspaceMetadataEntry {
             key: WORKSPACE_LIFECYCLE_DETAIL_METADATA_KEY.to_string(),
-            value: detail.map(|value| value.to_string()),
+            value: detail.map(sanitize_workspace_metadata_value),
         },
         WorkspaceMetadataEntry {
             key: WORKSPACE_LIFECYCLE_ERROR_METADATA_KEY.to_string(),
-            value: last_error.map(|value| value.to_string()),
+            value: last_error.map(sanitize_workspace_metadata_value),
         },
         WorkspaceMetadataEntry {
             key: WORKSPACE_LIFECYCLE_UPDATED_AT_METADATA_KEY.to_string(),
             value: Some(current_rfc3339_timestamp()),
         },
     ]
+}
+
+fn sanitize_workspace_metadata_value(value: &str) -> String {
+    let mut sanitized = value.replace(['\r', '\n'], " ");
+    for delimiter in METADATA_DELIMITER_CANDIDATES {
+        sanitized = sanitized.replace(delimiter, " ");
+    }
+    let collapsed = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= MAX_WORKSPACE_METADATA_VALUE_LEN {
+        return collapsed;
+    }
+
+    collapsed
+        .chars()
+        .take(MAX_WORKSPACE_METADATA_VALUE_LEN - 3)
+        .collect::<String>()
+        + "..."
 }
 
 pub(crate) fn workspace_not_ready_error(workspace: &Workspace) -> String {
@@ -2199,8 +2218,6 @@ pub(crate) fn workspace_not_ready_error(workspace: &Workspace) -> String {
 }
 
 fn workspace_metadata_arg(entries: &[(&str, &str)]) -> Result<String, String> {
-    const DELIMITER_CANDIDATES: &[&str] = &["|", ";", "#", "@@", "SILO_METADATA_DELIM"];
-
     let populated = entries
         .iter()
         .copied()
@@ -2210,7 +2227,7 @@ fn workspace_metadata_arg(entries: &[(&str, &str)]) -> Result<String, String> {
         return Err("workspace metadata update did not include any values".to_string());
     }
 
-    let delimiter = DELIMITER_CANDIDATES
+    let delimiter = METADATA_DELIMITER_CANDIDATES
         .iter()
         .copied()
         .find(|delimiter| {
@@ -2826,6 +2843,26 @@ mod tests {
                 "--metadata=^|^target_branch=Feature/Inbox".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn workspace_lifecycle_metadata_entries_sanitize_multiline_errors() {
+        let entries = workspace_lifecycle_metadata_entries(
+            "failed",
+            Some("Workspace startup failed\nretrying"),
+            Some("line 1\nline 2 | @@ SILO_METADATA_DELIM"),
+        );
+        let detail = entries[1]
+            .value
+            .as_deref()
+            .expect("detail should be present");
+        let error = entries[2]
+            .value
+            .as_deref()
+            .expect("error should be present");
+
+        assert_eq!(detail, "Workspace startup failed retrying");
+        assert_eq!(error, "line 1 line 2");
     }
 
     #[test]
