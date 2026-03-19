@@ -1,7 +1,8 @@
 use crate::config::{ConfigStore, ProjectConfig};
 use crate::remote::{
     remote_command_error, run_remote_command, run_remote_command_with_stdin,
-    run_terminal_user_command, shell_quote, REMOTE_WORKSPACE_AGENT_BIN, TERMINAL_WORKSPACE_DIR,
+    run_terminal_user_command, shell_quote, workspace_shell_command_with_credentials,
+    REMOTE_WORKSPACE_AGENT_BIN, TERMINAL_WORKSPACE_DIR,
 };
 use crate::workspaces::{self, Workspace, WorkspaceLookup};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -171,7 +172,8 @@ pub(crate) async fn clear_template_runtime_state(workspace: &str) -> Result<(), 
     }
 
     let command = clear_template_runtime_state_command();
-    let result = run_remote_command(&lookup, &run_terminal_user_command(&command)).await?;
+    let result =
+        run_remote_command(&lookup, &workspace_shell_command_with_credentials(&command)).await?;
     if !result.success {
         return Err(remote_command_error(
             "failed to clear template runtime state",
@@ -357,7 +359,8 @@ async fn bootstrap_workspace_until_ready(lookup: &WorkspaceLookup) -> Result<(),
 
 async fn ensure_workspace_agent_running(lookup: &WorkspaceLookup) -> Result<(), String> {
     let check_command = workspace_agent_running_check_command();
-    let check_result = run_remote_command(lookup, &run_terminal_user_command(&check_command)).await?;
+    let check_result =
+        run_remote_command(lookup, &run_terminal_user_command(&check_command)).await?;
     if check_result.success {
         return Ok(());
     }
@@ -884,7 +887,6 @@ mv {shell_tmp_path} {shell_path}\n",
 }
 
 fn workspace_agent_stop_script() -> String {
-    let bin_path = shell_quote(REMOTE_WORKSPACE_AGENT_BIN);
     let pidfile = shell_quote(REMOTE_WORKSPACE_AGENT_PIDFILE);
     format!(
         "AGENT_PIDS=\"\"\n\
@@ -892,7 +894,7 @@ if [ -f {pidfile} ]; then\n\
   AGENT_PIDS=\"$(cat {pidfile} 2>/dev/null || true)\"\n\
 fi\n\
 if command -v pgrep >/dev/null 2>&1; then\n\
-  EXTRA_AGENT_PIDS=\"$(pgrep -f {bin_path} 2>/dev/null || true)\"\n\
+  EXTRA_AGENT_PIDS=\"$(pgrep -x workspace-agent 2>/dev/null || true)\"\n\
   if [ -n \"$EXTRA_AGENT_PIDS\" ]; then\n\
     AGENT_PIDS=\"$AGENT_PIDS\n$EXTRA_AGENT_PIDS\"\n\
   fi\n\
@@ -925,7 +927,7 @@ fn workspace_agent_running_check_command() -> String {
     exit 0\n\
   fi\n\
 fi\n\
-if command -v pgrep >/dev/null 2>&1 && pgrep -f {bin_path} >/dev/null 2>&1; then\n\
+if command -v pgrep >/dev/null 2>&1 && pgrep -x workspace-agent >/dev/null 2>&1; then\n\
   exit 0\n\
 fi\n\
 exit 1",
@@ -1231,7 +1233,7 @@ mod tests {
     fn workspace_agent_running_check_command_stays_small_and_only_checks_state() {
         let command = workspace_agent_running_check_command();
 
-        assert!(command.contains("pgrep -f"));
+        assert!(command.contains("pgrep -x workspace-agent"));
         assert!(command.contains("/home/silo/.silo/workspace-agent/daemon.pid"));
         assert!(!command.contains("EOF_AGENT_BIN"));
         assert!(!command.contains("workspace-agent.new"));
@@ -1252,7 +1254,7 @@ mod tests {
         let command = clear_template_runtime_state_command();
 
         assert!(command.starts_with("set -e\nAGENT_PIDS="));
-        assert!(command.contains("pgrep -f '/home/silo/.silo/bin/workspace-agent'"));
+        assert!(command.contains("pgrep -x workspace-agent"));
         assert!(command.contains("rm -f '/home/silo/.silo/workspace-agent/daemon.pid'"));
         assert!(command.ends_with("rm -rf \"$HOME/.silo\""));
     }
