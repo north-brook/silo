@@ -1,5 +1,12 @@
 import { spawn } from "node:child_process";
-import { closeSync, cpSync, existsSync, openSync, readdirSync } from "node:fs";
+import {
+	closeSync,
+	cpSync,
+	existsSync,
+	openSync,
+	readdirSync,
+	writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import {
 	type Browser,
@@ -13,6 +20,7 @@ import {
 	driverRootDir,
 	repoRoot,
 	tauriNoopBeforeDevConfig,
+	traceDirFor,
 } from "./paths";
 import { runLivePreflight } from "./preflight";
 import {
@@ -34,6 +42,45 @@ import {
 	findAvailablePort,
 	waitFor,
 } from "./utils";
+
+export class DriverLaunchError extends Error {
+	session: DriverSessionRecord;
+
+	constructor(message: string, session: DriverSessionRecord) {
+		super(message);
+		this.name = "DriverLaunchError";
+		this.session = session;
+	}
+}
+
+function writeTraceManifest(session: DriverSessionRecord) {
+	writeFileSync(
+		session.manifestPath,
+		`${JSON.stringify(
+			{
+				appLogPath: session.appLogPath,
+				artifactsDir: session.artifactsDir,
+				cdpPort: session.cdpPort,
+				cdpUrl: session.cdpUrl,
+				createdAt: session.createdAt,
+				driverLogPath: session.driverLogPath,
+				sessionId: session.id,
+				sourceStateDir: session.sourceStateDir,
+				stateDir: session.stateDir,
+				tauriPid: session.tauriPid,
+				tauriStderrPath: session.tauriStderrPath,
+				tauriStdoutPath: session.tauriStdoutPath,
+				traceDir: session.traceDir,
+				traceId: session.traceId,
+				vitePid: session.vitePid,
+				viteStderrPath: session.viteStderrPath,
+				viteStdoutPath: session.viteStdoutPath,
+			},
+			null,
+			2,
+		)}\n`,
+	);
+}
 
 function seedStateDir(targetStateDir: string, sourceStateDir: string) {
 	const sourceConfigPath = path.join(sourceStateDir, "config.toml");
@@ -140,19 +187,31 @@ export async function launchDriverSession(
 	const id = options.id ?? createSessionId();
 	const artifactsDir = options.artifactsDir ?? path.join(driverRootDir, id);
 	const stateDir = path.join(artifactsDir, "state");
+	const traceId = id;
+	const traceDir = traceDirFor(sourceStateDir, traceId);
 	const cdpPort = options.cdpPort ?? (await findAvailablePort(9222));
 	const cdpUrl = `http://127.0.0.1:${cdpPort}`;
 
 	ensureDirectory(artifactsDir);
+	ensureDirectory(traceDir);
 
 	const initialSiloPids = listRunningSiloApps().map(
 		(processInfo) => processInfo.pid,
 	);
 	seedStateDir(stateDir, sourceStateDir);
-	const viteProcess = await ensureDevServer(artifactsDir);
+	const viteProcess = await ensureDevServer(traceDir);
 
-	const tauriStdoutPath = path.join(artifactsDir, "tauri.stdout.log");
-	const tauriStderrPath = path.join(artifactsDir, "tauri.stderr.log");
+	const tauriStdoutPath = path.join(traceDir, "tauri.stdout.log");
+	const tauriStderrPath = path.join(traceDir, "tauri.stderr.log");
+	const viteStdoutPath = viteProcess
+		? path.join(traceDir, "vite.stdout.log")
+		: null;
+	const viteStderrPath = viteProcess
+		? path.join(traceDir, "vite.stderr.log")
+		: null;
+	const manifestPath = path.join(traceDir, "manifest.json");
+	const driverLogPath = path.join(traceDir, "driver.jsonl");
+	const appLogPath = path.join(traceDir, "app.log");
 	const tauriStdoutFd = openSync(tauriStdoutPath, "a");
 	const tauriStderrFd = openSync(tauriStderrPath, "a");
 	const tauriProcess = spawn(
@@ -165,6 +224,8 @@ export async function launchDriverSession(
 				...process.env,
 				SILO_CEF_REMOTE_DEBUGGING_PORT: String(cdpPort),
 				SILO_STATE_DIR: stateDir,
+				SILO_TRACE_DIR: traceDir,
+				SILO_TRACE_ID: traceId,
 			},
 			stdio: ["ignore", tauriStdoutFd, tauriStderrFd],
 		},
@@ -177,15 +238,25 @@ export async function launchDriverSession(
 		id,
 		createdAt: new Date().toISOString(),
 		artifactsDir,
+		appLogPath,
 		cdpPort,
 		cdpUrl,
+		driverLogPath,
 		initialSiloPids,
+		manifestPath,
 		platform: process.platform,
 		sourceStateDir,
 		stateDir,
 		tauriPid: tauriProcess.pid ?? 0,
+		tauriStderrPath,
+		tauriStdoutPath,
+		traceDir,
+		traceId,
 		vitePid: viteProcess?.pid ?? null,
+		viteStderrPath,
+		viteStdoutPath,
 	};
+	writeTraceManifest(session);
 
 	try {
 		await waitForCdpReady(cdpUrl);
@@ -193,7 +264,10 @@ export async function launchDriverSession(
 		return { session, browser, context, page };
 	} catch (error) {
 		await stopLaunchedSession(session);
-		throw error;
+		throw new DriverLaunchError(
+			error instanceof Error ? error.message : String(error),
+			session,
+		);
 	}
 }
 
