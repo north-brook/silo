@@ -1,11 +1,13 @@
 import { PanelRight } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useGitSidebar } from "@/workspaces/git/context";
+import { useWorkspaceReady } from "@/workspaces/state";
 
 export function GitSidebarToggle() {
 	const { isOpen, toggle, diff, isInBranchWorkspace } = useGitSidebar();
+	const isReady = useWorkspaceReady();
 
-	if (isOpen || !isInBranchWorkspace) return null;
+	if (isOpen || !isInBranchWorkspace || !isReady) return null;
 
 	const additions = diff?.overview.additions ?? 0;
 	const deletions = diff?.overview.deletions ?? 0;

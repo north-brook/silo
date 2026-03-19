@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { createContext, type ReactNode, useContext, useState } from "react";
 import { shortcutEvents } from "@/shared/lib/shortcuts";
 import { useShortcut } from "@/shared/lib/use-shortcut";
-import { isTemplateWorkspace } from "@/workspaces/api";
+import { isTemplateWorkspace, workspaceIsReady } from "@/workspaces/api";
 import {
 	type Diff,
 	gitDiff,
@@ -58,7 +58,7 @@ export function GitSidebarProvider({ children }: { children: ReactNode }) {
 	const isInBranchWorkspace =
 		!!workspaceName && !!workspace && !isTemplateWorkspace(workspace);
 	const isReadyBranchWorkspace =
-		isInBranchWorkspace && workspace?.ready === true;
+		isInBranchWorkspace && !!workspace && workspaceIsReady(workspace);
 
 	const diff = useQuery({
 		queryKey: ["git_diff", workspaceName],
