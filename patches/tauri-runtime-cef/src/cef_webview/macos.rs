@@ -131,7 +131,7 @@ impl CefBrowserExt for cef::Browser {
       height: rect.height as f64,
     };
 
-    unsafe { nsview.setFrame(NSRect { origin, size }) };
+    nsview.setFrame(NSRect { origin, size });
   }
 
   fn scale_factor(&self) -> f64 {
@@ -165,7 +165,7 @@ impl CefBrowserExt for cef::Browser {
 
     log::info!("cef macos child view close browser_view={:p}", &*nsview);
     restore_window_first_responder(&nsview, "close");
-    unsafe { nsview.removeFromSuperview() };
+    nsview.removeFromSuperview();
   }
 
   fn set_parent(&self, parent: &cef::Window) {
@@ -180,6 +180,6 @@ impl CefBrowserExt for cef::Browser {
       return;
     };
 
-    unsafe { parent_nsview.addSubview(&nsview) };
+    parent_nsview.addSubview(&nsview);
   }
 }

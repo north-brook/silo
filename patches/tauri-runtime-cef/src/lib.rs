@@ -2463,7 +2463,7 @@ mod application {
       unsafe fn application_openURLs(&self, _application: &NSApplication, urls: &NSArray<NSURL>) {
         let converted_urls: Vec<url::Url> = urls
           .iter()
-          .filter_map(|ns_url| unsafe {
+          .filter_map(|ns_url| {
             ns_url
               .absoluteString()
               .and_then(|url_string| url_string.to_string().parse().ok())

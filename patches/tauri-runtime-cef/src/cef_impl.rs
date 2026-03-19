@@ -48,6 +48,7 @@ type CefOsEvent<'a> = Option<&'a mut sys::MSG>;
 type AddressChangedHandler = dyn Fn(&url::Url) + Send + Sync;
 
 /// CEF transparent color value (ARGB)
+#[cfg(any(not(target_os = "macos"), feature = "macos-private-api"))]
 const TRANSPARENT: u32 = 0x00000000;
 
 #[inline]
@@ -131,7 +132,7 @@ fn apply_macos_window_theme(window: Option<&cef::Window>, theme: Option<tauri_ut
     },
     _ => None,
   };
-  unsafe { ns_window.setAppearance(appearance.as_deref()) };
+  ns_window.setAppearance(appearance.as_deref());
 }
 
 fn native_window_theme(app_window: &AppWindow) -> Option<tauri_utils::Theme> {
@@ -1326,17 +1327,18 @@ wrap_browser_view_delegate! {
   }
 
   impl ViewDelegate {
-    fn on_theme_changed(&self, view: Option<&mut View>) {
-      let Some(view) = view else { return; };
-
-      let webview_attributes = self.webview_attributes.borrow();
-
+    fn on_theme_changed(&self, _view: Option<&mut View>) {
       #[cfg(any(not(target_os = "macos"), feature = "macos-private-api"))]
-      if webview_attributes.transparent {
-        view.set_background_color(TRANSPARENT);
-      } else if let Some(color) = webview_attributes.background_color {
-        let color = color_to_cef_argb(color);
-        view.set_background_color(color);
+      {
+        let Some(view) = _view else { return; };
+        let webview_attributes = self.webview_attributes.borrow();
+
+        if webview_attributes.transparent {
+          view.set_background_color(TRANSPARENT);
+        } else if let Some(color) = webview_attributes.background_color {
+          let color = color_to_cef_argb(color);
+          view.set_background_color(color);
+        }
       }
     }
   }
@@ -1464,17 +1466,18 @@ wrap_window_delegate! {
       }
     }
 
-    fn on_theme_changed(&self, view: Option<&mut View>) {
-      let Some(view) = view else { return; };
-
-      let attrs = self.attributes.borrow();
-
+    fn on_theme_changed(&self, _view: Option<&mut View>) {
       #[cfg(any(not(target_os = "macos"), feature = "macos-private-api"))]
-      if attrs.transparent.unwrap_or_default() {
-        view.set_background_color(TRANSPARENT);
-      } else if let Some(color) = attrs.background_color {
-        let color = color_to_cef_argb(color);
-        view.set_background_color(color);
+      {
+        let Some(view) = _view else { return; };
+        let attrs = self.attributes.borrow();
+
+        if attrs.transparent.unwrap_or_default() {
+          view.set_background_color(TRANSPARENT);
+        } else if let Some(color) = attrs.background_color {
+          let color = color_to_cef_argb(color);
+          view.set_background_color(color);
+        }
       }
 
       if std::mem::take(&mut *self.suppress_next_theme_changed.borrow_mut()) {
@@ -4300,7 +4303,7 @@ pub(crate) fn ensure_valid_content_view(
   let nsview = nsview.expect("NSView is null");
 
   let class = nsview.class().name().to_string_lossy();
-  let subviews = unsafe { nsview.subviews() };
+  let subviews = nsview.subviews();
 
   // Filter subviews to only those that are expected in a valid CEF content view,
   // which can only happen if a WebviewKind::WindowContent webview
@@ -4317,12 +4320,12 @@ pub(crate) fn ensure_valid_content_view(
 
     // Create a new generic NSView
     let generic_nsview = NSView::alloc(mtm);
-    let generic_nsview = unsafe { NSView::init(generic_nsview) };
+    let generic_nsview = NSView::init(generic_nsview);
 
     // Re-add subviews to the new generic NSView (excluding CEF's views)
     for subview in subviews.iter().filter(|v| !is_cef_view(v)) {
-      unsafe { subview.removeFromSuperview() };
-      unsafe { generic_nsview.addSubview(&subview) };
+      subview.removeFromSuperview();
+      generic_nsview.addSubview(&subview);
     }
 
     // Set the new generic NSView as the content view of the window
@@ -4380,7 +4383,7 @@ fn apply_traffic_light_position(window: *mut std::ffi::c_void, position: &Positi
   for (i, button) in window_buttons.into_iter().enumerate() {
     let mut rect = NSView::frame(&button);
     rect.origin.x = x + (i as f64 * space_between);
-    unsafe { button.setFrameOrigin(rect.origin) };
+    button.setFrameOrigin(rect.origin);
   }
 }
 
@@ -4393,7 +4396,7 @@ pub fn set_application_visibility(visible: bool) {
   let app = NSApp(mtm);
 
   if visible {
-    unsafe { app.unhide(None) };
+    app.unhide(None);
   } else {
     app.hide(None);
   }
