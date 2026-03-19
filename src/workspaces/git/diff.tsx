@@ -52,6 +52,7 @@ function DiffFileRow({ file }: { file: DiffFile }) {
 			type="button"
 			onClick={() => {
 				void openFileTab({
+					localFirst: true,
 					path: file.path,
 					persistent: true,
 					workspace,
