@@ -32,6 +32,7 @@ import {
 	isTemplateWorkspace,
 	type Workspace,
 	workspaceLabel,
+	workspaceIsReady,
 } from "@/workspaces/api";
 import { LogoIcon } from "@/shared/ui/icons/logo";
 import Image from "@/shared/ui/image";
@@ -625,7 +626,7 @@ function WorkspaceRow({
 					<PopoverContent side="right" align="start" className="w-36 p-1">
 						{isTemplate ? (
 							<>
-								{workspace.ready && (
+								{workspaceIsReady(workspace) && (
 									<button
 										type="button"
 										onClick={(e) => {
