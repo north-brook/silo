@@ -67,7 +67,6 @@ async fn bootstrap_workspace(lookup: &WorkspaceLookup) -> Result<(), String> {
     let started = Instant::now();
     log::info!("bootstrapping workspace {}", lookup.workspace.name());
     let bootstrap = workspace_bootstrap(lookup)?;
-    let bootstrap_signature = workspace_bootstrap_signature(lookup.workspace.name(), &bootstrap);
     let script = workspace_bootstrap_script(lookup, &bootstrap);
     let result = run_remote_command_with_stdin(
         lookup,
@@ -81,8 +80,6 @@ async fn bootstrap_workspace(lookup: &WorkspaceLookup) -> Result<(), String> {
             &result.stderr,
         ));
     }
-
-    persist_workspace_bootstrap_state(lookup, &bootstrap_signature).await?;
     log::info!(
         "workspace {} bootstrap completed duration_ms={}",
         lookup.workspace.name(),
@@ -359,14 +356,26 @@ async fn bootstrap_workspace_until_ready(lookup: &WorkspaceLookup) -> Result<(),
 }
 
 async fn ensure_workspace_agent_running(lookup: &WorkspaceLookup) -> Result<(), String> {
-    let command = ensure_workspace_agent_running_command(lookup);
-    let result = run_remote_command(lookup, &run_terminal_user_command(&command)).await?;
-    if !result.success {
+    let check_command = workspace_agent_running_check_command();
+    let check_result = run_remote_command(lookup, &run_terminal_user_command(&check_command)).await?;
+    if check_result.success {
+        return Ok(());
+    }
+
+    let install_script = workspace_agent_install_script(lookup);
+    let install_result = run_remote_command_with_stdin(
+        lookup,
+        &run_terminal_user_command("bash -se"),
+        install_script.into_bytes(),
+    )
+    .await?;
+    if !install_result.success {
         return Err(remote_command_error(
             "failed to start workspace agent",
-            &result.stderr,
+            &install_result.stderr,
         ));
     }
+
     Ok(())
 }
 
@@ -652,6 +661,7 @@ bootstrap_log 'step=sync_env_files'\n\
 {cli_update}\
 bootstrap_log 'step=install_workspace_agent'\n\
 {agent_install}\
+{state_write}\
 bootstrap_log 'step=completed'\n",
         workspace_dir = shell_quote(TERMINAL_WORKSPACE_DIR),
         workspace_name = shell_quote(lookup.workspace.name()),
@@ -675,7 +685,14 @@ bootstrap_log 'step=completed'\n",
         env_file_sync = env_file_sync,
         cli_update = cli_update,
         agent_install = agent_install,
+        state_write = workspace_bootstrap_state_write_script(),
     )
+}
+
+fn workspace_bootstrap_state_write_script() -> &'static str {
+    "{ printf '%s\\n' \"$BOOT_ID\"; printf '%s\\n' \"$SIGNATURE\"; } > \"$STATE_PATH\"\n\
+chmod 600 \"$STATE_PATH\"\n\
+"
 }
 
 pub(crate) fn bootstrap_git_command(command: &str) -> String {
@@ -686,16 +703,16 @@ pub(crate) fn bootstrap_git_command(command: &str) -> String {
 
 fn workspace_bootstrap_signature(workspace_name: &str, bootstrap: &WorkspaceBootstrap) -> String {
     format!(
-        "version={}\nworkspace={}\nremote_url={}\ntarget_branch={}\nworkspace_branch={}\ngh_username={}\ngh_token={}\ncodex_token={}\nclaude_token={}\ngit_user_name={}\ngit_user_email={}\nenv_files={}\nagent_sources={}",
+        "version={}\nworkspace={}\nremote_url={}\ntarget_branch={}\nworkspace_branch={}\ngh_username={}\ngh_token_sha256={}\ncodex_token_sha256={}\nclaude_token_sha256={}\ngit_user_name={}\ngit_user_email={}\nenv_files={}\nagent_sources={}",
         WORKSPACE_BOOTSTRAP_VERSION,
         workspace_name,
         bootstrap.remote_url,
         bootstrap.target_branch,
         bootstrap.workspace_branch.as_deref().unwrap_or(""),
         bootstrap.gh_username,
-        bootstrap.gh_token,
-        bootstrap.codex_token,
-        bootstrap.claude_token,
+        hex_sha256(bootstrap.gh_token.as_bytes()),
+        hex_sha256(bootstrap.codex_token.as_bytes()),
+        hex_sha256(bootstrap.claude_token.as_bytes()),
         bootstrap.git_user_name,
         bootstrap.git_user_email,
         bootstrap_env_files_signature(&bootstrap.env_files),
@@ -898,10 +915,9 @@ rm -f {pidfile}\n",
     )
 }
 
-fn ensure_workspace_agent_running_command(lookup: &WorkspaceLookup) -> String {
+fn workspace_agent_running_check_command() -> String {
     let bin_path = shell_quote(REMOTE_WORKSPACE_AGENT_BIN);
     let pidfile = shell_quote(REMOTE_WORKSPACE_AGENT_PIDFILE);
-    let install_script = workspace_agent_install_script(lookup);
     format!(
         "if [ -x {bin_path} ] && [ -f {pidfile} ]; then\n\
   PID=\"$(cat {pidfile})\"\n\
@@ -909,10 +925,12 @@ fn ensure_workspace_agent_running_command(lookup: &WorkspaceLookup) -> String {
     exit 0\n\
   fi\n\
 fi\n\
-{install_script}",
+if command -v pgrep >/dev/null 2>&1 && pgrep -f {bin_path} >/dev/null 2>&1; then\n\
+  exit 0\n\
+fi\n\
+exit 1",
         bin_path = bin_path,
         pidfile = pidfile,
-        install_script = install_script,
     )
 }
 
@@ -1136,30 +1154,6 @@ fn gh_hosts_yml(username: &str, token: &str) -> String {
         "github.com:\n    user: {username}\n    oauth_token: {token}\n    git_protocol: https\n"
     )
 }
-async fn persist_workspace_bootstrap_state(
-    lookup: &WorkspaceLookup,
-    signature: &str,
-) -> Result<(), String> {
-    let command = persist_workspace_bootstrap_state_command(signature);
-    let result = run_remote_command(lookup, &run_terminal_user_command(&command)).await?;
-    if !result.success {
-        return Err(remote_command_error(
-            "failed to persist workspace bootstrap state",
-            &result.stderr,
-        ));
-    }
-
-    Ok(())
-}
-
-pub(crate) fn persist_workspace_bootstrap_state_command(signature: &str) -> String {
-    let state_path = shell_quote(REMOTE_BOOTSTRAP_STATE_FILE);
-    let signature_base64 = shell_quote(&BASE64_STANDARD.encode(signature));
-    format!(
-        "mkdir -p \"$HOME/.silo\" && BOOT_ID=\"$(cat /proc/sys/kernel/random/boot_id)\" && {{ printf '%s\\n' \"$BOOT_ID\"; printf %s {signature_base64} | base64 --decode; printf '\\n'; }} > {state_path} && chmod 600 {state_path}",
-    )
-}
-
 pub(crate) fn clear_template_runtime_state_command() -> String {
     format!(
         "set -e\n{}rm -rf \"$HOME/.silo\"",
@@ -1213,15 +1207,6 @@ mod tests {
     }
 
     #[test]
-    fn persist_bootstrap_state_command_streams_base64_signature() {
-        let command = persist_workspace_bootstrap_state_command("version=10\nworkspace=demo");
-
-        assert!(command.contains("base64 --decode"));
-        assert!(command.contains("/home/silo/.silo/workspace-bootstrap-state"));
-        assert!(!command.contains("workspace=demo"));
-    }
-
-    #[test]
     fn workspace_agent_install_script_stops_agent_before_replacing_binary() {
         let script = workspace_agent_install_script_for_target(
             "demo-silo-alpha",
@@ -1240,6 +1225,26 @@ mod tests {
 
         assert!(stop_index < write_index);
         assert!(write_index < move_index);
+    }
+
+    #[test]
+    fn workspace_agent_running_check_command_stays_small_and_only_checks_state() {
+        let command = workspace_agent_running_check_command();
+
+        assert!(command.contains("pgrep -f"));
+        assert!(command.contains("/home/silo/.silo/workspace-agent/daemon.pid"));
+        assert!(!command.contains("EOF_AGENT_BIN"));
+        assert!(!command.contains("workspace-agent.new"));
+    }
+
+    #[test]
+    fn workspace_bootstrap_state_write_script_persists_boot_id_and_signature() {
+        let script = workspace_bootstrap_state_write_script();
+
+        assert!(script.contains("> \"$STATE_PATH\""));
+        assert!(script.contains("printf '%s\\n' \"$BOOT_ID\""));
+        assert!(script.contains("printf '%s\\n' \"$SIGNATURE\""));
+        assert!(script.contains("chmod 600 \"$STATE_PATH\""));
     }
 
     #[test]
@@ -1320,6 +1325,32 @@ mod tests {
         assert!(script.contains("brew update"));
         assert!(script.contains("brew install codex"));
         assert!(script.contains("https://claude.ai/install.sh"));
+    }
+
+    #[test]
+    fn workspace_bootstrap_signature_hashes_secrets() {
+        let signature = workspace_bootstrap_signature(
+            "demo-silo-template",
+            &WorkspaceBootstrap {
+                remote_url: "https://github.com/example/repo.git".to_string(),
+                target_branch: "staging".to_string(),
+                workspace_branch: None,
+                gh_username: "octocat".to_string(),
+                gh_token: "gh-secret".to_string(),
+                codex_token: "codex-secret".to_string(),
+                claude_token: "claude-secret".to_string(),
+                git_user_name: "Example User".to_string(),
+                git_user_email: "user@example.com".to_string(),
+                env_files: Vec::new(),
+            },
+        );
+
+        assert!(signature.contains("gh_token_sha256="));
+        assert!(signature.contains("codex_token_sha256="));
+        assert!(signature.contains("claude_token_sha256="));
+        assert!(!signature.contains("gh-secret"));
+        assert!(!signature.contains("codex-secret"));
+        assert!(!signature.contains("claude-secret"));
     }
 
     #[test]

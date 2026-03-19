@@ -21,6 +21,7 @@ mod terminal;
 mod tls;
 mod workspaces;
 
+use std::env;
 use tauri::{AppHandle, Cef, Emitter, Manager};
 
 pub type AppRuntime = Cef;
@@ -245,6 +246,13 @@ pub fn run() {
                     "session logging initialized at {}",
                     session_log.path.display()
                 );
+                if let Some(trace_id) = env::var_os("SILO_TRACE_ID") {
+                    log::info!(
+                        "trace logging active trace_id={} directory={}",
+                        trace_id.to_string_lossy(),
+                        session_log.directory.display()
+                    );
+                }
             } else {
                 log::warn!("session file logging is unavailable; using stdout only");
             }
