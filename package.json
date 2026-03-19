@@ -13,6 +13,9 @@
 		"tauri:cef:update": "cargo update --manifest-path src-tauri/Cargo.toml && cargo install tauri-cli --git https://github.com/tauri-apps/tauri --branch feat/cef --force",
 		"check": "bun x @biomejs/biome check .",
 		"check:fix": "bun x @biomejs/biome check --write .",
+		"e2e:preflight": "bun scripts/e2e-live-preflight.ts",
+		"e2e": "bun run e2e:preflight && bunx playwright test",
+		"e2e:headed": "bun run e2e:preflight && bunx playwright test --headed",
 		"reset": "rm -rf \"$HOME/.silo\"",
 		"reset:gcp": "bun scripts/reset_gcp.ts"
 	},
@@ -62,6 +65,7 @@
 		"tailwindcss-animate": "^1.0.7"
 	},
 	"devDependencies": {
+		"@playwright/test": "^1.58.0",
 		"@vitejs/plugin-react": "^5.0.0",
 		"@types/bun": "latest",
 		"@types/node": "^24.3.0",
