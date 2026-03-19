@@ -24,7 +24,13 @@ import {
 } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { invoke } from "@/shared/lib/invoke";
-import type { ListedProject, SnapshotTemplate } from "@/projects/api";
+import {
+	deleteTemplate,
+	type ListedProject,
+	type SnapshotTemplate,
+	type TemplateState,
+	saveTemplate,
+} from "@/projects/api";
 import { shortcutEvents } from "@/shared/lib/shortcuts";
 import { useShortcut } from "@/shared/lib/use-shortcut";
 import {
@@ -462,35 +468,26 @@ function WorkspaceRow({
 	});
 
 	const saveTemplateMut = useMutation({
-		mutationFn: () =>
-			invoke("templates_save_template", { project: workspace.project }),
-		onMutate: () => {
-			navigate(
-				workspaceHref({
-					project: workspace.project ?? "",
-					workspace: workspace.name,
-				}),
-				{
-					state: { transition: "saving" } satisfies WorkspaceRouteState,
-				},
-			);
-		},
-		onSuccess: () => {
+		mutationFn: () => saveTemplate(workspace.project ?? ""),
+		onSuccess: (operation) => {
 			queryClient.invalidateQueries({
 				queryKey: ["workspaces_list_workspaces"],
 			});
 			queryClient.invalidateQueries({
 				queryKey: ["templates_list_templates"],
 			});
+			queryClient.setQueryData<TemplateState | undefined>(
+				["templates_get_state", workspace.project ?? ""],
+				(current) => ({
+					project: workspace.project ?? "",
+					workspace_name: workspace.name,
+					workspace_present: current?.workspace_present ?? true,
+					snapshot_name: current?.snapshot_name ?? null,
+					operation,
+				}),
+			);
 		},
 		onError: (error) => {
-			navigate(
-				workspaceHref({
-					project: workspace.project ?? "",
-					workspace: workspace.name,
-				}),
-				{ replace: true, state: null },
-			);
 			toast({
 				variant: "error",
 				title: "Failed to save template",
@@ -500,15 +497,24 @@ function WorkspaceRow({
 	});
 
 	const deleteTemplateMut = useMutation({
-		mutationFn: () =>
-			invoke("templates_delete_template", { project: workspace.project }),
-		onSuccess: () => {
+		mutationFn: () => deleteTemplate(workspace.project ?? ""),
+		onSuccess: (operation) => {
 			queryClient.invalidateQueries({
 				queryKey: ["workspaces_list_workspaces"],
 			});
 			queryClient.invalidateQueries({
 				queryKey: ["templates_list_templates"],
 			});
+			queryClient.setQueryData<TemplateState | undefined>(
+				["templates_get_state", workspace.project ?? ""],
+				(current) => ({
+					project: workspace.project ?? "",
+					workspace_name: workspace.name,
+					workspace_present: current?.workspace_present ?? true,
+					snapshot_name: current?.snapshot_name ?? null,
+					operation,
+				}),
+			);
 			toast({ variant: "success", title: "Template deleted" });
 		},
 		onError: (error) => {
@@ -649,7 +655,6 @@ function WorkspaceRow({
 									onClick={(e) => {
 										e.stopPropagation();
 										setMenuOpen(false);
-										if (isActive) navigate("/");
 										deleteTemplateMut.mutate();
 									}}
 									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
