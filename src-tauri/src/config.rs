@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::codex::detect_codex_token;
+use crate::state_paths;
 use indexmap::IndexMap;
 use log::{info, trace};
 use serde::{Deserialize, Serialize};
@@ -136,7 +137,7 @@ impl ConfigStore {
     }
 
     pub(crate) fn from_home_dir(home_dir: PathBuf) -> Self {
-        let silo_dir = home_dir.join(SILO_DIR_NAME);
+        let silo_dir = state_paths::app_state_dir_for_home(&home_dir);
         let config_path = silo_dir.join(CONFIG_FILE_NAME);
 
         Self {
@@ -457,8 +458,7 @@ fn detect_service_account_key_file(home_dir: &Path, project: &str) -> Option<Str
             }
         })
         .collect::<String>();
-    let path = home_dir
-        .join(SILO_DIR_NAME)
+    let path = state_paths::app_state_dir_for_home(home_dir)
         .join(format!("{safe_project}{SERVICE_ACCOUNT_KEY_SUFFIX}"));
 
     path.is_file().then(|| path.to_string_lossy().into_owned())

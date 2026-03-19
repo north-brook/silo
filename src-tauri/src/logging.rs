@@ -1,5 +1,5 @@
+use crate::state_paths;
 use log::LevelFilter;
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{plugin::TauriPlugin, Runtime};
@@ -49,14 +49,11 @@ pub(crate) fn build_plugin<R: Runtime>() -> (TauriPlugin<R>, Option<SessionLog>)
 }
 
 fn create_session_log() -> Result<SessionLog, String> {
-    let home_dir = env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| "unable to determine the home directory".to_string())?;
-    create_session_log_for_home_dir(home_dir)
+    create_session_log_for_state_dir(state_paths::app_state_dir()?)
 }
 
-fn create_session_log_for_home_dir(home_dir: PathBuf) -> Result<SessionLog, String> {
-    let directory = session_log_dir(&home_dir);
+fn create_session_log_for_state_dir(state_dir: PathBuf) -> Result<SessionLog, String> {
+    let directory = session_log_dir(&state_dir);
     ensure_private_dir(&directory)?;
 
     let local_now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
@@ -72,8 +69,8 @@ fn create_session_log_for_home_dir(home_dir: PathBuf) -> Result<SessionLog, Stri
     })
 }
 
-fn session_log_dir(home_dir: &Path) -> PathBuf {
-    home_dir.join(".silo").join("logs")
+fn session_log_dir(state_dir: &Path) -> PathBuf {
+    state_dir.join("logs")
 }
 
 fn ensure_private_dir(path: &Path) -> Result<(), String> {
@@ -103,8 +100,9 @@ mod tests {
 
     #[test]
     fn session_log_path_uses_silo_logs_directory() {
-        let home_dir = env::temp_dir().join("silo-logging-test-home");
-        let session = create_session_log_for_home_dir(home_dir.clone())
+        let home_dir = std::env::temp_dir().join("silo-logging-test-home");
+        let state_dir = home_dir.join(".silo");
+        let session = create_session_log_for_state_dir(state_dir.clone())
             .expect("session log should be created");
         assert!(session.directory.ends_with(".silo/logs"));
         assert_eq!(
@@ -119,7 +117,7 @@ mod tests {
     #[test]
     fn session_log_dir_is_under_silo_logs() {
         assert_eq!(
-            session_log_dir(Path::new("/Users/tester")),
+            session_log_dir(Path::new("/Users/tester/.silo")),
             PathBuf::from("/Users/tester/.silo/logs")
         );
     }

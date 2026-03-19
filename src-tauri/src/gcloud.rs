@@ -1,5 +1,5 @@
 use crate::config::ConfigStore;
-use std::env;
+use crate::state_paths;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -78,10 +78,7 @@ fn service_account_email(project: &str) -> String {
 }
 
 fn service_account_key_path(project: &str) -> Result<PathBuf, String> {
-    let home_dir = env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| "unable to determine the home directory".to_string())?;
-    let parent = home_dir.join(".silo");
+    let parent = state_paths::app_state_dir()?;
     let safe_project = project
         .chars()
         .map(|ch| {

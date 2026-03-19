@@ -5,6 +5,7 @@ use crate::state::{
     active_session_metadata_entries, browser_session_metadata_key, WorkspaceMetadataEntry,
     WorkspaceMetadataManager, BROWSER_LAST_ACTIVE_METADATA_KEY,
 };
+use crate::state_paths;
 use crate::terminal;
 use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
 use crate::{emit_workspace_state_changed, AppRuntime};
@@ -1124,10 +1125,7 @@ fn emit_browser_state_changed(
 }
 
 fn browser_webview_data_directory(workspace: &str) -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| "HOME is not set".to_string())?;
-    let path = home.join(".silo").join("browser-webviews").join(
+    let path = state_paths::app_state_dir()?.join("browser-webviews").join(
         workspace
             .to_ascii_lowercase()
             .chars()

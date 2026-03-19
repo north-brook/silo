@@ -14,6 +14,7 @@ mod remote;
 mod river_names;
 mod router;
 mod state;
+mod state_paths;
 mod system;
 mod templates;
 mod terminal;
