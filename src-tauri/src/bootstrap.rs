@@ -3,7 +3,7 @@ use crate::remote::{
     remote_command_error, run_remote_command, run_remote_command_with_stdin,
     run_terminal_user_command, shell_quote, REMOTE_WORKSPACE_OBSERVER_BIN, TERMINAL_WORKSPACE_DIR,
 };
-use crate::workspaces::{self, WorkspaceLookup};
+use crate::workspaces::{self, Workspace, WorkspaceLookup};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use serde_json::json;
@@ -21,15 +21,17 @@ const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
 const REMOTE_WORKSPACE_OBSERVER_PIDFILE: &str = "/home/silo/.silo/workspace-observer/daemon.pid";
 const REMOTE_WORKSPACE_OBSERVER_SHELL_FILE: &str = "/home/silo/.silo/workspace-observer-shell.sh";
 const WORKSPACE_BOOTSTRAP_VERSION: &str = "11";
-const TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS: usize = 60;
-const TEMPLATE_BOOTSTRAP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+const STARTUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+const INSTANCE_RUNNING_POLL_ATTEMPTS: usize = 180;
+const SSH_READY_POLL_ATTEMPTS: usize = 120;
+const BOOTSTRAP_RETRY_ATTEMPTS: usize = 60;
+const OBSERVER_READY_POLL_ATTEMPTS: usize = 30;
+const OBSERVER_HEARTBEAT_STALE_AFTER_SECS: i64 = 45;
 const WORKSPACE_OBSERVER_BIN_BYTES: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
     "/workspace-observer-x86_64-unknown-linux-musl"
 ));
-static TEMPLATE_BOOTSTRAP_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
-static WORKSPACE_SSH_READY_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
+static WORKSPACE_STARTUP_RECONCILE_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Debug, Clone)]
@@ -52,6 +54,14 @@ pub(crate) struct BootstrapEnvFile {
     pub(crate) contents_base64: String,
     pub(crate) contents_sha256: String,
 }
+
+#[derive(Default)]
+struct LifecycleReporter {
+    phase: Option<String>,
+    detail: Option<String>,
+    last_error: Option<String>,
+}
+
 async fn bootstrap_workspace(lookup: &WorkspaceLookup) -> Result<(), String> {
     let started = Instant::now();
     log::info!("bootstrapping workspace {}", lookup.workspace.name());
@@ -81,60 +91,18 @@ async fn bootstrap_workspace(lookup: &WorkspaceLookup) -> Result<(), String> {
     Ok(())
 }
 
-fn bootstrap_template_workspace_task(
-    workspace: &str,
-) -> impl std::future::Future<Output = Result<(), String>> + Send + 'static {
-    let workspace = workspace.to_string();
-    async move {
-        for attempt in 0..TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS {
-            let lookup = match workspaces::find_workspace(&workspace).await {
-                Ok(lookup) => lookup,
-                Err(error) => {
-                    if attempt + 1 == TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS {
-                        return Err(error);
-                    }
-                    std::thread::sleep(TEMPLATE_BOOTSTRAP_POLL_INTERVAL);
-                    continue;
-                }
-            };
+pub(crate) fn start_template_bootstrap(workspace: String) {
+    start_workspace_startup_reconcile(workspace);
+}
 
-            if !lookup.workspace.is_template() {
-                return Err(format!(
-                    "workspace {} is not a template workspace",
-                    workspace
-                ));
-            }
-
-            if lookup.workspace.status() != "RUNNING" {
-                std::thread::sleep(TEMPLATE_BOOTSTRAP_POLL_INTERVAL);
-                continue;
-            }
-
-            match bootstrap_workspace(&lookup).await {
-                Ok(()) => {
-                    workspaces::set_workspace_label(&workspace, "ready", "true").await?;
-                    return Ok(());
-                }
-                Err(error) if should_retry_template_bootstrap(&error) => {
-                    if attempt + 1 == TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS {
-                        return Err(error);
-                    }
-                    std::thread::sleep(TEMPLATE_BOOTSTRAP_POLL_INTERVAL);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-
-        Err(format!(
-            "template workspace {} did not become ready for bootstrap after {} seconds",
-            workspace,
-            TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS * TEMPLATE_BOOTSTRAP_POLL_INTERVAL.as_secs() as usize
-        ))
+pub(crate) fn start_workspace_startup_reconcile_if_needed(workspace: Workspace) {
+    if workspace.should_reconcile_startup() {
+        start_workspace_startup_reconcile(workspace.name().to_string());
     }
 }
 
-pub(crate) fn start_template_bootstrap(workspace: String) {
-    let inserted = TEMPLATE_BOOTSTRAP_IN_FLIGHT
+pub(crate) fn start_workspace_startup_reconcile(workspace: String) {
+    let inserted = WORKSPACE_STARTUP_RECONCILE_IN_FLIGHT
         .lock()
         .map(|mut in_flight| in_flight.insert(workspace.clone()))
         .unwrap_or(false);
@@ -143,77 +111,54 @@ pub(crate) fn start_template_bootstrap(workspace: String) {
     }
 
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = workspaces::set_workspace_label(&workspace, "ready", "false").await {
-            log::warn!(
-                "failed to mark template workspace {} as not ready before bootstrap: {}",
-                workspace,
-                error
-            );
-        }
-
-        let result = bootstrap_template_workspace_task(&workspace).await;
+        let result = reconcile_workspace_startup(&workspace).await;
         if let Err(error) = result {
+            if let Err(update_error) = workspaces::set_workspace_lifecycle(
+                &workspace,
+                "failed",
+                Some("Workspace startup failed"),
+                Some(&error),
+            )
+            .await
+            {
+                log::warn!(
+                    "failed to publish startup failure lifecycle for workspace {}: {}",
+                    workspace,
+                    update_error
+                );
+            }
             log::warn!(
-                "background template bootstrap failed for workspace {}: {}",
+                "background workspace startup reconcile failed for workspace {}: {}",
                 workspace,
                 error
             );
         } else {
             log::info!(
-                "background template bootstrap completed for workspace {}",
+                "background workspace startup reconcile completed for workspace {}",
                 workspace
             );
         }
 
-        if let Ok(mut in_flight) = TEMPLATE_BOOTSTRAP_IN_FLIGHT.lock() {
-            in_flight.remove(&workspace);
-        }
-    });
-}
-
-pub(crate) fn start_workspace_ssh_readiness(workspace: String) {
-    let inserted = WORKSPACE_SSH_READY_IN_FLIGHT
-        .lock()
-        .map(|mut in_flight| in_flight.insert(workspace.clone()))
-        .unwrap_or(false);
-    if !inserted {
-        return;
-    }
-
-    tauri::async_runtime::spawn(async move {
-        let result = wait_until_workspace_ssh_ready(&workspace).await;
-        if let Err(error) = result {
-            log::warn!(
-                "background ssh readiness check failed for workspace {}: {}",
-                workspace,
-                error
-            );
-        } else {
-            log::info!("workspace {} is ssh-ready", workspace);
-        }
-
-        if let Ok(mut in_flight) = WORKSPACE_SSH_READY_IN_FLIGHT.lock() {
+        if let Ok(mut in_flight) = WORKSPACE_STARTUP_RECONCILE_IN_FLIGHT.lock() {
             in_flight.remove(&workspace);
         }
     });
 }
 
 pub(crate) async fn wait_for_template_bootstrap(workspace: &str) -> Result<(), String> {
-    for _ in 0..TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS {
+    for _ in 0..INSTANCE_RUNNING_POLL_ATTEMPTS {
         let lookup = workspaces::find_workspace(workspace).await?;
         if !lookup.workspace.is_template() {
             return Err(format!("workspace {workspace} is not a template workspace"));
         }
 
-        if lookup.workspace.ready() {
+        if lookup.workspace.is_ready() {
             return Ok(());
         }
 
-        if !template_bootstrap_in_progress(workspace) {
-            start_template_bootstrap(workspace.to_string());
-        }
+        start_workspace_startup_reconcile_if_needed(lookup.workspace.clone());
 
-        std::thread::sleep(TEMPLATE_BOOTSTRAP_POLL_INTERVAL);
+        std::thread::sleep(STARTUP_POLL_INTERVAL);
     }
 
     Err(format!(
@@ -272,82 +217,92 @@ pub(crate) fn is_retryable_terminal_transport_error(error: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
-fn template_bootstrap_in_progress(workspace: &str) -> bool {
-    TEMPLATE_BOOTSTRAP_IN_FLIGHT
-        .lock()
-        .map(|in_flight| in_flight.contains(workspace))
-        .unwrap_or(false)
+async fn reconcile_workspace_startup(workspace: &str) -> Result<(), String> {
+    let started = Instant::now();
+    let mut reporter = LifecycleReporter::default();
+    let lookup = wait_for_workspace_running(workspace).await?;
+
+    reporter
+        .publish(
+            &lookup,
+            "waiting_for_ssh",
+            Some("Waiting for the VM to accept SSH connections"),
+            None,
+        )
+        .await?;
+    wait_for_workspace_ssh(&lookup).await?;
+
+    reporter
+        .publish(
+            &lookup,
+            "bootstrapping",
+            Some("Preparing repository, credentials, and tools"),
+            None,
+        )
+        .await?;
+    bootstrap_workspace_until_ready(&lookup).await?;
+
+    reporter
+        .publish(
+            &lookup,
+            "waiting_for_observer",
+            Some("Waiting for workspace services to come online"),
+            None,
+        )
+        .await?;
+    ensure_workspace_observer_running(&lookup).await?;
+    wait_for_workspace_observer(workspace).await?;
+
+    reporter.publish(&lookup, "ready", None, None).await?;
+    log::info!(
+        "workspace {} startup lifecycle reached ready duration_ms={}",
+        workspace,
+        started.elapsed().as_millis()
+    );
+    Ok(())
 }
 
-async fn wait_until_workspace_ssh_ready(workspace: &str) -> Result<(), String> {
-    let started = Instant::now();
-    let mut logged_running = false;
-    for attempt in 0..TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS {
+async fn wait_for_workspace_running(workspace: &str) -> Result<WorkspaceLookup, String> {
+    for attempt in 0..INSTANCE_RUNNING_POLL_ATTEMPTS {
         let lookup = match workspaces::find_workspace(workspace).await {
             Ok(lookup) => lookup,
             Err(error) => {
-                if attempt + 1 == TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS {
+                if attempt + 1 == INSTANCE_RUNNING_POLL_ATTEMPTS {
                     return Err(error);
                 }
-                std::thread::sleep(TEMPLATE_BOOTSTRAP_POLL_INTERVAL);
+                std::thread::sleep(STARTUP_POLL_INTERVAL);
                 continue;
             }
         };
-
-        if lookup.workspace.status() != "RUNNING" {
-            std::thread::sleep(TEMPLATE_BOOTSTRAP_POLL_INTERVAL);
-            continue;
+        if lookup.workspace.status() == "RUNNING" {
+            return Ok(lookup);
         }
-        if !logged_running {
-            log::info!(
-                "workspace {} reached RUNNING; probing ssh readiness",
-                workspace
-            );
-            logged_running = true;
-        }
+        std::thread::sleep(STARTUP_POLL_INTERVAL);
+    }
 
-        let result = run_remote_command(&lookup, &run_terminal_user_command("true")).await;
+    Err(format!(
+        "workspace {workspace} did not reach RUNNING after {} seconds",
+        INSTANCE_RUNNING_POLL_ATTEMPTS * STARTUP_POLL_INTERVAL.as_secs() as usize
+    ))
+}
+
+async fn wait_for_workspace_ssh(lookup: &WorkspaceLookup) -> Result<(), String> {
+    let started = Instant::now();
+    for attempt in 0..SSH_READY_POLL_ATTEMPTS {
+        let result = run_remote_command(lookup, &run_terminal_user_command("true")).await;
         match result {
             Ok(result) if result.success => {
                 log::info!(
                     "workspace {} ssh probe succeeded attempt={} elapsed_ms={}",
-                    workspace,
+                    lookup.workspace.name(),
                     attempt + 1,
-                    started.elapsed().as_millis()
-                );
-                if !lookup.workspace.is_template() {
-                    match bootstrap_workspace(&lookup).await {
-                        Ok(()) => {}
-                        Err(error) => {
-                            if attempt + 1 == TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS {
-                                return Err(error);
-                            }
-                            if should_retry_template_bootstrap(&error) {
-                                log::debug!(
-                                    "workspace {} bootstrap retryable failure attempt={} elapsed_ms={} error={}",
-                                    workspace,
-                                    attempt + 1,
-                                    started.elapsed().as_millis(),
-                                    error
-                                );
-                                std::thread::sleep(TEMPLATE_BOOTSTRAP_POLL_INTERVAL);
-                                continue;
-                            }
-                            return Err(error);
-                        }
-                    }
-                }
-                workspaces::set_workspace_label(workspace, "ready", "true").await?;
-                log::info!(
-                    "workspace {} marked ready elapsed_ms={}",
-                    workspace,
                     started.elapsed().as_millis()
                 );
                 return Ok(());
             }
             Ok(result) => {
                 let error = result.stderr.trim().to_string();
-                if attempt + 1 == TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS
+                if attempt + 1 == SSH_READY_POLL_ATTEMPTS
                     || !should_retry_template_bootstrap(&error)
                 {
                     return Err(remote_command_error(
@@ -355,37 +310,109 @@ async fn wait_until_workspace_ssh_ready(workspace: &str) -> Result<(), String> {
                         &result.stderr,
                     ));
                 }
-                log::debug!(
-                    "workspace {} ssh probe retryable failure attempt={} elapsed_ms={} error={}",
-                    workspace,
-                    attempt + 1,
-                    started.elapsed().as_millis(),
-                    error
-                );
             }
             Err(error) => {
-                if attempt + 1 == TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS
+                if attempt + 1 == SSH_READY_POLL_ATTEMPTS
                     || !should_retry_template_bootstrap(&error)
                 {
                     return Err(error);
                 }
-                log::debug!(
-                    "workspace {} ssh command retryable failure attempt={} elapsed_ms={} error={}",
-                    workspace,
-                    attempt + 1,
-                    started.elapsed().as_millis(),
-                    error
-                );
             }
         }
 
-        std::thread::sleep(TEMPLATE_BOOTSTRAP_POLL_INTERVAL);
+        std::thread::sleep(STARTUP_POLL_INTERVAL);
     }
 
     Err(format!(
-        "workspace {workspace} did not become ssh-ready after {} seconds",
-        TEMPLATE_BOOTSTRAP_POLL_ATTEMPTS * TEMPLATE_BOOTSTRAP_POLL_INTERVAL.as_secs() as usize
+        "workspace {} did not become ssh-ready after {} seconds",
+        lookup.workspace.name(),
+        SSH_READY_POLL_ATTEMPTS * STARTUP_POLL_INTERVAL.as_secs() as usize
     ))
+}
+
+async fn bootstrap_workspace_until_ready(lookup: &WorkspaceLookup) -> Result<(), String> {
+    for attempt in 0..BOOTSTRAP_RETRY_ATTEMPTS {
+        match bootstrap_workspace(lookup).await {
+            Ok(()) => return Ok(()),
+            Err(error) if should_retry_template_bootstrap(&error) => {
+                if attempt + 1 == BOOTSTRAP_RETRY_ATTEMPTS {
+                    return Err(error);
+                }
+                std::thread::sleep(STARTUP_POLL_INTERVAL);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(format!(
+        "workspace {} did not finish bootstrapping in time",
+        lookup.workspace.name()
+    ))
+}
+
+async fn ensure_workspace_observer_running(lookup: &WorkspaceLookup) -> Result<(), String> {
+    let command = ensure_workspace_observer_running_command(lookup);
+    let result = run_remote_command(lookup, &run_terminal_user_command(&command)).await?;
+    if !result.success {
+        return Err(remote_command_error(
+            "failed to start workspace observer",
+            &result.stderr,
+        ));
+    }
+    Ok(())
+}
+
+async fn wait_for_workspace_observer(workspace: &str) -> Result<(), String> {
+    for attempt in 0..OBSERVER_READY_POLL_ATTEMPTS {
+        let lookup = workspaces::find_workspace(workspace).await?;
+        if observer_heartbeat_is_fresh(&lookup.workspace) {
+            return Ok(());
+        }
+        if attempt + 1 == OBSERVER_READY_POLL_ATTEMPTS {
+            break;
+        }
+        std::thread::sleep(STARTUP_POLL_INTERVAL);
+    }
+
+    Err(format!(
+        "workspace observer for {workspace} did not publish a recent heartbeat"
+    ))
+}
+
+fn observer_heartbeat_is_fresh(workspace: &Workspace) -> bool {
+    let Some(heartbeat) = workspace.observer_heartbeat_at() else {
+        return false;
+    };
+    let Ok(heartbeat) = OffsetDateTime::parse(heartbeat, &Rfc3339) else {
+        return false;
+    };
+
+    OffsetDateTime::now_utc() - heartbeat
+        <= time::Duration::seconds(OBSERVER_HEARTBEAT_STALE_AFTER_SECS)
+}
+
+impl LifecycleReporter {
+    async fn publish(
+        &mut self,
+        lookup: &WorkspaceLookup,
+        phase: &str,
+        detail: Option<&str>,
+        last_error: Option<&str>,
+    ) -> Result<(), String> {
+        let next_phase = Some(phase.to_string());
+        let next_detail = detail.map(|value| value.to_string());
+        let next_error = last_error.map(|value| value.to_string());
+        if self.phase == next_phase && self.detail == next_detail && self.last_error == next_error {
+            return Ok(());
+        }
+
+        workspaces::set_workspace_lifecycle_in_lookup(lookup.clone(), phase, detail, last_error)
+            .await?;
+        self.phase = next_phase;
+        self.detail = next_detail;
+        self.last_error = next_error;
+        Ok(())
+    }
 }
 
 fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, String> {
@@ -775,6 +802,24 @@ fn workspace_observer_install_script(lookup: &WorkspaceLookup) -> String {
         zone = shell_quote(lookup.workspace.zone()),
     ));
     script
+}
+
+fn ensure_workspace_observer_running_command(lookup: &WorkspaceLookup) -> String {
+    let bin_path = shell_quote(REMOTE_WORKSPACE_OBSERVER_BIN);
+    let pidfile = shell_quote(REMOTE_WORKSPACE_OBSERVER_PIDFILE);
+    let install_script = workspace_observer_install_script(lookup);
+    format!(
+        "if [ -x {bin_path} ] && [ -f {pidfile} ]; then\n\
+  PID=\"$(cat {pidfile})\"\n\
+  if [ -n \"$PID\" ] && kill -0 \"$PID\" 2>/dev/null; then\n\
+    exit 0\n\
+  fi\n\
+fi\n\
+{install_script}",
+        bin_path = bin_path,
+        pidfile = pidfile,
+        install_script = install_script,
+    )
 }
 
 fn workspace_observer_source_signature() -> String {

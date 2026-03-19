@@ -20,6 +20,18 @@ use tauri::State;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use uuid::Uuid;
 
+pub(crate) const WORKSPACE_LIFECYCLE_PHASE_METADATA_KEY: &str =
+    "workspace-lifecycle-phase";
+pub(crate) const WORKSPACE_LIFECYCLE_DETAIL_METADATA_KEY: &str =
+    "workspace-lifecycle-detail";
+pub(crate) const WORKSPACE_LIFECYCLE_ERROR_METADATA_KEY: &str =
+    "workspace-lifecycle-error";
+pub(crate) const WORKSPACE_LIFECYCLE_UPDATED_AT_METADATA_KEY: &str =
+    "workspace-lifecycle-updated-at";
+pub(crate) const WORKSPACE_OBSERVER_HEARTBEAT_METADATA_KEY: &str =
+    "workspace-observer-heartbeat-at";
+const STARTUP_FAILURE_RETRY_COOLDOWN: Duration = Duration::from_secs(15);
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum Workspace {
@@ -60,6 +72,17 @@ pub struct SnapshotTemplate {
     status: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceLifecycle {
+    phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct WorkspaceBase {
     name: String,
@@ -71,7 +94,9 @@ struct WorkspaceBase {
     created_at: String,
     status: String,
     zone: String,
-    ready: bool,
+    lifecycle: WorkspaceLifecycle,
+    #[serde(skip_serializing)]
+    observer_heartbeat_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -182,8 +207,20 @@ impl Workspace {
         self.base().project.as_deref()
     }
 
-    pub(crate) fn ready(&self) -> bool {
-        self.base().ready
+    pub(crate) fn lifecycle(&self) -> &WorkspaceLifecycle {
+        &self.base().lifecycle
+    }
+
+    pub(crate) fn is_ready(&self) -> bool {
+        self.lifecycle().is_ready()
+    }
+
+    pub(crate) fn should_reconcile_startup(&self) -> bool {
+        self.lifecycle().should_reconcile(self.status())
+    }
+
+    pub(crate) fn observer_heartbeat_at(&self) -> Option<&str> {
+        self.base().observer_heartbeat_at.as_deref()
     }
 
     pub(crate) fn branch_name(&self) -> Option<&str> {
@@ -233,6 +270,61 @@ impl Workspace {
         self.sessions()
             .into_iter()
             .any(|session| session.kind == kind && session.attachment_id == attachment_id)
+    }
+}
+
+impl WorkspaceLifecycle {
+    pub(crate) fn new(
+        phase: impl Into<String>,
+        detail: Option<String>,
+        last_error: Option<String>,
+        updated_at: Option<String>,
+    ) -> Self {
+        Self {
+            phase: phase.into(),
+            detail,
+            last_error,
+            updated_at,
+        }
+    }
+
+    pub(crate) fn phase(&self) -> &str {
+        &self.phase
+    }
+
+    pub(crate) fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+
+    pub(crate) fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+
+    pub(crate) fn is_ready(&self) -> bool {
+        self.phase == "ready"
+    }
+
+    pub(crate) fn with_updated_at(mut self, updated_at: Option<String>) -> Self {
+        self.updated_at = updated_at;
+        self
+    }
+
+    pub(crate) fn should_reconcile(&self, status: &str) -> bool {
+        if status != "RUNNING" || self.is_ready() {
+            return false;
+        }
+        if self.phase != "failed" {
+            return true;
+        }
+
+        let Some(updated_at) = self.updated_at.as_deref() else {
+            return true;
+        };
+        let Ok(updated_at) = OffsetDateTime::parse(updated_at, &Rfc3339) else {
+            return true;
+        };
+
+        OffsetDateTime::now_utc() - updated_at >= STARTUP_FAILURE_RETRY_COOLDOWN
     }
 }
 
@@ -412,7 +504,12 @@ pub async fn workspaces_list_workspaces(
     }
     workspaces.sort_by(compare_workspaces_by_last_active_desc);
 
-    Ok(state.apply_workspace_states(workspaces))
+    let workspaces = state.apply_workspace_states(workspaces);
+    for workspace in &workspaces {
+        bootstrap::start_workspace_startup_reconcile_if_needed(workspace.clone());
+    }
+
+    Ok(workspaces)
 }
 
 #[tauri::command]
@@ -454,7 +551,7 @@ pub async fn workspaces_create_workspace(project: String) -> Result<Workspace, S
     }
 
     log::info!("workspace {workspace_name} creation started for project {project}");
-    bootstrap::start_workspace_ssh_readiness(workspace_name.clone());
+    bootstrap::start_workspace_startup_reconcile(workspace_name.clone());
     match describe_workspace_in_project(&workspace_name, &gcloud.account, &gcloud.project).await {
         Ok(workspace) => Ok(workspace),
         Err(error) => {
@@ -496,8 +593,7 @@ pub async fn workspaces_start_workspace(workspace: String) -> Result<(), String>
         return Err(gcloud_error("failed to start workspace", &result.stderr));
     }
 
-    update_workspace_label_in_lookup(lookup.clone(), "ready", "false").await?;
-    bootstrap::start_workspace_ssh_readiness(workspace.clone());
+    bootstrap::start_workspace_startup_reconcile(workspace.clone());
 
     log::info!("workspace {} started", lookup.workspace.name());
     Ok(())
@@ -519,8 +615,7 @@ pub async fn workspaces_resume_workspace(workspace: String) -> Result<(), String
         return Err(gcloud_error("failed to resume workspace", &result.stderr));
     }
 
-    update_workspace_label_in_lookup(lookup.clone(), "ready", "false").await?;
-    bootstrap::start_workspace_ssh_readiness(workspace.clone());
+    bootstrap::start_workspace_startup_reconcile(workspace.clone());
 
     log::info!("workspace {} resume initiated", lookup.workspace.name());
     Ok(())
@@ -572,7 +667,9 @@ pub async fn workspaces_get_workspace(
     workspace: String,
 ) -> Result<Workspace, String> {
     log::trace!("getting workspace {workspace}");
-    Ok(state.apply_workspace_state(find_workspace(&workspace).await?.workspace))
+    let workspace = state.apply_workspace_state(find_workspace(&workspace).await?.workspace);
+    bootstrap::start_workspace_startup_reconcile_if_needed(workspace.clone());
+    Ok(workspace)
 }
 
 #[tauri::command]
@@ -615,8 +712,9 @@ pub async fn workspaces_submit_prompt(
 ) -> Result<terminal::TerminalCreateResult, String> {
     log::info!("submitting {model} prompt for workspace {workspace}");
     let lookup = find_workspace(&workspace).await?;
-    if !lookup.workspace.ready() {
-        return Err(format!("workspace {workspace} is not ready"));
+    if !lookup.workspace.is_ready() {
+        bootstrap::start_workspace_startup_reconcile_if_needed(lookup.workspace.clone());
+        return Err(workspace_not_ready_error(&lookup.workspace));
     }
 
     let prompt = trim_prompt_input(&prompt)?;
@@ -643,15 +741,6 @@ pub async fn workspaces_delete_workspace(workspace: String) -> Result<(), String
     Ok(())
 }
 
-pub(crate) async fn set_workspace_label(
-    workspace: &str,
-    label: &str,
-    value: &str,
-) -> Result<(), String> {
-    let lookup = find_workspace(workspace).await?;
-    update_workspace_label_in_lookup(lookup, label, value).await
-}
-
 pub(crate) async fn set_workspace_metadata(
     workspace: &str,
     key: &str,
@@ -659,6 +748,16 @@ pub(crate) async fn set_workspace_metadata(
 ) -> Result<(), String> {
     let lookup = find_workspace(workspace).await?;
     update_workspace_metadata_in_lookup(lookup, key, value).await
+}
+
+pub(crate) async fn set_workspace_lifecycle(
+    workspace: &str,
+    phase: &str,
+    detail: Option<&str>,
+    last_error: Option<&str>,
+) -> Result<(), String> {
+    let lookup = find_workspace(workspace).await?;
+    set_workspace_lifecycle_in_lookup(lookup, phase, detail, last_error).await
 }
 
 fn trim_prompt_input(prompt: &str) -> Result<String, String> {
@@ -709,37 +808,6 @@ pub(crate) async fn find_workspace(name: &str) -> Result<WorkspaceLookup, String
     }
 }
 
-async fn update_workspace_label_in_lookup(
-    lookup: WorkspaceLookup,
-    label: &str,
-    value: &str,
-) -> Result<(), String> {
-    let result = run_gcloud(
-        &lookup.account,
-        &lookup.gcloud_project,
-        update_workspace_label_args(&lookup.workspace, label, value),
-    )
-    .await?;
-
-    if !result.success {
-        return Err(gcloud_error(
-            &format!(
-                "failed to update {} label for workspace {}",
-                label,
-                lookup.workspace.name()
-            ),
-            &result.stderr,
-        ));
-    }
-
-    log::info!(
-        "updated {} label for workspace {}",
-        label,
-        lookup.workspace.name()
-    );
-    Ok(())
-}
-
 async fn update_workspace_metadata_in_lookup(
     lookup: WorkspaceLookup,
     key: &str,
@@ -751,6 +819,19 @@ async fn update_workspace_metadata_in_lookup(
             key: key.to_string(),
             value: Some(value.to_string()),
         }],
+    )
+    .await
+}
+
+pub(crate) async fn set_workspace_lifecycle_in_lookup(
+    lookup: WorkspaceLookup,
+    phase: &str,
+    detail: Option<&str>,
+    last_error: Option<&str>,
+) -> Result<(), String> {
+    apply_workspace_metadata_entries_in_lookup(
+        lookup,
+        &workspace_lifecycle_metadata_entries(phase, detail, last_error),
     )
     .await
 }
@@ -894,7 +975,8 @@ fn pending_workspace(
             created_at,
             status: "PROVISIONING".to_string(),
             zone: zone.to_string(),
-            ready: false,
+            lifecycle: lifecycle_for_status("PROVISIONING", None, None, None),
+            observer_heartbeat_at: None,
         },
         branch_label.to_string(),
         target_branch.to_string(),
@@ -921,7 +1003,8 @@ fn pending_template_workspace(name: &str, project_label: &str, zone: &str) -> Te
             created_at,
             status: "PROVISIONING".to_string(),
             zone: zone.to_string(),
-            ready: false,
+            lifecycle: lifecycle_for_status("PROVISIONING", None, None, None),
+            observer_heartbeat_at: None,
         },
         unread: false,
         working: None,
@@ -1127,13 +1210,30 @@ fn create_workspace_args(
     boot_source: &WorkspaceBootSource,
     gcloud: &ResolvedGcloudConfig,
 ) -> Vec<String> {
-    let labels = vec![
-        format!("project={}", sanitize_label_value(project_label)),
-        "ready=false".to_string(),
+    let labels = vec![format!("project={}", sanitize_label_value(project_label))];
+    let lifecycle_updated_at = current_rfc3339_timestamp();
+    let metadata_entries = vec![
+        ("branch".to_string(), branch_label.to_string()),
+        ("target_branch".to_string(), target_branch.to_string()),
+        (
+            WORKSPACE_LIFECYCLE_PHASE_METADATA_KEY.to_string(),
+            "provisioning".to_string(),
+        ),
+        (
+            WORKSPACE_LIFECYCLE_DETAIL_METADATA_KEY.to_string(),
+            "Provisioning virtual machine".to_string(),
+        ),
+        (
+            WORKSPACE_LIFECYCLE_UPDATED_AT_METADATA_KEY.to_string(),
+            lifecycle_updated_at,
+        ),
     ];
-    let metadata =
-        workspace_metadata_arg(&[("branch", branch_label), ("target_branch", target_branch)])
-            .expect("workspace metadata values must fit supported gcloud metadata delimiters");
+    let metadata_pairs = metadata_entries
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let metadata = workspace_metadata_arg(&metadata_pairs)
+        .expect("workspace metadata values must fit supported gcloud metadata delimiters");
 
     let mut args = vec![
         "compute".to_string(),
@@ -1176,6 +1276,27 @@ pub(crate) fn create_template_workspace_args(
     source_snapshot: Option<&str>,
     gcloud: &ResolvedGcloudConfig,
 ) -> Vec<String> {
+    let lifecycle_updated_at = current_rfc3339_timestamp();
+    let metadata_entries = vec![
+        (
+            WORKSPACE_LIFECYCLE_PHASE_METADATA_KEY.to_string(),
+            "provisioning".to_string(),
+        ),
+        (
+            WORKSPACE_LIFECYCLE_DETAIL_METADATA_KEY.to_string(),
+            "Provisioning virtual machine".to_string(),
+        ),
+        (
+            WORKSPACE_LIFECYCLE_UPDATED_AT_METADATA_KEY.to_string(),
+            lifecycle_updated_at,
+        ),
+    ];
+    let metadata_pairs = metadata_entries
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let metadata = workspace_metadata_arg(&metadata_pairs)
+        .expect("workspace metadata values must fit supported gcloud metadata delimiters");
     let mut args = vec![
         "compute".to_string(),
         "instances".to_string(),
@@ -1185,10 +1306,8 @@ pub(crate) fn create_template_workspace_args(
         format!("--machine-type={}", gcloud.machine_type),
         format!("--boot-disk-size={}GB", gcloud.disk_size_gb),
         format!("--boot-disk-type={}", gcloud.disk_type),
-        format!(
-            "--labels=project={},template=true,ready=false",
-            sanitize_label_value(project_label)
-        ),
+        format!("--labels=project={},template=true", sanitize_label_value(project_label)),
+        metadata,
         "--async".to_string(),
     ];
 
@@ -1229,29 +1348,6 @@ fn create_template_snapshot_args(
         ),
         "--async".to_string(),
     ]
-}
-
-fn update_workspace_label_args(workspace: &Workspace, label: &str, value: &str) -> Vec<String> {
-    let sanitized_value = sanitize_label_value(value);
-    if sanitized_value.is_empty() {
-        vec![
-            "compute".to_string(),
-            "instances".to_string(),
-            "remove-labels".to_string(),
-            workspace.name().to_string(),
-            format!("--zone={}", workspace.zone()),
-            format!("--labels={label}"),
-        ]
-    } else {
-        vec![
-            "compute".to_string(),
-            "instances".to_string(),
-            "add-labels".to_string(),
-            workspace.name().to_string(),
-            format!("--zone={}", workspace.zone()),
-            format!("--labels={label}={sanitized_value}"),
-        ]
-    }
 }
 
 fn add_workspace_metadata_args(
@@ -1766,12 +1862,8 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
     let last_active = resolve_workspace_last_active(&metadata);
     let last_working = resolve_workspace_last_working(&metadata);
     let active_session = resolve_workspace_active_session(&metadata);
-    let ready = labels
-        .get("ready")
-        .and_then(Value::as_str)
-        .map(|value| parse_bool_value("ready", value))
-        .transpose()?
-        .unwrap_or(status == "RUNNING");
+    let lifecycle = resolve_workspace_lifecycle(&status, &metadata);
+    let observer_heartbeat_at = resolve_workspace_observer_heartbeat(&metadata);
 
     let base = WorkspaceBase {
         name,
@@ -1782,7 +1874,8 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         created_at,
         status,
         zone,
-        ready,
+        lifecycle,
+        observer_heartbeat_at,
     };
 
     let unread =
@@ -1977,6 +2070,36 @@ fn resolve_workspace_last_working(metadata: &HashMap<String, String>) -> Option<
     metadata.get(TERMINAL_LAST_WORKING_METADATA_KEY).cloned()
 }
 
+fn resolve_workspace_lifecycle(
+    status: &str,
+    metadata: &HashMap<String, String>,
+) -> WorkspaceLifecycle {
+    let phase = metadata
+        .get(WORKSPACE_LIFECYCLE_PHASE_METADATA_KEY)
+        .cloned();
+    let detail = metadata
+        .get(WORKSPACE_LIFECYCLE_DETAIL_METADATA_KEY)
+        .cloned()
+        .filter(|value| !value.trim().is_empty());
+    let last_error = metadata
+        .get(WORKSPACE_LIFECYCLE_ERROR_METADATA_KEY)
+        .cloned()
+        .filter(|value| !value.trim().is_empty());
+    let updated_at = metadata
+        .get(WORKSPACE_LIFECYCLE_UPDATED_AT_METADATA_KEY)
+        .cloned()
+        .filter(|value| !value.trim().is_empty());
+
+    lifecycle_for_status(status, phase, detail, last_error).with_updated_at(updated_at)
+}
+
+fn resolve_workspace_observer_heartbeat(metadata: &HashMap<String, String>) -> Option<String> {
+    metadata
+        .get(WORKSPACE_OBSERVER_HEARTBEAT_METADATA_KEY)
+        .cloned()
+        .filter(|value| !value.trim().is_empty())
+}
+
 fn resolve_workspace_active_session(
     metadata: &HashMap<String, String>,
 ) -> Option<WorkspaceActiveSession> {
@@ -2002,10 +2125,78 @@ fn parse_bool_value(label: &str, value: &str) -> Result<bool, String> {
     }
 }
 
-fn current_rfc3339_timestamp() -> String {
+pub(crate) fn current_rfc3339_timestamp() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
+
+fn lifecycle_for_status(
+    status: &str,
+    phase: Option<String>,
+    detail: Option<String>,
+    last_error: Option<String>,
+) -> WorkspaceLifecycle {
+    let phase = match status {
+        "STAGING" | "PROVISIONING" => "provisioning".to_string(),
+        "STOPPING" => "stopping".to_string(),
+        "SUSPENDING" => "suspending".to_string(),
+        "SUSPENDED" => "suspended".to_string(),
+        "TERMINATED" | "STOPPED" => "stopped".to_string(),
+        "RUNNING" => phase.unwrap_or_else(|| "waiting_for_ssh".to_string()),
+        _ => phase.unwrap_or_else(|| status.to_ascii_lowercase()),
+    };
+
+    let detail = match phase.as_str() {
+        "provisioning" => detail.or_else(|| Some("Provisioning virtual machine".to_string())),
+        "waiting_for_ssh" => {
+            detail.or_else(|| Some("Waiting for the VM to accept SSH connections".to_string()))
+        }
+        "bootstrapping" => {
+            detail.or_else(|| Some("Preparing repository, credentials, and tools".to_string()))
+        }
+        "waiting_for_observer" => {
+            detail.or_else(|| Some("Waiting for workspace services to come online".to_string()))
+        }
+        "failed" => detail.or_else(|| Some("Workspace startup failed".to_string())),
+        _ => detail,
+    };
+
+    WorkspaceLifecycle::new(phase, detail, last_error, None)
+}
+
+pub(crate) fn workspace_lifecycle_metadata_entries(
+    phase: &str,
+    detail: Option<&str>,
+    last_error: Option<&str>,
+) -> Vec<WorkspaceMetadataEntry> {
+    vec![
+        WorkspaceMetadataEntry {
+            key: WORKSPACE_LIFECYCLE_PHASE_METADATA_KEY.to_string(),
+            value: Some(phase.to_string()),
+        },
+        WorkspaceMetadataEntry {
+            key: WORKSPACE_LIFECYCLE_DETAIL_METADATA_KEY.to_string(),
+            value: detail.map(|value| value.to_string()),
+        },
+        WorkspaceMetadataEntry {
+            key: WORKSPACE_LIFECYCLE_ERROR_METADATA_KEY.to_string(),
+            value: last_error.map(|value| value.to_string()),
+        },
+        WorkspaceMetadataEntry {
+            key: WORKSPACE_LIFECYCLE_UPDATED_AT_METADATA_KEY.to_string(),
+            value: Some(current_rfc3339_timestamp()),
+        },
+    ]
+}
+
+pub(crate) fn workspace_not_ready_error(workspace: &Workspace) -> String {
+    let detail = workspace
+        .lifecycle()
+        .detail()
+        .or_else(|| workspace.lifecycle().last_error())
+        .unwrap_or(workspace.lifecycle().phase());
+    format!("workspace {} is not ready: {detail}", workspace.name())
 }
 
 fn workspace_metadata_arg(entries: &[(&str, &str)]) -> Result<String, String> {
@@ -2301,7 +2492,8 @@ mod tests {
             created_at: "2026-03-11T10:00:00Z".to_string(),
             status: "RUNNING".to_string(),
             zone: "us-east1-b".to_string(),
-            ready: true,
+            lifecycle: WorkspaceLifecycle::new("ready", None, None, None),
+            observer_heartbeat_at: None,
         }
     }
 
@@ -2455,8 +2647,12 @@ mod tests {
         assert!(args.contains(&"--image-family=ubuntu-2404-lts-amd64".to_string()));
         assert!(args.contains(&"--image-project=ubuntu-os-cloud".to_string()));
         assert!(args.contains(&"--async".to_string()));
-        assert!(args.contains(&"--labels=project=demo-project,ready=false".to_string()));
-        assert!(args.contains(&"--metadata=^|^branch=Aare|target_branch=Feature/Inbox".to_string()));
+        assert!(args.contains(&"--labels=project=demo-project".to_string()));
+        assert!(args.iter().any(|arg| arg.contains("branch=Aare")));
+        assert!(args.iter().any(|arg| arg.contains("target_branch=Feature/Inbox")));
+        assert!(args
+            .iter()
+            .any(|arg| arg.contains("workspace-lifecycle-phase=provisioning")));
         assert!(args.contains(
             &"--service-account=silo-workspaces@proj.iam.gserviceaccount.com".to_string()
         ));
@@ -2490,8 +2686,8 @@ mod tests {
         assert!(args.contains(&"--source-snapshot=demo-silo-template-1710000000-123".to_string()));
         assert!(!args.iter().any(|arg| arg.starts_with("--image-family=")));
         assert!(!args.iter().any(|arg| arg.starts_with("--image-project=")));
-        assert!(args.contains(&"--labels=project=demo-project,ready=false".to_string()));
-        assert!(args.contains(&"--metadata=^|^branch=Aare".to_string()));
+        assert!(args.contains(&"--labels=project=demo-project".to_string()));
+        assert!(args.iter().any(|arg| arg.contains("branch=Aare")));
     }
 
     #[test]
@@ -2521,8 +2717,8 @@ mod tests {
         assert!(args.contains(&"--async".to_string()));
         assert!(args.contains(&"--no-service-account".to_string()));
         assert!(args.contains(&"--no-scopes".to_string()));
-        assert!(args.contains(&"--labels=project=demo-project,ready=false".to_string()));
-        assert!(args.contains(&"--metadata=^|^branch=Aare".to_string()));
+        assert!(args.contains(&"--labels=project=demo-project".to_string()));
+        assert!(args.iter().any(|arg| arg.contains("branch=Aare")));
     }
 
     #[test]
@@ -2544,7 +2740,10 @@ mod tests {
 
         assert!(args.contains(&"--image-family=ubuntu-2404-lts-amd64".to_string()));
         assert!(args.contains(&"--image-project=ubuntu-os-cloud".to_string()));
-        assert!(args.contains(&"--labels=project=demo,template=true,ready=false".to_string()));
+        assert!(args.contains(&"--labels=project=demo,template=true".to_string()));
+        assert!(args
+            .iter()
+            .any(|arg| arg.contains("workspace-lifecycle-phase=provisioning")));
         assert!(!args.iter().any(|arg| arg.starts_with("--source-snapshot=")));
     }
 
@@ -2908,8 +3107,7 @@ mod tests {
             "creationTimestamp": "2026-03-11T13:00:00.000-04:00",
             "labels": {
                 "project": "demo",
-                "template": "true",
-                "ready": "false"
+                "template": "true"
             }
         }))
         .expect("workspace should parse");
@@ -2919,7 +3117,7 @@ mod tests {
         };
 
         assert!(workspace.template);
-        assert!(!workspace.base.ready);
+        assert_eq!(workspace.base.lifecycle.phase(), "waiting_for_ssh");
         assert_eq!(workspace.base.name, "template-demo-123");
         assert_eq!(workspace.base.project.as_deref(), Some("demo"));
         assert!(!workspace.unread);
@@ -2937,17 +3135,17 @@ mod tests {
             "creationTimestamp": "2026-03-11T13:00:00.000-04:00",
             "labels": {
                 "project": "demo",
-                "template": "true",
-                "ready": "true"
+                "template": "true"
             },
             "metadata": {
                 "items": [
+                    { "key": "workspace-lifecycle-phase", "value": "ready" },
                     { "key": "terminal-last-active", "value": "2026-03-16T04:18:39Z" },
                     { "key": "terminal-working", "value": "false" },
                     { "key": "terminal-unread", "value": "false" },
                     { "key": "terminal-session-terminal-1773634611341", "value": "{\"type\":\"terminal\",\"name\":\"bun run build:render\",\"attachment_id\":\"terminal-1773634611341\"}" }
                 ]
-            }
+            },
         }))
         .expect("workspace should parse");
 
@@ -2956,7 +3154,7 @@ mod tests {
         };
 
         assert!(workspace.template);
-        assert!(workspace.base.ready);
+        assert!(workspace.base.lifecycle.is_ready());
         assert_eq!(
             workspace.base.last_active.as_deref(),
             Some("2026-03-16T04:18:39Z")
