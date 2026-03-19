@@ -7,7 +7,7 @@ use std::process::{Command, Output, Stdio};
 const TERMINAL_USER: &str = "silo";
 pub(crate) const TERMINAL_WORKSPACE_DIR: &str = "/home/silo/workspace";
 const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
-pub(crate) const REMOTE_WORKSPACE_OBSERVER_BIN: &str = "/home/silo/.silo/bin/workspace-observer";
+pub(crate) const REMOTE_WORKSPACE_AGENT_BIN: &str = "/home/silo/.silo/bin/workspace-agent";
 
 #[derive(Debug)]
 pub(crate) struct CommandResult {

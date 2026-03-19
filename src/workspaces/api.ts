@@ -4,7 +4,7 @@ export type WorkspaceLifecyclePhase =
 	| "provisioning"
 	| "waiting_for_ssh"
 	| "bootstrapping"
-	| "waiting_for_observer"
+	| "waiting_for_agent"
 	| "ready"
 	| "stopping"
 	| "suspending"
@@ -102,8 +102,8 @@ export function workspaceLifecycleLabel(workspace: Workspace): string {
 			return "Waiting for SSH...";
 		case "bootstrapping":
 			return "Preparing workspace...";
-		case "waiting_for_observer":
-			return "Starting workspace services...";
+			case "waiting_for_agent":
+				return "Starting workspace services...";
 		case "failed":
 			return "Workspace startup failed";
 		case "stopping":

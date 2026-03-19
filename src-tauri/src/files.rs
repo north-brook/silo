@@ -1,7 +1,7 @@
 use crate::bootstrap;
 use crate::remote::{
     run_remote_command, run_remote_command_with_stdin, shell_quote, workspace_shell_command,
-    workspace_shell_command_preserving_stdin, REMOTE_WORKSPACE_OBSERVER_BIN,
+    workspace_shell_command_preserving_stdin, REMOTE_WORKSPACE_AGENT_BIN,
 };
 use crate::state::{
     active_session_metadata_entries, file_session_metadata_key, WorkspaceMetadataEntry,
@@ -60,10 +60,10 @@ pub struct WatchedFileState {
 #[tauri::command]
 pub async fn files_list_tree(workspace: String) -> Result<Vec<FileTreeEntry>, String> {
     let lookup = branch_workspace_lookup(&workspace).await?;
-    run_observer_json_command(
+    run_agent_json_command(
         &lookup,
         "failed to list workspace files",
-        &observer_remote_command("files-tree"),
+        &agent_remote_command("files-tree"),
     )
     .await
 }
@@ -72,10 +72,10 @@ pub async fn files_list_tree(workspace: String) -> Result<Vec<FileTreeEntry>, St
 pub async fn files_read(workspace: String, path: String) -> Result<FileReadResult, String> {
     let lookup = branch_workspace_lookup(&workspace).await?;
     let path = normalize_repo_relative_path(&path)?;
-    run_observer_json_command(
+    run_agent_json_command(
         &lookup,
         "failed to read workspace file",
-        &observer_remote_command(&format!("files-read --path {}", shell_quote(&path))),
+        &agent_remote_command(&format!("files-read --path {}", shell_quote(&path))),
     )
     .await
 }
@@ -90,10 +90,10 @@ pub async fn files_save(
     let lookup = branch_workspace_lookup(&workspace).await?;
     let path = normalize_repo_relative_path(&path)?;
     let base_revision = normalize_revision(&base_revision)?;
-    run_observer_json_command_with_stdin(
+    run_agent_json_command_with_stdin(
         &lookup,
         "failed to save workspace file",
-        &observer_remote_command(&format!(
+        &agent_remote_command(&format!(
             "files-write --path {} --expected-revision {}",
             shell_quote(&path),
             shell_quote(&base_revision),
@@ -115,7 +115,7 @@ pub async fn files_set_watched_paths(workspace: String, paths: Vec<String>) -> R
 
     let result = run_remote_command_with_stdin(
         &lookup,
-        &workspace_shell_command_preserving_stdin(&observer_remote_command("files-sync-watch-set")),
+        &workspace_shell_command_preserving_stdin(&agent_remote_command("files-sync-watch-set")),
         serde_json::to_vec(&normalized).map_err(|error| error.to_string())?,
     )
     .await?;
@@ -131,10 +131,10 @@ pub async fn files_set_watched_paths(workspace: String, paths: Vec<String>) -> R
 #[tauri::command]
 pub async fn files_get_watched_state(workspace: String) -> Result<Vec<WatchedFileState>, String> {
     let lookup = branch_workspace_lookup(&workspace).await?;
-    run_observer_json_command(
+    run_agent_json_command(
         &lookup,
         "failed to read watched file state",
-        &observer_remote_command("files-watch-state"),
+        &agent_remote_command("files-watch-state"),
     )
     .await
 }
@@ -199,18 +199,10 @@ pub fn files_close_session(
         return Err("file attachment_id must not be empty".to_string());
     }
 
-    let cleared_active_session = state.clear_active_workspace_session_if_matches(
-        &workspace,
-        "file",
-        &attachment_id,
-        None,
-    );
+    let cleared_active_session =
+        state.clear_active_workspace_session_if_matches(&workspace, "file", &attachment_id, None);
     if cleared_active_session {
-        state.enqueue(
-            &workspace,
-            None,
-            active_session_metadata_entries(None),
-        );
+        state.enqueue(&workspace, None, active_session_metadata_entries(None));
     }
 
     enqueue_file_metadata_remove(state.inner(), &workspace, None, &attachment_id);
@@ -238,18 +230,18 @@ async fn branch_workspace_lookup(workspace: &str) -> Result<WorkspaceLookup, Str
     Ok(lookup)
 }
 
-fn observer_remote_command(command: &str) -> String {
+fn agent_remote_command(command: &str) -> String {
     format!(
-        "if [ ! -x {observer_bin} ]; then\n\
-  echo 'workspace-observer is unavailable' >&2\n\
+        "if [ ! -x {agent_bin} ]; then\n\
+  echo 'workspace-agent is unavailable' >&2\n\
   exit 1\n\
 fi\n\
-{observer_bin} {command}",
-        observer_bin = shell_quote(REMOTE_WORKSPACE_OBSERVER_BIN),
+{agent_bin} {command}",
+        agent_bin = shell_quote(REMOTE_WORKSPACE_AGENT_BIN),
     )
 }
 
-async fn run_observer_json_command<T: for<'de> Deserialize<'de>>(
+async fn run_agent_json_command<T: for<'de> Deserialize<'de>>(
     lookup: &WorkspaceLookup,
     context: &str,
     command: &str,
@@ -261,7 +253,7 @@ async fn run_observer_json_command<T: for<'de> Deserialize<'de>>(
     parse_json_output(context, &result.stdout, &result.stderr)
 }
 
-async fn run_observer_json_command_with_stdin<T: for<'de> Deserialize<'de>>(
+async fn run_agent_json_command_with_stdin<T: for<'de> Deserialize<'de>>(
     lookup: &WorkspaceLookup,
     context: &str,
     command: &str,
@@ -288,12 +280,12 @@ fn parse_json_output<T: for<'de> Deserialize<'de>>(
         let trimmed_stdout = stdout.trim();
         let trimmed_stderr = stderr.trim();
         if trimmed_stdout.is_empty() && trimmed_stderr.is_empty() {
-            format!("{context}: invalid empty observer response: {error}")
+            format!("{context}: invalid empty agent response: {error}")
         } else if trimmed_stderr.is_empty() {
-            format!("{context}: invalid observer response: {error}; stdout={trimmed_stdout}")
+            format!("{context}: invalid agent response: {error}; stdout={trimmed_stdout}")
         } else {
             format!(
-                "{context}: invalid observer response: {error}; stdout={trimmed_stdout}; stderr={trimmed_stderr}"
+                "{context}: invalid agent response: {error}; stdout={trimmed_stdout}; stderr={trimmed_stderr}"
             )
         }
     })

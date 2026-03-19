@@ -1,8 +1,8 @@
-use crate::bootstrap::is_retryable_terminal_transport_error;
 use crate::bootstrap;
+use crate::bootstrap::is_retryable_terminal_transport_error;
 use crate::remote::{
     assistant_prompt_command, remote_command_error, run_remote_command, run_terminal_user_command,
-    shell_quote, terminal_shell_command, wrap_remote_shell_command, REMOTE_WORKSPACE_OBSERVER_BIN,
+    shell_quote, terminal_shell_command, wrap_remote_shell_command, REMOTE_WORKSPACE_AGENT_BIN,
 };
 use crate::state::{active_session_metadata_entries, WorkspaceMetadataManager};
 use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
@@ -459,10 +459,7 @@ pub fn terminal_kill_terminal(
 
         let result = match run_remote_command(
             &lookup,
-            &run_terminal_user_command(&format!(
-                "zmx kill {}",
-                shell_quote(&attachment_for_kill)
-            )),
+            &run_terminal_user_command(&format!("zmx kill {}", shell_quote(&attachment_for_kill))),
         )
         .await
         {
@@ -499,8 +496,8 @@ pub async fn terminal_read_terminal(
 ) -> Result<TerminalReadResult, String> {
     let lookup = workspaces::find_workspace(&workspace).await?;
     let command = run_terminal_user_command(&format!(
-        "if [ -x {observer_bin} ]; then {observer_bin} mark-read --session {attachment_id}; fi",
-        observer_bin = shell_quote(REMOTE_WORKSPACE_OBSERVER_BIN),
+        "if [ -x {agent_bin} ]; then {agent_bin} mark-read --session {attachment_id}; fi",
+        agent_bin = shell_quote(REMOTE_WORKSPACE_AGENT_BIN),
         attachment_id = shell_quote(&attachment_id),
     ));
     let result = run_remote_command(&lookup, &command).await?;

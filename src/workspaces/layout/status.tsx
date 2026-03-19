@@ -61,8 +61,8 @@ export function workspaceStatusLabel(workspace: WorkspaceStatus): string {
 				return "Waiting for SSH...";
 			case "bootstrapping":
 				return "Preparing...";
-			case "waiting_for_observer":
-				return "Starting services...";
+				case "waiting_for_agent":
+					return "Starting services...";
 			case "failed":
 				return "Startup failed";
 			default:

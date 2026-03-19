@@ -60,7 +60,7 @@ function useProvisioningSteps(
 			? "active"
 			: "pending";
 	const configState: Step["state"] =
-		phase === "bootstrapping" || phase === "waiting_for_observer" || phase === "ready"
+		phase === "bootstrapping" || phase === "waiting_for_agent" || phase === "ready"
 			? phase === "bootstrapping"
 				? "active"
 				: "done"
@@ -68,7 +68,7 @@ function useProvisioningSteps(
 				? "pending"
 				: "pending";
 	const secureAccessState: Step["state"] =
-		phase === "waiting_for_observer"
+		phase === "waiting_for_agent"
 			? "active"
 			: phase === "ready"
 				? "done"
@@ -87,7 +87,7 @@ function useProvisioningSteps(
 				phase === "waiting_for_ssh"
 					? "active"
 					: phase === "bootstrapping" ||
-						  phase === "waiting_for_observer" ||
+					  phase === "waiting_for_agent" ||
 						  phase === "ready"
 						? "done"
 						: vmProvisionState === "done"

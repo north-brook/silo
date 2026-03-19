@@ -20,16 +20,12 @@ use tauri::State;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use uuid::Uuid;
 
-pub(crate) const WORKSPACE_LIFECYCLE_PHASE_METADATA_KEY: &str =
-    "workspace-lifecycle-phase";
-pub(crate) const WORKSPACE_LIFECYCLE_DETAIL_METADATA_KEY: &str =
-    "workspace-lifecycle-detail";
-pub(crate) const WORKSPACE_LIFECYCLE_ERROR_METADATA_KEY: &str =
-    "workspace-lifecycle-error";
+pub(crate) const WORKSPACE_LIFECYCLE_PHASE_METADATA_KEY: &str = "workspace-lifecycle-phase";
+pub(crate) const WORKSPACE_LIFECYCLE_DETAIL_METADATA_KEY: &str = "workspace-lifecycle-detail";
+pub(crate) const WORKSPACE_LIFECYCLE_ERROR_METADATA_KEY: &str = "workspace-lifecycle-error";
 pub(crate) const WORKSPACE_LIFECYCLE_UPDATED_AT_METADATA_KEY: &str =
     "workspace-lifecycle-updated-at";
-pub(crate) const WORKSPACE_OBSERVER_HEARTBEAT_METADATA_KEY: &str =
-    "workspace-observer-heartbeat-at";
+pub(crate) const WORKSPACE_AGENT_HEARTBEAT_METADATA_KEY: &str = "workspace-agent-heartbeat-at";
 const STARTUP_FAILURE_RETRY_COOLDOWN: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -96,7 +92,7 @@ struct WorkspaceBase {
     zone: String,
     lifecycle: WorkspaceLifecycle,
     #[serde(skip_serializing)]
-    observer_heartbeat_at: Option<String>,
+    agent_heartbeat_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -219,8 +215,8 @@ impl Workspace {
         self.lifecycle().should_reconcile(self.status())
     }
 
-    pub(crate) fn observer_heartbeat_at(&self) -> Option<&str> {
-        self.base().observer_heartbeat_at.as_deref()
+    pub(crate) fn agent_heartbeat_at(&self) -> Option<&str> {
+        self.base().agent_heartbeat_at.as_deref()
     }
 
     pub(crate) fn branch_name(&self) -> Option<&str> {
@@ -976,7 +972,7 @@ fn pending_workspace(
             status: "PROVISIONING".to_string(),
             zone: zone.to_string(),
             lifecycle: lifecycle_for_status("PROVISIONING", None, None, None),
-            observer_heartbeat_at: None,
+            agent_heartbeat_at: None,
         },
         branch_label.to_string(),
         target_branch.to_string(),
@@ -1004,7 +1000,7 @@ fn pending_template_workspace(name: &str, project_label: &str, zone: &str) -> Te
             status: "PROVISIONING".to_string(),
             zone: zone.to_string(),
             lifecycle: lifecycle_for_status("PROVISIONING", None, None, None),
-            observer_heartbeat_at: None,
+            agent_heartbeat_at: None,
         },
         unread: false,
         working: None,
@@ -1306,7 +1302,10 @@ pub(crate) fn create_template_workspace_args(
         format!("--machine-type={}", gcloud.machine_type),
         format!("--boot-disk-size={}GB", gcloud.disk_size_gb),
         format!("--boot-disk-type={}", gcloud.disk_type),
-        format!("--labels=project={},template=true", sanitize_label_value(project_label)),
+        format!(
+            "--labels=project={},template=true",
+            sanitize_label_value(project_label)
+        ),
         metadata,
         "--async".to_string(),
     ];
@@ -1863,7 +1862,7 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
     let last_working = resolve_workspace_last_working(&metadata);
     let active_session = resolve_workspace_active_session(&metadata);
     let lifecycle = resolve_workspace_lifecycle(&status, &metadata);
-    let observer_heartbeat_at = resolve_workspace_observer_heartbeat(&metadata);
+    let agent_heartbeat_at = resolve_workspace_agent_heartbeat(&metadata);
 
     let base = WorkspaceBase {
         name,
@@ -1875,7 +1874,7 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         status,
         zone,
         lifecycle,
-        observer_heartbeat_at,
+        agent_heartbeat_at,
     };
 
     let unread =
@@ -2093,9 +2092,9 @@ fn resolve_workspace_lifecycle(
     lifecycle_for_status(status, phase, detail, last_error).with_updated_at(updated_at)
 }
 
-fn resolve_workspace_observer_heartbeat(metadata: &HashMap<String, String>) -> Option<String> {
+fn resolve_workspace_agent_heartbeat(metadata: &HashMap<String, String>) -> Option<String> {
     metadata
-        .get(WORKSPACE_OBSERVER_HEARTBEAT_METADATA_KEY)
+        .get(WORKSPACE_AGENT_HEARTBEAT_METADATA_KEY)
         .cloned()
         .filter(|value| !value.trim().is_empty())
 }
@@ -2155,7 +2154,7 @@ fn lifecycle_for_status(
         "bootstrapping" => {
             detail.or_else(|| Some("Preparing repository, credentials, and tools".to_string()))
         }
-        "waiting_for_observer" => {
+        "waiting_for_agent" => {
             detail.or_else(|| Some("Waiting for workspace services to come online".to_string()))
         }
         "failed" => detail.or_else(|| Some("Workspace startup failed".to_string())),
@@ -2493,7 +2492,7 @@ mod tests {
             status: "RUNNING".to_string(),
             zone: "us-east1-b".to_string(),
             lifecycle: WorkspaceLifecycle::new("ready", None, None, None),
-            observer_heartbeat_at: None,
+            agent_heartbeat_at: None,
         }
     }
 
@@ -2649,7 +2648,9 @@ mod tests {
         assert!(args.contains(&"--async".to_string()));
         assert!(args.contains(&"--labels=project=demo-project".to_string()));
         assert!(args.iter().any(|arg| arg.contains("branch=Aare")));
-        assert!(args.iter().any(|arg| arg.contains("target_branch=Feature/Inbox")));
+        assert!(args
+            .iter()
+            .any(|arg| arg.contains("target_branch=Feature/Inbox")));
         assert!(args
             .iter()
             .any(|arg| arg.contains("workspace-lifecycle-phase=provisioning")));

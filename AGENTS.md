@@ -7,7 +7,7 @@ At a high level:
 - the frontend is a Vite app
 - the desktop shell and backend are Tauri + Rust
 - cloud workspaces are remote VMs managed through `gcloud`
-- a small Rust daemon, `workspace-observer`, runs inside each workspace VM and reports VM-side state back to the app
+- a small Rust daemon, `workspace-agent`, runs inside each workspace VM and reports VM-side state back to the app
 
 Keep this file durable. Prefer guidance on how to discover the current state of the system over documenting specific metadata keys, VM names, or other implementation details that are likely to change.
 
@@ -18,7 +18,7 @@ Keep this file durable. Prefer guidance on how to discover the current state of 
 - Tauri app: `bun run tauri dev`
 - Tauri Rust check: `cd src-tauri && cargo check`
 - Tauri Rust tests: `cd src-tauri && cargo test --lib`
-- Observer tests: `cd tools/workspace-observer && cargo test`
+- Agent tests: `cd tools/workspace-agent && cargo test`
 
 Use Bun for JS/TS tasks in this repo.
 
@@ -31,7 +31,7 @@ When something is broken, identify which layer owns the behavior before changing
 3. workspace VM state
 4. cloud control plane state
 
-Many bugs that look like frontend issues are actually stale VM state, observer state, or metadata drift.
+Many bugs that look like frontend issues are actually stale VM state, agent state, or metadata drift.
 
 ## Local Logs
 
@@ -69,11 +69,11 @@ If behavior depends on remote workspace state, inspect the live VM rather than a
 Useful techniques:
 
 - read instance metadata from the metadata server on the VM
-- inspect the observer state files under `/home/silo/.silo/`
-- inspect observer logs with `journalctl`
-- verify the observer service is actually running the latest deployed binary
+- inspect the agent state files under `/home/silo/.silo/`
+- inspect agent logs with `journalctl`
+- verify the agent service is actually running the latest deployed binary
 
-If you change observer code, rebuild and redeploy it before concluding the fix works.
+If you change agent code, rebuild and redeploy it before concluding the fix works.
 
 ## Architecture Guidance
 

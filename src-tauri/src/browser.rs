@@ -269,9 +269,11 @@ pub fn browser_kill_tab(
     let workspace_for_cleanup = workspace.clone();
     let attachment_for_cleanup = attachment_id.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(error) =
-            manager.close_webview(&app_for_cleanup, &workspace_for_cleanup, &attachment_for_cleanup)
-        {
+        if let Err(error) = manager.close_webview(
+            &app_for_cleanup,
+            &workspace_for_cleanup,
+            &attachment_for_cleanup,
+        ) {
             log::warn!(
                 "failed to close browser webview for workspace {} attachment_id={}: {}",
                 workspace_for_cleanup,

@@ -1,7 +1,7 @@
 use crate::config::{ConfigStore, ProjectConfig};
 use crate::remote::{
     remote_command_error, run_remote_command, run_remote_command_with_stdin,
-    run_terminal_user_command, shell_quote, REMOTE_WORKSPACE_OBSERVER_BIN, TERMINAL_WORKSPACE_DIR,
+    run_terminal_user_command, shell_quote, REMOTE_WORKSPACE_AGENT_BIN, TERMINAL_WORKSPACE_DIR,
 };
 use crate::workspaces::{self, Workspace, WorkspaceLookup};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -18,8 +18,8 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 const REMOTE_BOOTSTRAP_STATE_FILE: &str = "/home/silo/.silo/workspace-bootstrap-state";
 const REMOTE_BOOTSTRAP_LOCK_DIR: &str = "/home/silo/.silo/workspace-bootstrap.lock";
 const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
-const REMOTE_WORKSPACE_OBSERVER_PIDFILE: &str = "/home/silo/.silo/workspace-observer/daemon.pid";
-const REMOTE_WORKSPACE_OBSERVER_SHELL_FILE: &str = "/home/silo/.silo/workspace-observer-shell.sh";
+const REMOTE_WORKSPACE_AGENT_PIDFILE: &str = "/home/silo/.silo/workspace-agent/daemon.pid";
+const REMOTE_WORKSPACE_AGENT_SHELL_FILE: &str = "/home/silo/.silo/workspace-agent-shell.sh";
 const WORKSPACE_BOOTSTRAP_VERSION: &str = "11";
 const STARTUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 const INSTANCE_RUNNING_POLL_ATTEMPTS: usize = 180;
@@ -27,9 +27,9 @@ const SSH_READY_POLL_ATTEMPTS: usize = 120;
 const BOOTSTRAP_RETRY_ATTEMPTS: usize = 60;
 const OBSERVER_READY_POLL_ATTEMPTS: usize = 30;
 const OBSERVER_HEARTBEAT_STALE_AFTER_SECS: i64 = 45;
-const WORKSPACE_OBSERVER_BIN_BYTES: &[u8] = include_bytes!(concat!(
+const WORKSPACE_AGENT_BIN_BYTES: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
-    "/workspace-observer-x86_64-unknown-linux-musl"
+    "/workspace-agent-x86_64-unknown-linux-musl"
 ));
 static WORKSPACE_STARTUP_RECONCILE_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
@@ -245,13 +245,13 @@ async fn reconcile_workspace_startup(workspace: &str) -> Result<(), String> {
     reporter
         .publish(
             &lookup,
-            "waiting_for_observer",
+            "waiting_for_agent",
             Some("Waiting for workspace services to come online"),
             None,
         )
         .await?;
-    ensure_workspace_observer_running(&lookup).await?;
-    wait_for_workspace_observer(workspace).await?;
+    ensure_workspace_agent_running(&lookup).await?;
+    wait_for_workspace_agent(workspace).await?;
 
     reporter.publish(&lookup, "ready", None, None).await?;
     log::info!(
@@ -350,22 +350,22 @@ async fn bootstrap_workspace_until_ready(lookup: &WorkspaceLookup) -> Result<(),
     ))
 }
 
-async fn ensure_workspace_observer_running(lookup: &WorkspaceLookup) -> Result<(), String> {
-    let command = ensure_workspace_observer_running_command(lookup);
+async fn ensure_workspace_agent_running(lookup: &WorkspaceLookup) -> Result<(), String> {
+    let command = ensure_workspace_agent_running_command(lookup);
     let result = run_remote_command(lookup, &run_terminal_user_command(&command)).await?;
     if !result.success {
         return Err(remote_command_error(
-            "failed to start workspace observer",
+            "failed to start workspace agent",
             &result.stderr,
         ));
     }
     Ok(())
 }
 
-async fn wait_for_workspace_observer(workspace: &str) -> Result<(), String> {
+async fn wait_for_workspace_agent(workspace: &str) -> Result<(), String> {
     for attempt in 0..OBSERVER_READY_POLL_ATTEMPTS {
         let lookup = workspaces::find_workspace(workspace).await?;
-        if observer_heartbeat_is_fresh(&lookup.workspace) {
+        if agent_heartbeat_is_fresh(&lookup.workspace) {
             return Ok(());
         }
         if attempt + 1 == OBSERVER_READY_POLL_ATTEMPTS {
@@ -375,12 +375,12 @@ async fn wait_for_workspace_observer(workspace: &str) -> Result<(), String> {
     }
 
     Err(format!(
-        "workspace observer for {workspace} did not publish a recent heartbeat"
+        "workspace agent for {workspace} did not publish a recent heartbeat"
     ))
 }
 
-fn observer_heartbeat_is_fresh(workspace: &Workspace) -> bool {
-    let Some(heartbeat) = workspace.observer_heartbeat_at() else {
+fn agent_heartbeat_is_fresh(workspace: &Workspace) -> bool {
+    let Some(heartbeat) = workspace.agent_heartbeat_at() else {
         return false;
     };
     let Ok(heartbeat) = OffsetDateTime::parse(heartbeat, &Rfc3339) else {
@@ -490,7 +490,7 @@ fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBoo
     let claude_state_json = claude_state_json();
     let gh_hosts_yml = gh_hosts_yml(&bootstrap.gh_username, &bootstrap.gh_token);
     let bootstrap_signature = workspace_bootstrap_signature(lookup.workspace.name(), bootstrap);
-    let observer_install = workspace_observer_install_script(lookup);
+    let agent_install = workspace_agent_install_script(lookup);
     let env_file_sync = if lookup.workspace.is_template() {
         workspace_env_file_sync_script(&bootstrap.env_files)
     } else {
@@ -515,8 +515,8 @@ fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBoo
         "unset VERTEX_REGION_CLAUDE_CODE".to_string(),
         format!(
             "if [[ -f {} ]]; then source {}; fi",
-            shell_quote(REMOTE_WORKSPACE_OBSERVER_SHELL_FILE),
-            shell_quote(REMOTE_WORKSPACE_OBSERVER_SHELL_FILE)
+            shell_quote(REMOTE_WORKSPACE_AGENT_SHELL_FILE),
+            shell_quote(REMOTE_WORKSPACE_AGENT_SHELL_FILE)
         ),
     ]
     .join("\n");
@@ -626,7 +626,7 @@ if ! git config --global --get-all safe.directory 2>/dev/null | grep -Fxq \"$WOR
 fi\n\
 {branch_setup}\n\
 {env_file_sync}\n\
-{observer_install}",
+{agent_install}",
         workspace_dir = shell_quote(TERMINAL_WORKSPACE_DIR),
         remote_url = shell_quote(&bootstrap.remote_url),
         target_branch = shell_quote(&bootstrap.target_branch),
@@ -645,7 +645,7 @@ fi\n\
         claude_state_json = shell_quote(&claude_state_json),
         branch_setup = branch_setup,
         env_file_sync = env_file_sync,
-        observer_install = observer_install,
+        agent_install = agent_install,
     )
 }
 
@@ -657,7 +657,7 @@ pub(crate) fn bootstrap_git_command(command: &str) -> String {
 
 fn workspace_bootstrap_signature(workspace_name: &str, bootstrap: &WorkspaceBootstrap) -> String {
     format!(
-        "version={}\nworkspace={}\nremote_url={}\ntarget_branch={}\nworkspace_branch={}\ngh_username={}\ngh_token={}\ncodex_token={}\nclaude_token={}\ngit_user_name={}\ngit_user_email={}\nenv_files={}\nobserver_sources={}",
+        "version={}\nworkspace={}\nremote_url={}\ntarget_branch={}\nworkspace_branch={}\ngh_username={}\ngh_token={}\ncodex_token={}\nclaude_token={}\ngit_user_name={}\ngit_user_email={}\nenv_files={}\nagent_sources={}",
         WORKSPACE_BOOTSTRAP_VERSION,
         workspace_name,
         bootstrap.remote_url,
@@ -670,7 +670,7 @@ fn workspace_bootstrap_signature(workspace_name: &str, bootstrap: &WorkspaceBoot
         bootstrap.git_user_name,
         bootstrap.git_user_email,
         bootstrap_env_files_signature(&bootstrap.env_files),
-        workspace_observer_source_signature(),
+        workspace_agent_source_signature(),
     )
 }
 
@@ -773,23 +773,23 @@ pub(crate) fn workspace_env_file_sync_script(env_files: &[BootstrapEnvFile]) -> 
     script
 }
 
-fn workspace_observer_install_script(lookup: &WorkspaceLookup) -> String {
-    let bin_path = shell_quote(REMOTE_WORKSPACE_OBSERVER_BIN);
-    let pidfile = shell_quote(REMOTE_WORKSPACE_OBSERVER_PIDFILE);
-    let shell_path = shell_quote(REMOTE_WORKSPACE_OBSERVER_SHELL_FILE);
-    let encoded_binary = BASE64_STANDARD.encode(WORKSPACE_OBSERVER_BIN_BYTES);
-    let shell_script = workspace_observer_shell_script();
+fn workspace_agent_install_script(lookup: &WorkspaceLookup) -> String {
+    let bin_path = shell_quote(REMOTE_WORKSPACE_AGENT_BIN);
+    let pidfile = shell_quote(REMOTE_WORKSPACE_AGENT_PIDFILE);
+    let shell_path = shell_quote(REMOTE_WORKSPACE_AGENT_SHELL_FILE);
+    let encoded_binary = BASE64_STANDARD.encode(WORKSPACE_AGENT_BIN_BYTES);
+    let shell_script = workspace_agent_shell_script();
     let encoded_shell = BASE64_STANDARD.encode(shell_script.as_bytes());
 
     let mut script =
-        "install -d -m 0700 \"$HOME/.silo\" \"$HOME/.silo/bin\" \"$HOME/.silo/workspace-observer\"\n"
+        "install -d -m 0700 \"$HOME/.silo\" \"$HOME/.silo/bin\" \"$HOME/.silo/workspace-agent\"\n"
             .to_string();
     script.push_str(&format!(
-        "cat <<'EOF_OBSERVER_BIN' | base64 --decode > {bin_path}\n{encoded_binary}\nEOF_OBSERVER_BIN\n",
+        "cat <<'EOF_AGENT_BIN' | base64 --decode > {bin_path}\n{encoded_binary}\nEOF_AGENT_BIN\n",
     ));
     script.push_str(&format!("chmod 0755 {bin_path}\n"));
     script.push_str(&format!(
-        "cat <<'EOF_OBSERVER_SHELL' | base64 --decode > {shell_path}\n{encoded_shell}\nEOF_OBSERVER_SHELL\n",
+        "cat <<'EOF_AGENT_SHELL' | base64 --decode > {shell_path}\n{encoded_shell}\nEOF_AGENT_SHELL\n",
     ));
     script.push_str(&format!("chmod 0755 {shell_path}\n"));
     script.push_str(&format!(
@@ -804,10 +804,10 @@ fn workspace_observer_install_script(lookup: &WorkspaceLookup) -> String {
     script
 }
 
-fn ensure_workspace_observer_running_command(lookup: &WorkspaceLookup) -> String {
-    let bin_path = shell_quote(REMOTE_WORKSPACE_OBSERVER_BIN);
-    let pidfile = shell_quote(REMOTE_WORKSPACE_OBSERVER_PIDFILE);
-    let install_script = workspace_observer_install_script(lookup);
+fn ensure_workspace_agent_running_command(lookup: &WorkspaceLookup) -> String {
+    let bin_path = shell_quote(REMOTE_WORKSPACE_AGENT_BIN);
+    let pidfile = shell_quote(REMOTE_WORKSPACE_AGENT_PIDFILE);
+    let install_script = workspace_agent_install_script(lookup);
     format!(
         "if [ -x {bin_path} ] && [ -f {pidfile} ]; then\n\
   PID=\"$(cat {pidfile})\"\n\
@@ -822,35 +822,35 @@ fi\n\
     )
 }
 
-fn workspace_observer_source_signature() -> String {
+fn workspace_agent_source_signature() -> String {
     let mut hasher = Sha256::new();
-    hasher.update(WORKSPACE_OBSERVER_BIN_BYTES);
-    hasher.update(workspace_observer_shell_script().as_bytes());
+    hasher.update(WORKSPACE_AGENT_BIN_BYTES);
+    hasher.update(workspace_agent_shell_script().as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
-pub(crate) fn workspace_observer_shell_script() -> String {
+pub(crate) fn workspace_agent_shell_script() -> String {
     format!(
-        "export SILO_WORKSPACE_OBSERVER_BIN={observer_bin}\n\
-_silo_observer_emit() {{\n\
+        "export SILO_WORKSPACE_AGENT_BIN={agent_bin}\n\
+_silo_agent_emit() {{\n\
   [ -n \"${{ZMX_SESSION:-}}\" ] || return 0\n\
-  [ -x \"${{SILO_WORKSPACE_OBSERVER_BIN:-}}\" ] || return 0\n\
-  SILO_OBSERVER_HOOK=1 \"$SILO_WORKSPACE_OBSERVER_BIN\" emit \"$@\" >/dev/null 2>&1 || true\n\
+  [ -x \"${{SILO_WORKSPACE_AGENT_BIN:-}}\" ] || return 0\n\
+  SILO_AGENT_HOOK=1 \"$SILO_WORKSPACE_AGENT_BIN\" emit \"$@\" >/dev/null 2>&1 || true\n\
 }}\n\
-_silo_observer_wrap_assistant() {{\n\
+_silo_agent_wrap_assistant() {{\n\
   local provider=\"$1\"\n\
   shift\n\
-  if [ -z \"${{ZMX_SESSION:-}}\" ] || [ ! -x \"${{SILO_WORKSPACE_OBSERVER_BIN:-}}\" ]; then\n\
+  if [ -z \"${{ZMX_SESSION:-}}\" ] || [ ! -x \"${{SILO_WORKSPACE_AGENT_BIN:-}}\" ]; then\n\
     command \"$@\"\n\
     return\n\
   fi\n\
-  command \"$SILO_WORKSPACE_OBSERVER_BIN\" assistant-proxy --provider \"$provider\" -- \"$@\"\n\
+  command \"$SILO_WORKSPACE_AGENT_BIN\" assistant-proxy --provider \"$provider\" -- \"$@\"\n\
 }}\n\
 codex() {{\n\
-  _silo_observer_wrap_assistant codex codex \"$@\"\n\
+  _silo_agent_wrap_assistant codex codex \"$@\"\n\
 }}\n\
 claude() {{\n\
-  _silo_observer_wrap_assistant claude claude --dangerously-skip-permissions \"$@\"\n\
+  _silo_agent_wrap_assistant claude claude --dangerously-skip-permissions \"$@\"\n\
 }}\n\
 cc() {{\n\
   claude \"$@\"\n\
@@ -860,18 +860,18 @@ silo() {{\n\
   shift || true\n\
   case \"$provider\" in\n\
     codex)\n\
-      if [ -z \"${{ZMX_SESSION:-}}\" ] || [ ! -x \"${{SILO_WORKSPACE_OBSERVER_BIN:-}}\" ]; then\n\
+      if [ -z \"${{ZMX_SESSION:-}}\" ] || [ ! -x \"${{SILO_WORKSPACE_AGENT_BIN:-}}\" ]; then\n\
         command codex \"$@\"\n\
         return\n\
       fi\n\
-      command \"$SILO_WORKSPACE_OBSERVER_BIN\" assistant-proxy --provider codex --initial-prompt-argv -- codex \"$@\"\n\
+      command \"$SILO_WORKSPACE_AGENT_BIN\" assistant-proxy --provider codex --initial-prompt-argv -- codex \"$@\"\n\
       ;;\n\
     claude)\n\
-      if [ -z \"${{ZMX_SESSION:-}}\" ] || [ ! -x \"${{SILO_WORKSPACE_OBSERVER_BIN:-}}\" ]; then\n\
+      if [ -z \"${{ZMX_SESSION:-}}\" ] || [ ! -x \"${{SILO_WORKSPACE_AGENT_BIN:-}}\" ]; then\n\
         IS_SANDBOX=1 command claude --dangerously-skip-permissions \"$@\"\n\
         return\n\
       fi\n\
-      IS_SANDBOX=1 command \"$SILO_WORKSPACE_OBSERVER_BIN\" assistant-proxy --provider claude --initial-prompt-argv -- claude --dangerously-skip-permissions \"$@\"\n\
+      IS_SANDBOX=1 command \"$SILO_WORKSPACE_AGENT_BIN\" assistant-proxy --provider claude --initial-prompt-argv -- claude --dangerously-skip-permissions \"$@\"\n\
       ;;\n\
     *)\n\
       printf 'unsupported silo assistant: %s\\n' \"$provider\" >&2\n\
@@ -883,89 +883,89 @@ case $- in\n\
   *i*) ;;\n\
   *) return 0 2>/dev/null || exit 0 ;;\n\
 esac\n\
-if [ -n \"${{ZMX_SESSION:-}}\" ] && [ -z \"${{SILO_OBSERVER_SESSION_REGISTERED:-}}\" ]; then\n\
-  export SILO_OBSERVER_SESSION_REGISTERED=1\n\
-  _silo_observer_emit --kind shell_session_started --session \"$ZMX_SESSION\"\n\
+if [ -n \"${{ZMX_SESSION:-}}\" ] && [ -z \"${{SILO_AGENT_SESSION_REGISTERED:-}}\" ]; then\n\
+  export SILO_AGENT_SESSION_REGISTERED=1\n\
+  _silo_agent_emit --kind shell_session_started --session \"$ZMX_SESSION\"\n\
 fi\n\
 if [ -n \"${{ZSH_VERSION:-}}\" ]; then\n\
   autoload -Uz add-zsh-hook\n\
-  typeset -g SILO_OBSERVER_LAST_COMMAND=\"${{SILO_OBSERVER_LAST_COMMAND:-}}\"\n\
-  _silo_observer_preexec() {{\n\
-    [ -n \"${{SILO_OBSERVER_HOOK:-}}\" ] && return 0\n\
+  typeset -g SILO_AGENT_LAST_COMMAND=\"${{SILO_AGENT_LAST_COMMAND:-}}\"\n\
+  _silo_agent_preexec() {{\n\
+    [ -n \"${{SILO_AGENT_HOOK:-}}\" ] && return 0\n\
     [ -n \"${{ZMX_SESSION:-}}\" ] || return 0\n\
-    SILO_OBSERVER_LAST_COMMAND=\"$1\"\n\
-    _silo_observer_emit --kind shell_command_started --session \"$ZMX_SESSION\" --command \"$1\"\n\
+    SILO_AGENT_LAST_COMMAND=\"$1\"\n\
+    _silo_agent_emit --kind shell_command_started --session \"$ZMX_SESSION\" --command \"$1\"\n\
   }}\n\
-  _silo_observer_precmd() {{\n\
+  _silo_agent_precmd() {{\n\
     local exit_code=$?\n\
-    [ -n \"${{SILO_OBSERVER_HOOK:-}}\" ] && return $exit_code\n\
+    [ -n \"${{SILO_AGENT_HOOK:-}}\" ] && return $exit_code\n\
     [ -n \"${{ZMX_SESSION:-}}\" ] || return $exit_code\n\
-    if [ -n \"${{SILO_OBSERVER_LAST_COMMAND:-}}\" ]; then\n\
-      _silo_observer_emit --kind shell_command_finished --session \"$ZMX_SESSION\"\n\
-      SILO_OBSERVER_LAST_COMMAND=\"\"\n\
+    if [ -n \"${{SILO_AGENT_LAST_COMMAND:-}}\" ]; then\n\
+      _silo_agent_emit --kind shell_command_finished --session \"$ZMX_SESSION\"\n\
+      SILO_AGENT_LAST_COMMAND=\"\"\n\
     fi\n\
     return $exit_code\n\
   }}\n\
-  _silo_observer_zshexit() {{\n\
+  _silo_agent_zshexit() {{\n\
     [ -n \"${{ZMX_SESSION:-}}\" ] || return 0\n\
-    [ -n \"${{SILO_OBSERVER_SESSION_REGISTERED:-}}\" ] || return 0\n\
-    _silo_observer_emit --kind shell_session_exited --session \"$ZMX_SESSION\"\n\
+    [ -n \"${{SILO_AGENT_SESSION_REGISTERED:-}}\" ] || return 0\n\
+    _silo_agent_emit --kind shell_session_exited --session \"$ZMX_SESSION\"\n\
   }}\n\
   case \" ${{preexec_functions[*]:-}} \" in\n\
-    *\" _silo_observer_preexec \"*) ;;\n\
-    *) add-zsh-hook preexec _silo_observer_preexec ;;\n\
+    *\" _silo_agent_preexec \"*) ;;\n\
+    *) add-zsh-hook preexec _silo_agent_preexec ;;\n\
   esac\n\
   case \" ${{precmd_functions[*]:-}} \" in\n\
-    *\" _silo_observer_precmd \"*) ;;\n\
-    *) add-zsh-hook precmd _silo_observer_precmd ;;\n\
+    *\" _silo_agent_precmd \"*) ;;\n\
+    *) add-zsh-hook precmd _silo_agent_precmd ;;\n\
   esac\n\
   case \" ${{zshexit_functions[*]:-}} \" in\n\
-    *\" _silo_observer_zshexit \"*) ;;\n\
-    *) add-zsh-hook zshexit _silo_observer_zshexit ;;\n\
+    *\" _silo_agent_zshexit \"*) ;;\n\
+    *) add-zsh-hook zshexit _silo_agent_zshexit ;;\n\
   esac\n\
 elif [ -n \"${{BASH_VERSION:-}}\" ]; then\n\
-  SILO_OBSERVER_LAST_COMMAND=\"${{SILO_OBSERVER_LAST_COMMAND:-}}\"\n\
-  SILO_OBSERVER_BASH_IN_PROMPT=0\n\
-  _silo_observer_bash_preexec() {{\n\
+  SILO_AGENT_LAST_COMMAND=\"${{SILO_AGENT_LAST_COMMAND:-}}\"\n\
+  SILO_AGENT_BASH_IN_PROMPT=0\n\
+  _silo_agent_bash_preexec() {{\n\
     local exit_code=$?\n\
-    [ -n \"${{SILO_OBSERVER_HOOK:-}}\" ] && return $exit_code\n\
+    [ -n \"${{SILO_AGENT_HOOK:-}}\" ] && return $exit_code\n\
     [ -n \"${{ZMX_SESSION:-}}\" ] || return $exit_code\n\
-    [ \"${{SILO_OBSERVER_BASH_IN_PROMPT:-0}}\" = \"1\" ] && return $exit_code\n\
+    [ \"${{SILO_AGENT_BASH_IN_PROMPT:-0}}\" = \"1\" ] && return $exit_code\n\
     case \"$BASH_COMMAND\" in\n\
-      _silo_observer_*|trap*|history*|\"PROMPT_COMMAND=\"*) return $exit_code ;;\n\
+      _silo_agent_*|trap*|history*|\"PROMPT_COMMAND=\"*) return $exit_code ;;\n\
     esac\n\
-    if [ -n \"${{SILO_OBSERVER_LAST_COMMAND:-}}\" ] && [ \"$BASH_COMMAND\" = \"$SILO_OBSERVER_LAST_COMMAND\" ]; then\n\
+    if [ -n \"${{SILO_AGENT_LAST_COMMAND:-}}\" ] && [ \"$BASH_COMMAND\" = \"$SILO_AGENT_LAST_COMMAND\" ]; then\n\
       return $exit_code\n\
     fi\n\
-    SILO_OBSERVER_LAST_COMMAND=\"$BASH_COMMAND\"\n\
-    _silo_observer_emit --kind shell_command_started --session \"$ZMX_SESSION\" --command \"$BASH_COMMAND\"\n\
+    SILO_AGENT_LAST_COMMAND=\"$BASH_COMMAND\"\n\
+    _silo_agent_emit --kind shell_command_started --session \"$ZMX_SESSION\" --command \"$BASH_COMMAND\"\n\
     return $exit_code\n\
   }}\n\
-  _silo_observer_bash_precmd() {{\n\
+  _silo_agent_bash_precmd() {{\n\
     local exit_code=$?\n\
-    SILO_OBSERVER_BASH_IN_PROMPT=1\n\
-    [ -n \"${{SILO_OBSERVER_HOOK:-}}\" ] && {{ SILO_OBSERVER_BASH_IN_PROMPT=0; return $exit_code; }}\n\
-    [ -n \"${{ZMX_SESSION:-}}\" ] || {{ SILO_OBSERVER_BASH_IN_PROMPT=0; return $exit_code; }}\n\
-    if [ -n \"${{SILO_OBSERVER_LAST_COMMAND:-}}\" ]; then\n\
-      _silo_observer_emit --kind shell_command_finished --session \"$ZMX_SESSION\"\n\
-      SILO_OBSERVER_LAST_COMMAND=\"\"\n\
+    SILO_AGENT_BASH_IN_PROMPT=1\n\
+    [ -n \"${{SILO_AGENT_HOOK:-}}\" ] && {{ SILO_AGENT_BASH_IN_PROMPT=0; return $exit_code; }}\n\
+    [ -n \"${{ZMX_SESSION:-}}\" ] || {{ SILO_AGENT_BASH_IN_PROMPT=0; return $exit_code; }}\n\
+    if [ -n \"${{SILO_AGENT_LAST_COMMAND:-}}\" ]; then\n\
+      _silo_agent_emit --kind shell_command_finished --session \"$ZMX_SESSION\"\n\
+      SILO_AGENT_LAST_COMMAND=\"\"\n\
     fi\n\
-    SILO_OBSERVER_BASH_IN_PROMPT=0\n\
+    SILO_AGENT_BASH_IN_PROMPT=0\n\
     return $exit_code\n\
   }}\n\
-  _silo_observer_bash_exit() {{\n\
+  _silo_agent_bash_exit() {{\n\
     [ -n \"${{ZMX_SESSION:-}}\" ] || return 0\n\
-    [ -n \"${{SILO_OBSERVER_SESSION_REGISTERED:-}}\" ] || return 0\n\
-    _silo_observer_emit --kind shell_session_exited --session \"$ZMX_SESSION\"\n\
+    [ -n \"${{SILO_AGENT_SESSION_REGISTERED:-}}\" ] || return 0\n\
+    _silo_agent_emit --kind shell_session_exited --session \"$ZMX_SESSION\"\n\
   }}\n\
-  trap _silo_observer_bash_preexec DEBUG\n\
+  trap _silo_agent_bash_preexec DEBUG\n\
   case \";${{PROMPT_COMMAND:-}};\" in\n\
-    *\";_silo_observer_bash_precmd;\"*) ;;\n\
-    *) PROMPT_COMMAND=\"_silo_observer_bash_precmd${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}\" ;;\n\
+    *\";_silo_agent_bash_precmd;\"*) ;;\n\
+    *) PROMPT_COMMAND=\"_silo_agent_bash_precmd${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}\" ;;\n\
   esac\n\
-  trap _silo_observer_bash_exit EXIT\n\
+  trap _silo_agent_bash_exit EXIT\n\
 fi\n",
-        observer_bin = shell_quote(REMOTE_WORKSPACE_OBSERVER_BIN),
+        agent_bin = shell_quote(REMOTE_WORKSPACE_AGENT_BIN),
     )
 }
 
@@ -1077,13 +1077,13 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn workspace_observer_shell_script_emits_shell_session_lifecycle_events() {
-        let script = workspace_observer_shell_script();
+    fn workspace_agent_shell_script_emits_shell_session_lifecycle_events() {
+        let script = workspace_agent_shell_script();
 
         assert!(script.contains("--kind shell_session_started"));
         assert!(script.contains("--kind shell_session_exited"));
-        assert!(script.contains("SILO_OBSERVER_SESSION_REGISTERED"));
-        assert!(script.contains("add-zsh-hook zshexit _silo_observer_zshexit"));
+        assert!(script.contains("SILO_AGENT_SESSION_REGISTERED"));
+        assert!(script.contains("add-zsh-hook zshexit _silo_agent_zshexit"));
     }
 
     #[test]
