@@ -1,12 +1,12 @@
 use crate::browser_loopback::BrowserLoopbackManager;
 use crate::router::RouterManager;
 use crate::state::{
-    browser_session_metadata_key, WorkspaceMetadataEntry, WorkspaceMetadataManager,
-    BROWSER_LAST_ACTIVE_METADATA_KEY,
+    active_session_metadata_entries, browser_session_metadata_key, WorkspaceMetadataEntry,
+    WorkspaceMetadataManager, BROWSER_LAST_ACTIVE_METADATA_KEY,
 };
 use crate::terminal;
 use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
-use crate::AppRuntime;
+use crate::{emit_workspace_state_changed, AppRuntime};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -233,44 +233,43 @@ pub fn browser_detach_tab(
 }
 
 #[tauri::command]
-pub async fn browser_kill_tab(
+pub fn browser_kill_tab(
     app: AppHandle<AppRuntime>,
     state: State<'_, BrowserManager>,
     metadata: State<'_, WorkspaceMetadataManager>,
     workspace: String,
     attachment_id: String,
 ) -> Result<BrowserKillResult, String> {
+    let _ = state.close_webview(&app, &workspace, &attachment_id)?;
     let _ = state.remove_cached_session(&workspace, &attachment_id)?;
-    enqueue_browser_metadata_remove(metadata.inner(), &workspace, None, &attachment_id);
-    let lookup = workspaces::find_workspace(&workspace).await?;
     let cached_sessions = state.cache_sessions_for_workspace(&workspace)?;
-    let remaining_sessions = if cached_sessions.is_empty() {
-        lookup
-            .workspace
-            .browsers()
-            .iter()
-            .filter(|session| session.attachment_id != attachment_id)
-            .cloned()
-            .collect::<Vec<_>>()
-    } else {
-        cached_sessions
-    };
+    let remaining_sessions = cached_sessions;
+    enqueue_browser_metadata_remove(metadata.inner(), &workspace, None, &attachment_id);
     if metadata.clear_active_workspace_session_if_matches(
         &workspace,
-        "browser",
+        BROWSER_KIND,
         &attachment_id,
-        lookup.workspace.active_session(),
+        None,
     ) {
-        metadata.enqueue(
-            &workspace,
-            Some(lookup.clone()),
-            crate::state::active_session_metadata_entries(None),
-        );
+        metadata.enqueue(&workspace, None, active_session_metadata_entries(None));
     }
-    state
-        .loopback_router
-        .release_unused_workspace_routes(&workspace, &remaining_sessions)?;
-    let _ = state.close_webview(&app, &workspace, &attachment_id)?;
+    emit_workspace_state_changed(&app, &workspace);
+
+    let manager = state.inner().clone();
+    let workspace_for_cleanup = workspace.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = manager
+            .loopback_router
+            .release_unused_workspace_routes(&workspace_for_cleanup, &remaining_sessions)
+        {
+            log::warn!(
+                "failed to release browser routes for workspace {} after close: {}",
+                workspace_for_cleanup,
+                error
+            );
+        }
+    });
+
     Ok(BrowserKillResult { killed: true })
 }
 
