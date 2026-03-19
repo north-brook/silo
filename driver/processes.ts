@@ -68,10 +68,15 @@ export function isPidRunning(pid: number | null | undefined) {
 	}
 }
 
-export async function stopProcessByPid(pid: number | null | undefined) {
+export async function stopProcessByPid(
+	pid: number | null | undefined,
+	options: { gracefulWaitMs?: number } = {},
+) {
 	if (!pid || !isPidRunning(pid)) {
 		return;
 	}
+
+	const gracefulWaitMs = options.gracefulWaitMs ?? 2_000;
 
 	if (process.platform === "win32") {
 		try {
@@ -88,7 +93,7 @@ export async function stopProcessByPid(pid: number | null | undefined) {
 		} catch {}
 	}
 
-	await sleep(2_000);
+	await sleep(gracefulWaitMs);
 
 	if (!isPidRunning(pid)) {
 		return;
