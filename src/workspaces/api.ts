@@ -1,5 +1,25 @@
 import { invoke } from "@/shared/lib/invoke";
 
+export type WorkspaceLifecyclePhase =
+	| "provisioning"
+	| "waiting_for_ssh"
+	| "bootstrapping"
+	| "waiting_for_observer"
+	| "ready"
+	| "stopping"
+	| "suspending"
+	| "suspended"
+	| "stopped"
+	| "failed"
+	| string;
+
+export interface WorkspaceLifecycle {
+	phase: WorkspaceLifecyclePhase;
+	detail?: string | null;
+	last_error?: string | null;
+	updated_at?: string | null;
+}
+
 export interface WorkspaceBase {
 	name: string;
 	project: string | null;
@@ -8,7 +28,7 @@ export interface WorkspaceBase {
 	created_at: string;
 	status: string;
 	zone: string;
-	ready: boolean;
+	lifecycle: WorkspaceLifecycle;
 }
 
 export interface WorkspaceActiveSession {
@@ -67,6 +87,46 @@ export function workspaceLabel(workspace: Workspace): string {
 	}
 
 	return workspace.branch || workspace.name;
+}
+
+export function workspaceIsReady(workspace: Workspace): boolean {
+	return workspace.status === "RUNNING" && workspace.lifecycle.phase === "ready";
+}
+
+export function workspaceLifecycleLabel(workspace: Workspace): string {
+	const { phase } = workspace.lifecycle;
+	switch (phase) {
+		case "provisioning":
+			return "Provisioning workspace...";
+		case "waiting_for_ssh":
+			return "Waiting for SSH...";
+		case "bootstrapping":
+			return "Preparing workspace...";
+		case "waiting_for_observer":
+			return "Starting workspace services...";
+		case "failed":
+			return "Workspace startup failed";
+		case "stopping":
+			return "Stopping workspace...";
+		case "suspending":
+			return "Suspending workspace...";
+		case "suspended":
+			return "Suspended";
+		case "stopped":
+			return "Stopped";
+		case "ready":
+			return "working" in workspace && workspace.working ? "Working" : "Running";
+		default:
+			return phase.charAt(0).toUpperCase() + phase.slice(1).replace(/_/g, " ");
+	}
+}
+
+export function workspaceLifecycleMessage(workspace: Workspace): string {
+	return (
+		workspace.lifecycle.detail ??
+		workspace.lifecycle.last_error ??
+		workspaceLifecycleLabel(workspace)
+	);
 }
 
 export function workspaceSessions(workspace: Workspace): WorkspaceSession[] {
