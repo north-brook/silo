@@ -2,7 +2,11 @@ import { appendFileSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { BrowserContext, Locator, Page } from "@playwright/test";
 import { readAppServiceStatuses, readAppStatus, waitForAppReady } from "./app";
-import { defaultSourceStateDir, traceHistoryLogPath } from "./paths";
+import {
+	defaultSourceStateDir,
+	traceDirFor,
+	traceHistoryLogPath,
+} from "./paths";
 import { isPidRunning } from "./processes";
 import {
 	connectToDriverSession,
@@ -1307,6 +1311,59 @@ const commandDefinitions: Record<string, CommandDefinition> = {
 			} finally {
 				await disconnectFromDriverSession(connected);
 			}
+		},
+	},
+	"video.status": {
+		summary: "Report the current session's trace video paths and file status.",
+		usage: [
+			"bun run driver -- video.status",
+			"bun run driver -- video.status --session <id>",
+		],
+		examples: [
+			"bun run driver -- video.status",
+			"bun run driver -- video.status --session trace-smoke",
+			"bun run driver -- video.status --trace-id trace-smoke",
+		],
+		async handler(args) {
+			const sessionId =
+				typeof flag(args, "session") === "string"
+					? (flag(args, "session") as string)
+					: undefined;
+			const traceId =
+				typeof flag(args, "trace-id") === "string"
+					? (flag(args, "trace-id") as string)
+					: undefined;
+			const sourceStateDir =
+				typeof flag(args, "source-state-dir") === "string"
+					? (flag(args, "source-state-dir") as string)
+					: defaultSourceStateDir;
+			const session = sessionId ? resolveSessionRecord(sessionId) : undefined;
+			const resolvedTraceId = traceId ?? session?.traceId;
+			if (!resolvedTraceId) {
+				throw new CliError("Provide either --session or --trace-id.", {
+					command: "video.status",
+				});
+			}
+
+			const traceDir = session?.traceDir ?? traceDirFor(sourceStateDir, resolvedTraceId);
+			const videoMetadataPath = session?.videoMetadataPath
+				?? path.join(traceDir, "video-metadata.json");
+			const videoPath = session?.videoPath ?? path.join(traceDir, "video.mp4");
+			const metadataExists = existsSync(videoMetadataPath);
+			const videoExists = existsSync(videoPath);
+			const metadata = metadataExists
+				? JSON.parse(readFileSync(videoMetadataPath, "utf8"))
+				: null;
+			return {
+				sessionId: session?.id ?? null,
+				traceId: resolvedTraceId,
+				videoExists,
+				videoMetadataExists: metadataExists,
+				videoMetadataPath,
+				videoPath,
+				videoRecorderPid: session?.videoRecorderPid ?? null,
+				metadata,
+			};
 		},
 	},
 	"app.wait-ready": {
