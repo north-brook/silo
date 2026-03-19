@@ -15,10 +15,15 @@ export type DriverSessionRecord = {
 	tauriStderrPath: string;
 	viteStdoutPath: string | null;
 	viteStderrPath: string | null;
+	videoPath: string;
+	videoMetadataPath: string;
+	videoStdoutPath: string;
+	videoStderrPath: string;
 	cdpPort: number;
 	cdpUrl: string;
 	tauriPid: number;
 	vitePid: number | null;
+	videoRecorderPid: number | null;
 	initialSiloPids: number[];
 	platform: NodeJS.Platform;
 };
