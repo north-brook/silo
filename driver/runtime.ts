@@ -70,11 +70,16 @@ function writeTraceManifest(session: DriverSessionRecord) {
 				tauriPid: session.tauriPid,
 				tauriStderrPath: session.tauriStderrPath,
 				tauriStdoutPath: session.tauriStdoutPath,
-				traceDir: session.traceDir,
-				traceId: session.traceId,
-				vitePid: session.vitePid,
-				viteStderrPath: session.viteStderrPath,
-				viteStdoutPath: session.viteStdoutPath,
+			traceDir: session.traceDir,
+			traceId: session.traceId,
+			videoMetadataPath: session.videoMetadataPath,
+			videoPath: session.videoPath,
+			videoRecorderPid: session.videoRecorderPid,
+			videoStderrPath: session.videoStderrPath,
+			videoStdoutPath: session.videoStdoutPath,
+			vitePid: session.vitePid,
+			viteStderrPath: session.viteStderrPath,
+			viteStdoutPath: session.viteStdoutPath,
 			},
 			null,
 			2,
@@ -173,6 +178,39 @@ async function connectWithCdp(session: DriverSessionRecord) {
 	return { browser, context, page };
 }
 
+function spawnVideoRecorder(session: DriverSessionRecord) {
+	const stdoutFd = openSync(session.videoStdoutPath, "a");
+	const stderrFd = openSync(session.videoStderrPath, "a");
+	const recorder = spawn(
+		bunCommand,
+		[
+			"x",
+			"tsx",
+			"driver/recorder.ts",
+			"--cdp-url",
+			session.cdpUrl,
+			"--output",
+			session.videoPath,
+			"--frames-dir",
+			path.join(session.traceDir, "video-frames"),
+			"--metadata-path",
+			session.videoMetadataPath,
+			"--fps",
+			"12",
+		],
+		{
+			cwd: repoRoot,
+			detached: process.platform !== "win32",
+			env: process.env,
+			stdio: ["ignore", stdoutFd, stderrFd],
+		},
+	);
+	closeSync(stdoutFd);
+	closeSync(stderrFd);
+	recorder.unref();
+	return recorder.pid ?? null;
+}
+
 export async function launchDriverSession(
 	options: LaunchSessionOptions = {},
 ): Promise<LaunchedDriverSession> {
@@ -212,6 +250,10 @@ export async function launchDriverSession(
 	const manifestPath = path.join(traceDir, "manifest.json");
 	const driverLogPath = path.join(traceDir, "driver.jsonl");
 	const appLogPath = path.join(traceDir, "app.log");
+	const videoPath = path.join(traceDir, "video.mp4");
+	const videoMetadataPath = path.join(traceDir, "video-metadata.json");
+	const videoStdoutPath = path.join(traceDir, "video.stdout.log");
+	const videoStderrPath = path.join(traceDir, "video.stderr.log");
 	const tauriStdoutFd = openSync(tauriStdoutPath, "a");
 	const tauriStderrFd = openSync(tauriStderrPath, "a");
 	const tauriProcess = spawn(
@@ -252,6 +294,11 @@ export async function launchDriverSession(
 		tauriStdoutPath,
 		traceDir,
 		traceId,
+		videoMetadataPath,
+		videoPath,
+		videoRecorderPid: null,
+		videoStderrPath,
+		videoStdoutPath,
 		vitePid: viteProcess?.pid ?? null,
 		viteStderrPath,
 		viteStdoutPath,
@@ -261,6 +308,8 @@ export async function launchDriverSession(
 	try {
 		await waitForCdpReady(cdpUrl);
 		const { browser, context, page } = await connectWithCdp(session);
+		session.videoRecorderPid = spawnVideoRecorder(session);
+		writeTraceManifest(session);
 		return { session, browser, context, page };
 	} catch (error) {
 		await stopLaunchedSession(session);
@@ -285,6 +334,7 @@ export async function disconnectFromDriverSession(connection: {
 }
 
 export async function stopLaunchedSession(session: DriverSessionRecord) {
+	await stopProcessByPid(session.videoRecorderPid, { gracefulWaitMs: 15_000 });
 	await stopProcessByPid(session.tauriPid);
 	if (session.vitePid) {
 		await stopProcessByPid(session.vitePid);
