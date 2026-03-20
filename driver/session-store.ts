@@ -50,17 +50,17 @@ export function listSessionRecords() {
 		.map(({ session }) => session);
 }
 
-export function resolveSessionRecord(id?: string) {
-	if (id) {
-		return readSessionRecord(id);
-	}
-
+export function latestSessionRecord() {
 	const [latest] = listSessionRecords();
 	if (!latest) {
 		throw new Error(
-			"No driver sessions found. Run `bun run driver -- launch` first.",
+			"No driver sessions found. Run `bun run driver -- session launch` first.",
 		);
 	}
 
 	return latest;
+}
+
+export function resolveSessionRecord(id: string) {
+	return id === "latest" ? latestSessionRecord() : readSessionRecord(id);
 }
