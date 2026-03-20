@@ -132,6 +132,33 @@ export function PromptWorkspace({
 			});
 		},
 	});
+	const createBrowser = useMutation({
+		mutationFn: () =>
+			invoke<{ attachment_id: string }>("browser_create_tab", {
+				workspace,
+			}),
+		onSuccess: (result) => {
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_get_workspace", workspace],
+			});
+			navigate(
+				workspaceSessionHref({
+					project: project ?? "",
+					workspace,
+					kind: "browser",
+					attachmentId: result.attachment_id,
+				}),
+				{ state: { fresh: true } satisfies SessionRouteState },
+			);
+		},
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to create browser",
+				description: error.message,
+			});
+		},
+	});
 	const submitPrompt = useMutation({
 		mutationFn: () => submitWorkspacePrompt(workspace, prompt, provider.id),
 		onSuccess: (result) => {
@@ -287,9 +314,11 @@ export function PromptWorkspace({
 						</button>
 						<button
 							type="button"
+							disabled={createBrowser.isPending}
+							onClick={() => createBrowser.mutate()}
 							className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-text-muted hover:text-text transition-colors"
 						>
-							<Globe size={12} />
+							{createBrowser.isPending ? <Loader /> : <Globe size={12} />}
 							Open Browser
 						</button>
 					</div>
