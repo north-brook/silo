@@ -36,6 +36,7 @@ pub(crate) const TEMPLATE_OPERATION_KIND_LABEL_KEY: &str = "template-operation-k
 pub(crate) const TEMPLATE_OPERATION_PHASE_LABEL_KEY: &str = "template-operation-phase";
 pub(crate) const TEMPLATE_OPERATION_ID_LABEL_KEY: &str = "template-operation-id";
 const STARTUP_FAILURE_RETRY_COOLDOWN: Duration = Duration::from_secs(15);
+const WORKSPACE_AGENT_HEARTBEAT_STALE_AFTER_SECS: i64 = 45;
 const METADATA_DELIMITER_CANDIDATES: &[&str] = &["|", ";", "#", "@@", "SILO_METADATA_DELIM"];
 const MAX_WORKSPACE_METADATA_VALUE_LEN: usize = 512;
 
@@ -2081,8 +2082,8 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
     let last_active = resolve_workspace_last_active(&metadata);
     let last_working = resolve_workspace_last_working(&metadata);
     let active_session = resolve_workspace_active_session(&metadata);
-    let lifecycle = resolve_workspace_lifecycle(&status, &metadata);
     let agent_heartbeat_at = resolve_workspace_agent_heartbeat(&metadata);
+    let lifecycle = resolve_workspace_lifecycle(&status, &metadata, agent_heartbeat_at.as_deref());
 
     let base = WorkspaceBase {
         name,
@@ -2309,6 +2310,7 @@ fn resolve_workspace_last_working(metadata: &HashMap<String, String>) -> Option<
 fn resolve_workspace_lifecycle(
     status: &str,
     metadata: &HashMap<String, String>,
+    agent_heartbeat_at: Option<&str>,
 ) -> WorkspaceLifecycle {
     let phase = metadata
         .get(WORKSPACE_LIFECYCLE_PHASE_METADATA_KEY)
@@ -2326,6 +2328,13 @@ fn resolve_workspace_lifecycle(
         .cloned()
         .filter(|value| !value.trim().is_empty());
 
+    if status == "RUNNING"
+        && phase.as_deref() == Some("waiting_for_agent")
+        && agent_heartbeat_is_fresh(agent_heartbeat_at)
+    {
+        return WorkspaceLifecycle::new("ready", None, None, updated_at);
+    }
+
     lifecycle_for_status(status, phase, detail, last_error).with_updated_at(updated_at)
 }
 
@@ -2334,6 +2343,18 @@ fn resolve_workspace_agent_heartbeat(metadata: &HashMap<String, String>) -> Opti
         .get(WORKSPACE_AGENT_HEARTBEAT_METADATA_KEY)
         .cloned()
         .filter(|value| !value.trim().is_empty())
+}
+
+fn agent_heartbeat_is_fresh(heartbeat_at: Option<&str>) -> bool {
+    let Some(heartbeat_at) = heartbeat_at else {
+        return false;
+    };
+    let Ok(heartbeat_at) = OffsetDateTime::parse(heartbeat_at, &Rfc3339) else {
+        return false;
+    };
+
+    OffsetDateTime::now_utc() - heartbeat_at
+        <= time::Duration::seconds(WORKSPACE_AGENT_HEARTBEAT_STALE_AFTER_SECS)
 }
 
 fn resolve_template_operation(
@@ -3140,6 +3161,63 @@ mod tests {
 
         assert_eq!(detail, "Workspace startup failed retrying");
         assert_eq!(error, "line 1 line 2");
+    }
+
+    #[test]
+    fn resolve_workspace_lifecycle_treats_waiting_for_agent_with_fresh_heartbeat_as_ready() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            WORKSPACE_LIFECYCLE_PHASE_METADATA_KEY.to_string(),
+            "waiting_for_agent".to_string(),
+        );
+        metadata.insert(
+            WORKSPACE_AGENT_HEARTBEAT_METADATA_KEY.to_string(),
+            (OffsetDateTime::now_utc() - time::Duration::seconds(10))
+                .format(&Rfc3339)
+                .expect("heartbeat timestamp should format"),
+        );
+
+        let lifecycle = resolve_workspace_lifecycle(
+            "RUNNING",
+            &metadata,
+            metadata
+                .get(WORKSPACE_AGENT_HEARTBEAT_METADATA_KEY)
+                .map(String::as_str),
+        );
+
+        assert!(lifecycle.is_ready());
+        assert_eq!(lifecycle.phase(), "ready");
+        assert_eq!(lifecycle.detail(), None);
+    }
+
+    #[test]
+    fn resolve_workspace_lifecycle_keeps_waiting_for_agent_with_stale_heartbeat() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            WORKSPACE_LIFECYCLE_PHASE_METADATA_KEY.to_string(),
+            "waiting_for_agent".to_string(),
+        );
+        metadata.insert(
+            WORKSPACE_AGENT_HEARTBEAT_METADATA_KEY.to_string(),
+            (OffsetDateTime::now_utc()
+                - time::Duration::seconds(WORKSPACE_AGENT_HEARTBEAT_STALE_AFTER_SECS + 1))
+            .format(&Rfc3339)
+            .expect("heartbeat timestamp should format"),
+        );
+
+        let lifecycle = resolve_workspace_lifecycle(
+            "RUNNING",
+            &metadata,
+            metadata
+                .get(WORKSPACE_AGENT_HEARTBEAT_METADATA_KEY)
+                .map(String::as_str),
+        );
+
+        assert_eq!(lifecycle.phase(), "waiting_for_agent");
+        assert_eq!(
+            lifecycle.detail(),
+            Some("Waiting for workspace services to come online")
+        );
     }
 
     #[test]
