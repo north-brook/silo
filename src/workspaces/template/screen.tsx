@@ -6,7 +6,7 @@ import { ClaudeIcon } from "@/shared/ui/icons/claude";
 import { CodexIcon } from "@/shared/ui/icons/codex";
 import { GCloudIcon } from "@/shared/ui/icons/gcloud";
 import { GHIcon } from "@/shared/ui/icons/gh";
-import { SiloIcon } from "@/shared/ui/icons/silo";
+import { LogoIcon } from "@/shared/ui/icons/logo";
 import { Loader } from "@/shared/ui/loader";
 import { toast } from "@/shared/ui/toaster";
 import { invoke } from "@/shared/lib/invoke";
@@ -186,11 +186,38 @@ export function TemplatingWorkspace({
 			});
 		},
 	});
+	const createBrowser = useMutation({
+		mutationFn: () =>
+			invoke<{ attachment_id: string }>("browser_create_tab", {
+				workspace,
+			}),
+		onSuccess: (result) => {
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_get_workspace", workspace],
+			});
+			navigate(
+				workspaceSessionHref({
+					project: project ?? "",
+					workspace,
+					kind: "browser",
+					attachmentId: result.attachment_id,
+				}),
+				{ state: { fresh: true } satisfies SessionRouteState },
+			);
+		},
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to create browser",
+				description: error.message,
+			});
+		},
+	});
 
 	return (
 		<div className="flex-1 flex flex-col items-center justify-center p-6">
 			<div className="flex flex-col items-center gap-5">
-				<SiloIcon height={24} className="opacity-40" />
+				<LogoIcon height={24} className="opacity-40" />
 
 				{!allDone && (
 					<div className="flex flex-col gap-1.5">
@@ -219,9 +246,11 @@ export function TemplatingWorkspace({
 						</button>
 						<button
 							type="button"
+							disabled={createBrowser.isPending}
+							onClick={() => createBrowser.mutate()}
 							className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-text-muted hover:text-text transition-colors"
 						>
-							<Globe size={12} />
+							{createBrowser.isPending ? <Loader /> : <Globe size={12} />}
 							Open Browser
 						</button>
 					</div>
