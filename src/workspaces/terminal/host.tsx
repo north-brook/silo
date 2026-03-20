@@ -14,6 +14,7 @@ import {
 	isRetryableTerminalTransportMessage,
 	reconnectDelayMs,
 } from "./reconnect";
+import { assistantTerminalModel } from "./session";
 
 const DELETE_BYTE = 0x7f;
 const BACKSPACE_ERASE_SEQUENCE = [0x08, 0x20, 0x08];
@@ -162,6 +163,7 @@ export function TerminalSessionHost({
 	const attachQueuedRef = useRef(false);
 	const attachSizeRef = useRef<TerminalSize | null>(null);
 	const retryNonceRef = useRef(retryNonce);
+	const isAssistantSessionRef = useRef(assistantTerminalModel(session.name) != null);
 	const [isMountReady, setIsMountReady] = useState(false);
 	const [attachNonce, setAttachNonce] = useState(0);
 	const isPageForeground = usePageIsForeground();
@@ -169,6 +171,10 @@ export function TerminalSessionHost({
 	useEffect(() => {
 		visibleRef.current = visible;
 	}, [visible]);
+
+	useEffect(() => {
+		isAssistantSessionRef.current = assistantTerminalModel(session.name) != null;
+	}, [session.name]);
 
 	const clearReconnectTimer = useCallback(() => {
 		if (reconnectTimeoutRef.current !== null) {
@@ -399,7 +405,9 @@ export function TerminalSessionHost({
 				data: Array.from(bytes),
 			});
 		};
-		const detachBindings = attachTerminalBindings(term, sendTerminalInput);
+		const detachBindings = attachTerminalBindings(term, sendTerminalInput, {
+			isAssistantSession: () => isAssistantSessionRef.current,
+		});
 
 		term.onData((data) => {
 			sendTerminalInput(data);

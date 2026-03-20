@@ -12,7 +12,19 @@ function event(overrides: Partial<KeyboardEvent> & { key: string }) {
 }
 
 describe("sequenceForEvent", () => {
-	test("maps shift-enter to a literal newline", () => {
+	test("maps shift-enter to the assistant soft-newline escape", () => {
+		expect(
+			sequenceForEvent(
+				event({
+					key: "Enter",
+					shiftKey: true,
+				}),
+				{ isAssistantSession: true },
+			),
+		).toBe("\u001b[13;2u");
+	});
+
+	test("leaves shift-enter alone for non-assistant terminals", () => {
 		expect(
 			sequenceForEvent(
 				event({
@@ -20,7 +32,7 @@ describe("sequenceForEvent", () => {
 					shiftKey: true,
 				}),
 			),
-		).toBe("\n");
+		).toBeNull();
 	});
 
 	test("maps command-backspace to kill to start of line", () => {

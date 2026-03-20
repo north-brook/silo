@@ -5,7 +5,7 @@ const COMMAND_RIGHT = "\u0005";
 const COMMAND_BACKSPACE = "\u0015";
 const ALT_LEFT = "\u001bb";
 const ALT_RIGHT = "\u001bf";
-const SHIFT_ENTER = "\n";
+const ASSISTANT_SOFT_NEWLINE = "\u001b[13;2u";
 
 interface TerminalBindingEvent {
 	altKey: boolean;
@@ -16,20 +16,32 @@ interface TerminalBindingEvent {
 	shiftKey: boolean;
 }
 
+interface TerminalBindingOptions {
+	isAssistantSession?: boolean | (() => boolean);
+}
+
 function matchesKey(event: TerminalBindingEvent, expected: string) {
 	return event.key === expected || event.code === expected;
+}
+
+function isAssistantSession(options?: TerminalBindingOptions) {
+	if (typeof options?.isAssistantSession === "function") {
+		return options.isAssistantSession();
+	}
+	return options?.isAssistantSession === true;
 }
 
 export function attachTerminalBindings(
 	term: Terminal,
 	sendData: (data: string) => void,
+	options?: TerminalBindingOptions,
 ) {
 	term.attachCustomKeyEventHandler((event) => {
 		if (event.type !== "keydown") {
 			return true;
 		}
 
-		const sequence = sequenceForEvent(event);
+		const sequence = sequenceForEvent(event, options);
 		if (!sequence) {
 			return true;
 		}
@@ -44,7 +56,10 @@ export function attachTerminalBindings(
 	};
 }
 
-export function sequenceForEvent(event: TerminalBindingEvent): string | null {
+export function sequenceForEvent(
+	event: TerminalBindingEvent,
+	options?: TerminalBindingOptions,
+): string | null {
 	if (
 		event.shiftKey &&
 		!event.metaKey &&
@@ -52,7 +67,7 @@ export function sequenceForEvent(event: TerminalBindingEvent): string | null {
 		!event.ctrlKey &&
 		matchesKey(event, "Enter")
 	) {
-		return SHIFT_ENTER;
+		return isAssistantSession(options) ? ASSISTANT_SOFT_NEWLINE : null;
 	}
 
 	if (event.metaKey && !event.altKey && !event.ctrlKey) {
