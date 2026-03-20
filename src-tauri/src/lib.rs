@@ -348,7 +348,7 @@ pub fn run() {
                     MENU_ID_TOGGLE_GIT_BAR,
                     "Toggle Git Bar",
                     true,
-                    Some("CmdOrCtrl+Shift+B"),
+                    Some("CmdOrCtrl+Alt+B"),
                 )?;
                 let open_git_diff = MenuItem::with_id(
                     handle,

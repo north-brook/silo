@@ -236,7 +236,7 @@ export function GitSidebarHeader() {
 						</button>
 					</TooltipTrigger>
 					<TooltipContent side="bottom">
-						<HotkeyHint keys={["⌘", "⇧", "B"]}>
+						<HotkeyHint keys={["⌘", "⌥", "B"]}>
 							Toggle Git Sidebar
 						</HotkeyHint>
 					</TooltipContent>

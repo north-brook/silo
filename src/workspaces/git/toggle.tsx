@@ -35,7 +35,7 @@ export function GitSidebarToggle() {
 							⌘
 						</kbd>
 						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
-							⇧
+							⌥
 						</kbd>
 						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
 							B

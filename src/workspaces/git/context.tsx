@@ -106,7 +106,7 @@ export function GitSidebarProvider({ children }: { children: ReactNode }) {
 			setIsOpen((open) => !open);
 		},
 		onKeyDown: (e) => {
-			if (e.metaKey && e.shiftKey && e.key === "b") {
+			if (e.metaKey && e.altKey && !e.shiftKey && e.key.toLowerCase() === "b") {
 				e.preventDefault();
 				setIsOpen((open) => !open);
 			}
