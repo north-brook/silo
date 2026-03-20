@@ -99,12 +99,12 @@ Use the repo-local `driver/` CLI when you need programmatic verification against
 
 - Prefer `bun run driver -- ...` for interactive inspection, scripted verification, and coding-agent automation against the live CEF app
 - Use it to verify the actual rendered UI and app state before and after changes instead of reasoning only from source
-- Start with read-heavy commands such as `help`, `history`, `status`, `app.status`, `app.service-status`, `video.status`, `snapshot`, `text`, `attr`, `exists`, and `count`
-- Use write commands such as `click`, `type`, `press`, and `wait-for` to drive a real workflow when inspection alone is not enough
+- Start with read-heavy commands such as `help`, `schema`, `history`, `session status`, `app status`, `app service-status`, `video status`, `page snapshot`, `element text`, `element attr`, `element exists`, and `element count`
+- Use write commands such as `element click`, `element type`, `page press`, and `element wait` to drive a real workflow when inspection alone is not enough
 - Prefer the higher-level app commands when they exist; use lower-level selector-driven commands as the escape hatch
 - Use explicit `--id` values when you want a stable trace name under `~/.silo/traces/`
-- Keep sessions explicit and clean them up when finished with `bun run driver -- close`
-- Driver-launched sessions record `video.mp4` automatically and finalize it on `bun run driver -- close`
+- Keep sessions explicit and clean them up when finished with `bun run driver -- session close --session <id>`
+- Driver-launched sessions record `video.mp4` automatically and finalize it on `bun run driver -- session close --session <id>`
 - If a command fails, read the stderr help text first, then inspect the JSON error payload and the matching trace bundle
 
 The driver is intended to make programmatic verification cheap and routine. Use it to confirm behavior in the running app, not just to automate tests.
