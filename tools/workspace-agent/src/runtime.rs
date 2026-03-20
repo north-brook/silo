@@ -1,6 +1,7 @@
 use std::ffi::CString;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, BufRead};
+use std::os::fd::FromRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -98,8 +99,8 @@ pub(crate) fn ensure_fifo(path: &Path) -> Result<(), String> {
 
 pub(crate) fn spawn_fifo_reader(path: PathBuf, tx: Sender<ObserverEvent>) {
     thread::spawn(move || loop {
-        let file = match OpenOptions::new().read(true).write(true).open(&path) {
-            Ok(file) => file,
+        let (file, _keepalive_writer) = match open_fifo_reader(&path) {
+            Ok(handles) => handles,
             Err(_) => {
                 thread::sleep(Duration::from_millis(250));
                 continue;
@@ -125,6 +126,52 @@ pub(crate) fn spawn_fifo_reader(path: PathBuf, tx: Sender<ObserverEvent>) {
             }
         }
     });
+}
+
+fn open_fifo_reader(path: &Path) -> io::Result<(File, File)> {
+    let path_cstring = CString::new(path.to_string_lossy().as_bytes())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+
+    let read_fd = unsafe { libc::open(path_cstring.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
+    if read_fd == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let keepalive_fd =
+        unsafe { libc::open(path_cstring.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK) };
+    if keepalive_fd == -1 {
+        let error = io::Error::last_os_error();
+        unsafe {
+            libc::close(read_fd);
+        }
+        return Err(error);
+    }
+
+    if let Err(error) = clear_nonblocking(read_fd) {
+        unsafe {
+            libc::close(read_fd);
+            libc::close(keepalive_fd);
+        }
+        return Err(error);
+    }
+
+    let reader = unsafe { File::from_raw_fd(read_fd) };
+    let keepalive = unsafe { File::from_raw_fd(keepalive_fd) };
+    Ok((reader, keepalive))
+}
+
+fn clear_nonblocking(fd: i32) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(())
 }
 
 pub(crate) fn send_event(path: &Path, event: &ObserverEvent) -> Result<(), String> {
@@ -176,4 +223,57 @@ pub(crate) fn acquire_pidfile(path: &Path) -> Result<bool, String> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
         .map_err(|error| format!("failed to set pidfile permissions: {error}"))?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::BufReader;
+    use std::os::unix::fs::FileTypeExt;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn fifo_reader_allows_nonblocking_writers() {
+        let path = fifo_test_path("events");
+        create_fifo(&path);
+
+        let (reader, _keepalive) = open_fifo_reader(&path).expect("reader should open");
+        assert!(path.metadata().expect("fifo metadata").file_type().is_fifo());
+
+        send_event(
+            &path,
+            &ObserverEvent::MarkRead {
+                session: "demo".to_string(),
+            },
+        )
+        .expect("writer should connect");
+
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("reader should receive payload");
+        assert!(line.contains("\"mark_read\""));
+        assert!(line.contains("\"demo\""));
+
+        fs::remove_file(&path).expect("cleanup fifo");
+    }
+
+    fn fifo_test_path(suffix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be usable in tests")
+            .as_nanos();
+        std::env::temp_dir().join(format!("workspace-agent-{suffix}-{unique}.fifo"))
+    }
+
+    fn create_fifo(path: &Path) {
+        let path_cstring = CString::new(path.to_string_lossy().as_bytes())
+            .expect("fifo path should be valid");
+        let result = unsafe { libc::mkfifo(path_cstring.as_ptr(), FIFO_MODE as libc::mode_t) };
+        assert_eq!(
+            result,
+            0,
+            "mkfifo should succeed: {}",
+            io::Error::last_os_error()
+        );
+    }
 }
