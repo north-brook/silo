@@ -43,6 +43,7 @@ import {
 	useWorkspaceSessions,
 	useWorkspaceState,
 } from "@/workspaces/state";
+import { assistantTerminalModel } from "@/workspaces/terminal/session";
 
 export function WorkspaceShell() {
 	const { project, workspaceName } = useWorkspaceRouteParams();
@@ -65,20 +66,14 @@ export function WorkspaceShell() {
 
 function terminalTabPresentation(name: string) {
 	const trimmed = name.trim();
-	const lower = trimmed.toLowerCase();
-	const [token, ...rest] = trimmed.split(/\s+/);
-	const normalizedToken = token?.toLowerCase() ?? "";
-	const normalizedAssistant =
-		normalizedToken === "silo"
-			? (rest[0]?.toLowerCase() ?? "")
-			: normalizedToken;
-	if (normalizedAssistant === "cc" || normalizedAssistant === "claude") {
+	const assistant = assistantTerminalModel(name);
+	if (assistant === "claude") {
 		return {
 			icon: <ClaudeIcon height={12} />,
 			label: "claude",
 		};
 	}
-	if (normalizedAssistant === "codex" || lower.startsWith("command codex")) {
+	if (assistant === "codex") {
 		return {
 			icon: <CodexIcon height={12} />,
 			label: "codex",
