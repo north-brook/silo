@@ -434,6 +434,27 @@ pub(crate) fn overlay_workspace_sessions(
     }
 }
 
+pub(crate) fn replace_workspace_terminals(
+    workspace: Workspace,
+    terminals: Vec<WorkspaceSession>,
+) -> Workspace {
+    let mut overlay = HashMap::new();
+    for session in workspace.terminals() {
+        overlay.insert(
+            workspace_session_key(&session.kind, &session.attachment_id),
+            None,
+        );
+    }
+    for session in terminals {
+        overlay.insert(
+            workspace_session_key(&session.kind, &session.attachment_id),
+            Some(session),
+        );
+    }
+
+    overlay_workspace_sessions(workspace, &overlay)
+}
+
 pub(crate) fn overlay_workspace_active_session(
     workspace: Workspace,
     active_session: Option<WorkspaceActiveSession>,
@@ -702,7 +723,10 @@ pub async fn workspaces_get_workspace(
     workspace: String,
 ) -> Result<Workspace, String> {
     log::trace!("getting workspace {workspace}");
-    let workspace = state.apply_workspace_state(find_workspace(&workspace).await?.workspace);
+    let lookup = find_workspace(&workspace).await?;
+    let terminals = terminal::list_terminals_in_workspace(&lookup).await?;
+    let workspace = replace_workspace_terminals(lookup.workspace, terminals);
+    let workspace = state.apply_workspace_state(workspace);
     bootstrap::start_workspace_startup_reconcile_if_needed(workspace.clone());
     Ok(workspace)
 }
@@ -727,11 +751,13 @@ pub fn workspaces_set_active_session(
     state.set_active_workspace_session(&workspace, active_session.clone());
 
     let mut entries = active_session_metadata_entries(Some(&active_session));
-    if let Some(key) = workspace_last_active_metadata_key(&kind) {
-        entries.push(WorkspaceMetadataEntry {
-            key: key.to_string(),
-            value: Some(current_rfc3339_timestamp()),
-        });
+    if kind != "terminal" {
+        if let Some(key) = workspace_last_active_metadata_key(&kind) {
+            entries.push(WorkspaceMetadataEntry {
+                key: key.to_string(),
+                value: Some(current_rfc3339_timestamp()),
+            });
+        }
     }
     state.enqueue(&workspace, None, entries);
 
@@ -741,6 +767,7 @@ pub fn workspaces_set_active_session(
 #[tauri::command]
 pub async fn workspaces_submit_prompt(
     state: State<'_, terminal::TerminalManager>,
+    workspace_state: State<'_, crate::state::WorkspaceMetadataManager>,
     workspace: String,
     prompt: String,
     model: String,
@@ -754,8 +781,13 @@ pub async fn workspaces_submit_prompt(
 
     let prompt = trim_prompt_input(&prompt)?;
     let command = prompt_command_for_model(&model, &prompt)?;
-    let attachment_id =
-        terminal::start_terminal_command(state.inner(), &workspace, &command).await?;
+    let attachment_id = terminal::start_terminal_command(
+        state.inner(),
+        workspace_state.inner(),
+        &workspace,
+        &command,
+    )
+    .await?;
 
     Ok(terminal::TerminalCreateResult { attachment_id })
 }
@@ -783,16 +815,6 @@ pub(crate) async fn set_workspace_metadata(
 ) -> Result<(), String> {
     let lookup = find_workspace(workspace).await?;
     update_workspace_metadata_in_lookup(lookup, key, value).await
-}
-
-pub(crate) async fn set_workspace_lifecycle(
-    workspace: &str,
-    phase: &str,
-    detail: Option<&str>,
-    last_error: Option<&str>,
-) -> Result<(), String> {
-    let lookup = find_workspace(workspace).await?;
-    set_workspace_lifecycle_in_lookup(lookup, phase, detail, last_error).await
 }
 
 fn trim_prompt_input(prompt: &str) -> Result<String, String> {
@@ -858,19 +880,6 @@ async fn update_workspace_metadata_in_lookup(
     .await
 }
 
-pub(crate) async fn set_workspace_lifecycle_in_lookup(
-    lookup: WorkspaceLookup,
-    phase: &str,
-    detail: Option<&str>,
-    last_error: Option<&str>,
-) -> Result<(), String> {
-    apply_workspace_metadata_entries_in_lookup(
-        lookup,
-        &workspace_lifecycle_metadata_entries(phase, detail, last_error),
-    )
-    .await
-}
-
 pub(crate) fn template_operation_metadata_entries(
     kind: &str,
     phase: &str,
@@ -904,21 +913,6 @@ pub(crate) fn template_operation_metadata_entries(
             value: snapshot_name.map(str::to_string),
         },
     ]
-}
-
-pub(crate) async fn set_template_operation_in_lookup(
-    lookup: WorkspaceLookup,
-    kind: &str,
-    phase: &str,
-    detail: Option<&str>,
-    last_error: Option<&str>,
-    snapshot_name: Option<&str>,
-) -> Result<(), String> {
-    apply_workspace_metadata_entries_in_lookup(
-        lookup,
-        &template_operation_metadata_entries(kind, phase, detail, last_error, snapshot_name),
-    )
-    .await
 }
 
 pub(crate) async fn apply_workspace_metadata_entries_in_lookup(
@@ -3522,6 +3516,94 @@ mod tests {
         let workspace = clear_invalid_workspace_active_session(workspace);
 
         assert_eq!(workspace.active_session(), None);
+    }
+
+    #[test]
+    fn replace_workspace_terminals_replaces_only_terminal_sessions() {
+        let mut overlay = HashMap::new();
+        overlay.insert(
+            "terminal:terminal-1".to_string(),
+            Some(WorkspaceSession {
+                kind: "terminal".to_string(),
+                name: "shell".to_string(),
+                attachment_id: "terminal-1".to_string(),
+                path: None,
+                url: None,
+                logical_url: None,
+                resolved_url: None,
+                title: None,
+                favicon_url: None,
+                can_go_back: None,
+                can_go_forward: None,
+                working: None,
+                unread: None,
+            }),
+        );
+        overlay.insert(
+            "browser:browser-1".to_string(),
+            Some(WorkspaceSession {
+                kind: "browser".to_string(),
+                name: "Docs".to_string(),
+                attachment_id: "browser-1".to_string(),
+                path: None,
+                url: Some("https://example.com".to_string()),
+                logical_url: None,
+                resolved_url: None,
+                title: None,
+                favicon_url: None,
+                can_go_back: None,
+                can_go_forward: None,
+                working: None,
+                unread: None,
+            }),
+        );
+        overlay.insert(
+            "file:file-1".to_string(),
+            Some(WorkspaceSession {
+                kind: "file".to_string(),
+                name: "src/main.rs".to_string(),
+                attachment_id: "file-1".to_string(),
+                path: Some("src/main.rs".to_string()),
+                url: None,
+                logical_url: None,
+                resolved_url: None,
+                title: None,
+                favicon_url: None,
+                can_go_back: None,
+                can_go_forward: None,
+                working: None,
+                unread: None,
+            }),
+        );
+        let workspace =
+            overlay_workspace_sessions(test_branch_workspace("ws-demo-123", None), &overlay);
+
+        let workspace = replace_workspace_terminals(
+            workspace,
+            vec![WorkspaceSession {
+                kind: "terminal".to_string(),
+                name: "codex".to_string(),
+                attachment_id: "terminal-2".to_string(),
+                path: None,
+                url: None,
+                logical_url: None,
+                resolved_url: None,
+                title: None,
+                favicon_url: None,
+                can_go_back: None,
+                can_go_forward: None,
+                working: Some(true),
+                unread: Some(false),
+            }],
+        );
+
+        assert_eq!(workspace.terminals().len(), 1);
+        assert_eq!(workspace.terminals()[0].attachment_id, "terminal-2");
+        assert_eq!(workspace.terminals()[0].name, "codex");
+        assert_eq!(workspace.browsers().len(), 1);
+        assert_eq!(workspace.browsers()[0].attachment_id, "browser-1");
+        assert_eq!(workspace.files().len(), 1);
+        assert_eq!(workspace.files()[0].attachment_id, "file-1");
     }
 
     #[test]
