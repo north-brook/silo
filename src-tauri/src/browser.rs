@@ -1,10 +1,7 @@
 use crate::bootstrap;
 use crate::browser_loopback::BrowserLoopbackManager;
 use crate::router::RouterManager;
-use crate::state::{
-    active_session_metadata_entries, browser_session_metadata_key, WorkspaceMetadataEntry,
-    WorkspaceMetadataManager, BROWSER_LAST_ACTIVE_METADATA_KEY,
-};
+use crate::state::{active_session_metadata_entries, WorkspaceMetadataManager};
 use crate::terminal;
 use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
 use crate::{emit_workspace_state_changed, AppRuntime};
@@ -135,7 +132,7 @@ async fn create_browser_tab(
         None,
     );
     manager.cache_session(&workspace, session.clone())?;
-    enqueue_browser_metadata_update(metadata, &workspace, Some(lookup.clone()), session);
+    metadata.enqueue_workspace_session_upsert(&workspace, Some(lookup.clone()), session);
 
     Ok(BrowserCreateResult { attachment_id })
 }
@@ -180,8 +177,7 @@ pub async fn browser_mount_tab(
             session.working,
         );
         state.cache_session(&workspace, session.clone())?;
-        enqueue_browser_metadata_update(
-            metadata.inner(),
+        metadata.inner().enqueue_workspace_session_upsert(
             &workspace,
             Some(lookup.clone()),
             session.clone(),
@@ -245,7 +241,12 @@ pub fn browser_kill_tab(
     let _ = state.remove_cached_session(&workspace, &attachment_id)?;
     let cached_sessions = state.cache_sessions_for_workspace(&workspace)?;
     let remaining_sessions = cached_sessions;
-    enqueue_browser_metadata_remove(metadata.inner(), &workspace, None, &attachment_id);
+    metadata.inner().enqueue_workspace_session_remove(
+        &workspace,
+        None,
+        BROWSER_KIND,
+        &attachment_id,
+    );
     let cleared_active_session = metadata.clear_active_workspace_session_if_matches(
         &workspace,
         BROWSER_KIND,
@@ -318,7 +319,9 @@ pub async fn browser_go_to(
         Some(true),
     );
     state.cache_session(&workspace, session.clone())?;
-    enqueue_browser_metadata_update(metadata.inner(), &workspace, Some(lookup.clone()), session);
+    metadata
+        .inner()
+        .enqueue_workspace_session_upsert(&workspace, Some(lookup.clone()), session);
 
     if let Some(webview) = app.get_webview(&browser_webview_label(&workspace, &attachment_id)) {
         state.set_resolved_url(&workspace, &attachment_id, &normalized.resolved_url)?;
@@ -375,7 +378,9 @@ pub async fn browser_report_page_state(
         None,
     );
     state.cache_session(&workspace, session.clone())?;
-    enqueue_browser_metadata_update(metadata.inner(), &workspace, None, session);
+    metadata
+        .inner()
+        .enqueue_workspace_session_upsert(&workspace, None, session);
     emit_browser_state_changed(&app, &workspace, &attachment_id)?;
     Ok(BrowserMetadataResult { updated: true })
 }
@@ -1053,58 +1058,6 @@ fn reapply_tracked_webview_state(
     let _ = set_webview_viewport(webview, state.viewport, state.visible);
 }
 
-fn enqueue_browser_metadata_update(
-    metadata: &WorkspaceMetadataManager,
-    workspace: &str,
-    lookup: Option<WorkspaceLookup>,
-    session: WorkspaceSession,
-) {
-    let serialized = match serde_json::to_string(&session) {
-        Ok(serialized) => serialized,
-        Err(error) => {
-            log::warn!(
-                "failed to serialize browser session metadata for workspace {} session {}: {}",
-                workspace,
-                session.attachment_id,
-                error
-            );
-            return;
-        }
-    };
-    metadata.upsert_workspace_session(workspace, session.clone());
-    metadata.enqueue(
-        workspace,
-        lookup,
-        vec![
-            WorkspaceMetadataEntry {
-                key: browser_session_metadata_key(&session.attachment_id),
-                value: Some(serialized),
-            },
-            WorkspaceMetadataEntry {
-                key: BROWSER_LAST_ACTIVE_METADATA_KEY.to_string(),
-                value: Some(current_rfc3339_timestamp()),
-            },
-        ],
-    );
-}
-
-fn enqueue_browser_metadata_remove(
-    metadata: &WorkspaceMetadataManager,
-    workspace: &str,
-    lookup: Option<WorkspaceLookup>,
-    attachment_id: &str,
-) {
-    metadata.remove_workspace_session(workspace, "browser", attachment_id);
-    metadata.enqueue(
-        workspace,
-        lookup,
-        vec![WorkspaceMetadataEntry {
-            key: browser_session_metadata_key(attachment_id),
-            value: None,
-        }],
-    );
-}
-
 fn emit_browser_state_changed(
     app: &AppHandle<AppRuntime>,
     workspace: &str,
@@ -1435,7 +1388,7 @@ fn cache_and_emit_browser_session(
     session: WorkspaceSession,
 ) -> Result<(), String> {
     manager.cache_session(workspace, session.clone())?;
-    enqueue_browser_metadata_update(metadata, workspace, None, session);
+    metadata.enqueue_workspace_session_upsert(workspace, None, session);
     emit_browser_state_changed(app, workspace, attachment_id)?;
     Ok(())
 }
@@ -1459,12 +1412,6 @@ async fn set_existing_browser_session_working(
 
     session.working = Some(working);
     cache_and_emit_browser_session(manager, metadata, app, workspace, attachment_id, session)
-}
-
-fn current_rfc3339_timestamp() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
 fn browser_state_sync_script(workspace: &str, attachment_id: &str) -> String {
