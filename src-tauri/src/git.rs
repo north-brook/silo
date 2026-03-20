@@ -4,6 +4,7 @@ use crate::remote::{
     run_remote_command, workspace_shell_command_with_credentials,
     CommandResult as RemoteCommandResult,
 };
+use crate::state::WorkspaceMetadataManager;
 use crate::terminal;
 use crate::terminal::TerminalManager;
 use crate::workspaces::{self, WorkspaceLookup};
@@ -416,6 +417,7 @@ pub async fn git_pr_observe(workspace: String) -> Result<Option<PullRequestObser
 #[tauri::command]
 pub async fn git_push(
     state: State<'_, TerminalManager>,
+    workspace_state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
 ) -> Result<GitTerminalResult, String> {
     log::info!("pushing workspace branch for {workspace}");
@@ -423,8 +425,13 @@ pub async fn git_push(
     let branch = current_workspace_branch(&context).await?;
     let prompt = prompts::git_push_prompt(&branch, &context.target_branch);
     let command = terminal::codex_prompt_command(&prompt);
-    let attachment_id =
-        terminal::start_terminal_command(state.inner(), &workspace, &command).await?;
+    let attachment_id = terminal::start_terminal_command(
+        state.inner(),
+        workspace_state.inner(),
+        &workspace,
+        &command,
+    )
+    .await?;
 
     Ok(GitTerminalResult { attachment_id })
 }
@@ -490,6 +497,7 @@ pub async fn git_rerun_failed_checks(workspace: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn git_create_pr(
     state: State<'_, TerminalManager>,
+    workspace_state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
 ) -> Result<GitTerminalResult, String> {
     log::info!("creating pull request for workspace {workspace}");
@@ -497,8 +505,13 @@ pub async fn git_create_pr(
     let branch = current_workspace_branch(&context).await?;
     let prompt = prompts::git_create_pr_prompt(&branch, &context.target_branch);
     let command = terminal::codex_prompt_command(&prompt);
-    let attachment_id =
-        terminal::start_terminal_command(state.inner(), &workspace, &command).await?;
+    let attachment_id = terminal::start_terminal_command(
+        state.inner(),
+        workspace_state.inner(),
+        &workspace,
+        &command,
+    )
+    .await?;
 
     Ok(GitTerminalResult { attachment_id })
 }
