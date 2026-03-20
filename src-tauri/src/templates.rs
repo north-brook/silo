@@ -2,7 +2,7 @@ use crate::bootstrap;
 use crate::config::ConfigStore;
 use crate::state::WorkspaceMetadataManager;
 use crate::workspaces::{
-    self, ResolvedGcloudConfig, Snapshot, SnapshotTemplate, TemplateWorkspace,
+    self, ResolvedGcloudConfig, Snapshot, SnapshotTemplate, TemplateWorkspace, WorkspaceLookup,
     TEMPLATE_OPERATION_ID_LABEL_KEY, TEMPLATE_OPERATION_KIND_LABEL_KEY,
     TEMPLATE_OPERATION_PHASE_LABEL_KEY,
 };
@@ -135,15 +135,15 @@ pub async fn templates_save_template(
         })
         .unwrap_or_else(|| workspaces::generate_template_snapshot_name(&project));
 
-    workspaces::set_template_operation_in_lookup(
-        lookup,
+    enqueue_template_operation(
+        manager.inner(),
+        &lookup,
         TemplateOperationKind::Save.as_str(),
         "waiting_for_template_ready",
         Some("Waiting for template workspace bootstrap"),
         None,
         Some(&snapshot_name),
-    )
-    .await?;
+    );
 
     let operation = TemplateOperation {
         project: project.clone(),
@@ -173,15 +173,15 @@ pub async fn templates_delete_template(
     let workspace_lookup = find_template_workspace_lookup(&project).await?;
 
     if let Some(lookup) = workspace_lookup {
-        workspaces::set_template_operation_in_lookup(
-            lookup,
+        enqueue_template_operation(
+            manager.inner(),
+            &lookup,
             TemplateOperationKind::Delete.as_str(),
             "deleting_snapshots",
             Some("Deleting template snapshots"),
             None,
             None,
-        )
-        .await?;
+        );
     } else {
         let snapshots = workspaces::list_template_snapshots_in_project(
             &gcloud.account,
@@ -267,6 +267,26 @@ fn maybe_start_operation_reconcile(state: &TemplateState, manager: &WorkspaceMet
     {
         start_template_operation_reconcile_if_needed(state.project.clone(), manager.clone());
     }
+}
+
+fn enqueue_template_operation(
+    manager: &WorkspaceMetadataManager,
+    lookup: &WorkspaceLookup,
+    kind: &str,
+    phase: &str,
+    detail: Option<&str>,
+    last_error: Option<&str>,
+    snapshot_name: Option<&str>,
+) {
+    manager.enqueue_template_operation(
+        lookup.workspace.name(),
+        Some(lookup.clone()),
+        kind,
+        phase,
+        detail,
+        last_error,
+        snapshot_name,
+    );
 }
 
 pub(crate) fn start_template_operation_reconcile_if_needed(
@@ -445,15 +465,15 @@ async fn reconcile_template_save_operation(
         let lookup = find_template_workspace_lookup(project)
             .await?
             .ok_or_else(|| format!("template workspace not found for project {project}"))?;
-        workspaces::set_template_operation_in_lookup(
-            lookup.clone(),
+        enqueue_template_operation(
+            manager,
+            &lookup,
             TemplateOperationKind::Save.as_str(),
             "clearing_runtime_state",
             Some("Removing template-only runtime state"),
             None,
             Some(&snapshot_name),
-        )
-        .await?;
+        );
         bootstrap::clear_template_runtime_state(&workspace_name).await?;
     }
 
@@ -462,15 +482,15 @@ async fn reconcile_template_save_operation(
         let lookup = find_template_workspace_lookup(project)
             .await?
             .ok_or_else(|| format!("template workspace not found for project {project}"))?;
-        workspaces::set_template_operation_in_lookup(
-            lookup.clone(),
+        enqueue_template_operation(
+            manager,
+            &lookup,
             TemplateOperationKind::Save.as_str(),
             "stopping_vm",
             Some("Stopping template virtual machine"),
             None,
             Some(&snapshot_name),
-        )
-        .await?;
+        );
         boot_disk = Some(
             workspaces::ensure_template_workspace_terminated(
                 &gcloud.account,
@@ -486,15 +506,15 @@ async fn reconcile_template_save_operation(
         let lookup = find_template_workspace_lookup(project)
             .await?
             .ok_or_else(|| format!("template workspace not found for project {project}"))?;
-        workspaces::set_template_operation_in_lookup(
-            lookup.clone(),
+        enqueue_template_operation(
+            manager,
+            &lookup,
             TemplateOperationKind::Save.as_str(),
             "creating_snapshot",
             Some("Creating template snapshot"),
             None,
             Some(&snapshot_name),
-        )
-        .await?;
+        );
         if workspaces::describe_snapshot_if_exists_in_project(
             &snapshot_name,
             &gcloud.account,
@@ -521,15 +541,15 @@ async fn reconcile_template_save_operation(
         let lookup = find_template_workspace_lookup(project)
             .await?
             .ok_or_else(|| format!("template workspace not found for project {project}"))?;
-        workspaces::set_template_operation_in_lookup(
-            lookup.clone(),
+        enqueue_template_operation(
+            manager,
+            &lookup,
             TemplateOperationKind::Save.as_str(),
             "waiting_for_snapshot_ready",
             Some("Waiting for template snapshot"),
             None,
             Some(&snapshot_name),
-        )
-        .await?;
+        );
         workspaces::wait_for_template_snapshot_ready(
             &gcloud.account,
             &gcloud.project,
@@ -542,15 +562,15 @@ async fn reconcile_template_save_operation(
         let lookup = find_template_workspace_lookup(project)
             .await?
             .ok_or_else(|| format!("template workspace not found for project {project}"))?;
-        workspaces::set_template_operation_in_lookup(
-            lookup.clone(),
+        enqueue_template_operation(
+            manager,
+            &lookup,
             TemplateOperationKind::Save.as_str(),
             "deleting_old_snapshots",
             Some("Removing previous template snapshots"),
             None,
             Some(&snapshot_name),
-        )
-        .await?;
+        );
         workspaces::delete_old_template_snapshots(
             &gcloud.account,
             &gcloud.project,
@@ -563,15 +583,15 @@ async fn reconcile_template_save_operation(
     let lookup = find_template_workspace_lookup(project)
         .await?
         .ok_or_else(|| format!("template workspace not found for project {project}"))?;
-    workspaces::set_template_operation_in_lookup(
-        lookup.clone(),
+    enqueue_template_operation(
+        manager,
+        &lookup,
         TemplateOperationKind::Save.as_str(),
         "deleting_template_workspace",
         Some("Deleting template workspace"),
         None,
         Some(&snapshot_name),
-    )
-    .await?;
+    );
     workspaces::delete_template_workspace_if_exists(
         &gcloud.account,
         &gcloud.project,
@@ -613,28 +633,28 @@ async fn reconcile_template_delete_operation(
     match workspace_lookup {
         Some(lookup) => {
             if delete_phase_rank(&operation.phase) <= delete_phase_rank("deleting_snapshots") {
-                workspaces::set_template_operation_in_lookup(
-                    lookup.clone(),
+                enqueue_template_operation(
+                    manager,
+                    &lookup,
                     TemplateOperationKind::Delete.as_str(),
                     "deleting_snapshots",
                     Some("Deleting template snapshots"),
                     None,
                     None,
-                )
-                .await?;
+                );
                 workspaces::delete_template_snapshots(&gcloud.account, &gcloud.project, project)
                     .await?;
             }
 
-            workspaces::set_template_operation_in_lookup(
-                lookup.clone(),
+            enqueue_template_operation(
+                manager,
+                &lookup,
                 TemplateOperationKind::Delete.as_str(),
                 "deleting_template_workspace",
                 Some("Deleting template workspace"),
                 None,
                 None,
-            )
-            .await?;
+            );
             workspaces::delete_template_workspace_if_exists(
                 &gcloud.account,
                 &gcloud.project,
@@ -714,15 +734,16 @@ async fn record_template_operation_failure(
             .workspace
             .template_operation()
             .and_then(|operation| operation.snapshot_name.clone());
-        return workspaces::set_template_operation_in_lookup(
-            lookup,
+        enqueue_template_operation(
+            manager,
+            &lookup,
             &kind,
             "failed",
             Some("Template operation failed"),
             Some(error),
             snapshot_name.as_deref(),
-        )
-        .await;
+        );
+        return Ok(());
     }
 
     let snapshots =
