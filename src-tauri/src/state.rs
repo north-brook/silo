@@ -58,6 +58,10 @@ pub(crate) fn file_session_metadata_key(attachment_id: &str) -> String {
     format!("{FILE_SESSION_METADATA_PREFIX}{attachment_id}")
 }
 
+pub(crate) fn terminal_session_metadata_key(attachment_id: &str) -> String {
+    format!("{TERMINAL_SESSION_METADATA_PREFIX}{attachment_id}")
+}
+
 pub(crate) fn active_session_metadata_entries(
     active_session: Option<&WorkspaceActiveSession>,
 ) -> Vec<WorkspaceMetadataEntry> {
@@ -84,6 +88,68 @@ pub(crate) fn workspace_last_active_metadata_key(kind: &str) -> Option<&'static 
 
 fn workspace_session_key(kind: &str, attachment_id: &str) -> String {
     format!("{kind}:{attachment_id}")
+}
+
+fn workspace_session_metadata_key(kind: &str, attachment_id: &str) -> Option<String> {
+    match kind {
+        "browser" => Some(browser_session_metadata_key(attachment_id)),
+        "file" => Some(file_session_metadata_key(attachment_id)),
+        "terminal" => Some(terminal_session_metadata_key(attachment_id)),
+        _ => None,
+    }
+}
+
+pub(crate) fn workspace_session_metadata_entries(
+    workspace: &str,
+    session: &WorkspaceSession,
+) -> Option<Vec<WorkspaceMetadataEntry>> {
+    let session_key = match workspace_session_metadata_key(&session.kind, &session.attachment_id) {
+        Some(key) => key,
+        None => {
+            log::warn!(
+                "unsupported workspace session metadata kind {} for workspace {} session {}",
+                session.kind,
+                workspace,
+                session.attachment_id
+            );
+            return None;
+        }
+    };
+    let last_active_key = match workspace_last_active_metadata_key(&session.kind) {
+        Some(key) => key,
+        None => {
+            log::warn!(
+                "missing last-active metadata key for workspace {} session {} kind {}",
+                workspace,
+                session.attachment_id,
+                session.kind
+            );
+            return None;
+        }
+    };
+    let serialized = match serde_json::to_string(session) {
+        Ok(serialized) => serialized,
+        Err(error) => {
+            log::warn!(
+                "failed to serialize workspace session metadata for workspace {} session {}: {}",
+                workspace,
+                session.attachment_id,
+                error
+            );
+            return None;
+        }
+    };
+
+    Some(vec![
+        WorkspaceMetadataEntry {
+            key: session_key,
+            value: Some(serialized),
+        },
+        WorkspaceMetadataEntry {
+            key: last_active_key.to_string(),
+            value: Some(workspaces::current_rfc3339_timestamp()),
+        },
+    ])
 }
 
 fn should_drop_pending_session(
@@ -206,23 +272,111 @@ impl WorkspaceMetadataManager {
                 }
             }
 
+            let entry_keys = entries
+                .iter()
+                .map(|entry| entry.key.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
             if let Err(error) = update_result {
                 log::warn!(
                     "background metadata update failed for workspace {} keys=[{}]: {}",
                     workspace,
-                    entries
-                        .iter()
-                        .map(|entry| entry.key.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "),
+                    entry_keys,
                     error
                 );
+                if let Ok(mut pending) = self.metadata.lock() {
+                    let state = pending.entry(workspace.clone()).or_insert_with(|| {
+                        PendingWorkspaceMetadata {
+                            lookup: Some(current_lookup.clone()),
+                            entries: HashMap::new(),
+                            worker_running: true,
+                        }
+                    });
+                    state.lookup = Some(current_lookup);
+                    requeue_workspace_metadata_entries(state, entries);
+                }
             } else if let Ok(mut pending) = self.metadata.lock() {
                 if let Some(state) = pending.get_mut(&workspace) {
                     state.lookup = Some(current_lookup);
                 }
             }
         }
+    }
+
+    pub(crate) fn enqueue_workspace_session_upsert(
+        &self,
+        workspace: &str,
+        lookup: Option<WorkspaceLookup>,
+        session: WorkspaceSession,
+    ) {
+        let entries = match workspace_session_metadata_entries(workspace, &session) {
+            Some(entries) => entries,
+            None => return,
+        };
+        self.upsert_workspace_session(workspace, session);
+        self.enqueue(workspace, lookup, entries);
+    }
+
+    pub(crate) fn enqueue_workspace_session_remove(
+        &self,
+        workspace: &str,
+        lookup: Option<WorkspaceLookup>,
+        kind: &str,
+        attachment_id: &str,
+    ) {
+        let Some(key) = workspace_session_metadata_key(kind, attachment_id) else {
+            log::warn!(
+                "unsupported workspace session remove kind {} for workspace {} session {}",
+                kind,
+                workspace,
+                attachment_id
+            );
+            return;
+        };
+        self.remove_workspace_session(workspace, kind, attachment_id);
+        self.enqueue(
+            workspace,
+            lookup,
+            vec![WorkspaceMetadataEntry { key, value: None }],
+        );
+    }
+
+    pub(crate) fn enqueue_workspace_lifecycle(
+        &self,
+        workspace: &str,
+        lookup: Option<WorkspaceLookup>,
+        phase: &str,
+        detail: Option<&str>,
+        last_error: Option<&str>,
+    ) {
+        self.enqueue(
+            workspace,
+            lookup,
+            workspaces::workspace_lifecycle_metadata_entries(phase, detail, last_error),
+        );
+    }
+
+    pub(crate) fn enqueue_template_operation(
+        &self,
+        workspace: &str,
+        lookup: Option<WorkspaceLookup>,
+        kind: &str,
+        phase: &str,
+        detail: Option<&str>,
+        last_error: Option<&str>,
+        snapshot_name: Option<&str>,
+    ) {
+        self.enqueue(
+            workspace,
+            lookup,
+            workspaces::template_operation_metadata_entries(
+                kind,
+                phase,
+                detail,
+                last_error,
+                snapshot_name,
+            ),
+        );
     }
 
     pub(crate) fn upsert_workspace_session(&self, workspace: &str, session: WorkspaceSession) {
@@ -441,4 +595,98 @@ impl WorkspaceMetadataManager {
 
 async fn sleep_for(duration: Duration) {
     let _ = tauri::async_runtime::spawn_blocking(move || std::thread::sleep(duration)).await;
+}
+
+fn requeue_workspace_metadata_entries(
+    state: &mut PendingWorkspaceMetadata,
+    entries: Vec<WorkspaceMetadataEntry>,
+) {
+    for entry in entries {
+        state.entries.entry(entry.key).or_insert(entry.value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_session(kind: &str, attachment_id: &str) -> WorkspaceSession {
+        WorkspaceSession {
+            kind: kind.to_string(),
+            name: "sample".to_string(),
+            attachment_id: attachment_id.to_string(),
+            path: None,
+            url: None,
+            logical_url: None,
+            resolved_url: None,
+            title: None,
+            favicon_url: None,
+            can_go_back: None,
+            can_go_forward: None,
+            working: None,
+            unread: None,
+        }
+    }
+
+    #[test]
+    fn workspace_session_metadata_entries_use_kind_specific_keys() {
+        let browser_entries =
+            workspace_session_metadata_entries("ws", &sample_session("browser", "browser-1"))
+                .expect("browser entries should serialize");
+        assert_eq!(browser_entries[0].key, "browser-session-browser-1");
+        assert_eq!(browser_entries[1].key, "browser-last-active");
+
+        let file_entries =
+            workspace_session_metadata_entries("ws", &sample_session("file", "file-1"))
+                .expect("file entries should serialize");
+        assert_eq!(file_entries[0].key, "file-session-file-1");
+        assert_eq!(file_entries[1].key, "file-last-active");
+
+        let terminal_entries =
+            workspace_session_metadata_entries("ws", &sample_session("terminal", "terminal-1"))
+                .expect("terminal entries should serialize");
+        assert_eq!(terminal_entries[0].key, "terminal-session-terminal-1");
+        assert_eq!(terminal_entries[1].key, "terminal-last-active");
+    }
+
+    #[test]
+    fn requeue_workspace_metadata_entries_preserves_newer_values() {
+        let mut pending = PendingWorkspaceMetadata {
+            lookup: None,
+            entries: HashMap::from([
+                (
+                    "terminal-session-terminal-1".to_string(),
+                    Some("new".to_string()),
+                ),
+                (
+                    "terminal-last-active".to_string(),
+                    Some("fresh".to_string()),
+                ),
+            ]),
+            worker_running: true,
+        };
+
+        requeue_workspace_metadata_entries(
+            &mut pending,
+            vec![
+                WorkspaceMetadataEntry {
+                    key: "terminal-session-terminal-1".to_string(),
+                    value: Some("old".to_string()),
+                },
+                WorkspaceMetadataEntry {
+                    key: "active-session-kind".to_string(),
+                    value: Some("terminal".to_string()),
+                },
+            ],
+        );
+
+        assert_eq!(
+            pending.entries.get("terminal-session-terminal-1"),
+            Some(&Some("new".to_string()))
+        );
+        assert_eq!(
+            pending.entries.get("active-session-kind"),
+            Some(&Some("terminal".to_string()))
+        );
+    }
 }
