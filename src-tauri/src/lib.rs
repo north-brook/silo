@@ -259,6 +259,7 @@ pub fn run() {
                 .state::<state::WorkspaceMetadataManager>()
                 .inner()
                 .clone();
+            bootstrap::initialize_workspace_metadata_manager(workspace_state.clone());
             templates::resume_running_template_operations(workspace_state);
 
             // Native accelerators ensure app shortcuts still work when focus moves to child webviews.
