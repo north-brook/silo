@@ -317,10 +317,7 @@ export function useWorkspaceSessions() {
 	const { workspace } = useWorkspaceStateContext();
 
 	return useMemo<WorkspaceSession[]>(
-		() =>
-			workspace && !isTemplateWorkspace(workspace)
-				? workspaceSessions(workspace)
-				: [],
+		() => (workspace ? workspaceSessions(workspace) : []),
 		[workspace],
 	);
 }

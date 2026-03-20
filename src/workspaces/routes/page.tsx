@@ -48,7 +48,7 @@ function WorkspaceView() {
 			: null;
 
 	const redirectHref = useMemo(() => {
-		if (!workspace || isTemplateWorkspace(workspace) || transition) {
+		if (!workspace || transition) {
 			return null;
 		}
 

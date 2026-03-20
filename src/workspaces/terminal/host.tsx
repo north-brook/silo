@@ -201,6 +201,25 @@ export function TerminalSessionHost({
 			return null;
 		}
 
+		const style = window.getComputedStyle(mountElement);
+		const paddingV =
+			(parseFloat(style.paddingTop) || 0) +
+			(parseFloat(style.paddingBottom) || 0);
+		if (paddingV > 0) {
+			const core = (terminal as any)._core;
+			const cellHeight =
+				core?._renderService?.dimensions?.css?.cell?.height;
+			if (cellHeight > 0) {
+				const maxRows = Math.max(
+					MIN_ATTACH_ROWS,
+					Math.floor((bounds.height - paddingV) / cellHeight),
+				);
+				if (terminal.rows > maxRows) {
+					terminal.resize(terminal.cols, maxRows);
+				}
+			}
+		}
+
 		return {
 			cols: terminal.cols,
 			rows: terminal.rows,

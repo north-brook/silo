@@ -130,10 +130,6 @@ export function workspaceLifecycleMessage(workspace: Workspace): string {
 }
 
 export function workspaceSessions(workspace: Workspace): WorkspaceSession[] {
-	if (isTemplateWorkspace(workspace)) {
-		return [];
-	}
-
 	return [
 		...workspace.terminals,
 		...workspace.browsers,
