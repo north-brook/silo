@@ -3,10 +3,7 @@ use crate::remote::{
     run_remote_command, run_remote_command_with_stdin, shell_quote, workspace_shell_command,
     workspace_shell_command_preserving_stdin, REMOTE_WORKSPACE_AGENT_BIN,
 };
-use crate::state::{
-    active_session_metadata_entries, file_session_metadata_key, WorkspaceMetadataEntry,
-    WorkspaceMetadataManager,
-};
+use crate::state::{active_session_metadata_entries, WorkspaceMetadataManager};
 use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
 use crate::{emit_workspace_state_changed, AppRuntime};
 use serde::{Deserialize, Serialize};
@@ -14,7 +11,6 @@ use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, State};
-use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileTreeEntry {
@@ -180,7 +176,9 @@ pub async fn files_open_session(
         unread: None,
     };
 
-    enqueue_file_metadata_update(state.inner(), &workspace, Some(lookup), session.clone());
+    state
+        .inner()
+        .enqueue_workspace_session_upsert(&workspace, Some(lookup), session.clone());
 
     Ok(FileSessionResult {
         attachment_id: session.attachment_id,
@@ -205,7 +203,9 @@ pub fn files_close_session(
         state.enqueue(&workspace, None, active_session_metadata_entries(None));
     }
 
-    enqueue_file_metadata_remove(state.inner(), &workspace, None, &attachment_id);
+    state
+        .inner()
+        .enqueue_workspace_session_remove(&workspace, None, "file", &attachment_id);
     emit_workspace_state_changed(
         &app,
         &workspace,
@@ -352,64 +352,6 @@ fn current_unix_timestamp_millis() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0)
-}
-
-fn enqueue_file_metadata_update(
-    metadata: &WorkspaceMetadataManager,
-    workspace: &str,
-    lookup: Option<WorkspaceLookup>,
-    session: WorkspaceSession,
-) {
-    let serialized = match serde_json::to_string(&session) {
-        Ok(serialized) => serialized,
-        Err(error) => {
-            log::warn!(
-                "failed to serialize file session metadata for workspace {} session {}: {}",
-                workspace,
-                session.attachment_id,
-                error
-            );
-            return;
-        }
-    };
-    metadata.upsert_workspace_session(workspace, session.clone());
-    metadata.enqueue(
-        workspace,
-        lookup,
-        vec![
-            WorkspaceMetadataEntry {
-                key: file_session_metadata_key(&session.attachment_id),
-                value: Some(serialized),
-            },
-            WorkspaceMetadataEntry {
-                key: "file-last-active".to_string(),
-                value: Some(current_rfc3339_timestamp()),
-            },
-        ],
-    );
-}
-
-fn enqueue_file_metadata_remove(
-    metadata: &WorkspaceMetadataManager,
-    workspace: &str,
-    lookup: Option<WorkspaceLookup>,
-    attachment_id: &str,
-) {
-    metadata.remove_workspace_session(workspace, "file", attachment_id);
-    metadata.enqueue(
-        workspace,
-        lookup,
-        vec![WorkspaceMetadataEntry {
-            key: file_session_metadata_key(attachment_id),
-            value: None,
-        }],
-    );
-}
-
-fn current_rfc3339_timestamp() -> String {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
 fn file_command_error(prefix: &str, stderr: &str) -> String {
