@@ -12,7 +12,7 @@ use crate::daemon::state::{
     AssistantProvider, ObserverEvent, ObserverState, PublishedSession, PublishedState,
     SessionState, POLL_MISS_THRESHOLD_LIFECYCLE,
 };
-use crate::daemon::zmx::{parse_zmx_session, ZmxSession};
+use crate::daemon::zmx::{parse_zmx_session, parse_zmx_sessions, ZmxSession};
 use crate::metadata::{
     bool_metadata_value, flat_metadata_items, update_metadata_item,
     TERMINAL_LAST_ACTIVE_METADATA_KEY, TERMINAL_LAST_WORKING_METADATA_KEY,
@@ -77,11 +77,33 @@ fn sanitize_command_name_normalizes_silo_assistants() {
 }
 
 #[test]
-fn zmx_session_parser_reads_name_and_command() {
+fn zmx_session_parser_reads_legacy_session_name_and_command() {
     let session = parse_zmx_session("session_name=terminal-1\tpid=2\tcmd=codex")
         .expect("session should parse");
     assert_eq!(session.name, "terminal-1");
     assert_eq!(session.command.as_deref(), Some("codex"));
+}
+
+#[test]
+fn zmx_session_parser_reads_modern_name_field() {
+    let session =
+        parse_zmx_session("name=terminal-1\tpid=2\tclients=0").expect("session should parse");
+    assert_eq!(session.name, "terminal-1");
+    assert_eq!(session.command, None);
+}
+
+#[test]
+fn zmx_sessions_parser_accepts_no_sessions_output() {
+    let sessions =
+        parse_zmx_sessions("no sessions found in /run/user/1001/zmx").expect("output should parse");
+    assert!(sessions.is_empty());
+}
+
+#[test]
+fn zmx_sessions_parser_rejects_unknown_output() {
+    let error =
+        parse_zmx_sessions("name terminal-1").expect_err("invalid output should be rejected");
+    assert!(error.contains("failed to parse zmx session line"));
 }
 
 #[test]

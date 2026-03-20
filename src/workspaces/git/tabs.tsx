@@ -51,15 +51,16 @@ export function GitSidebarTabs() {
 							className={`h-9 flex items-center gap-1.5 px-3 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
 								activeTab === "diff"
 									? "bg-surface text-text-bright border-r-border-light border-b-surface"
-									: hasChanges
-										? "text-text-muted border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text"
-										: "text-text-placeholder border-r-border-light border-b-border-light cursor-default"
+									: "text-text-muted border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text"
 							}`}
-							disabled={!hasChanges}
 						>
 							Diff
-							<span className="text-emerald-400">+{additions}</span>
-							<span className="text-red-400">-{deletions}</span>
+							{hasChanges && (
+								<>
+									<span className="text-emerald-400">+{additions}</span>
+									<span className="text-red-400">-{deletions}</span>
+								</>
+							)}
 						</button>
 					</TooltipTrigger>
 					<TooltipContent side="bottom">

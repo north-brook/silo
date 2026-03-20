@@ -5,11 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { Loader } from "@/shared/ui/loader";
 import { type FileTreeEntry, filesListTree } from "@/workspaces/files/api";
 import { useFileSessions } from "@/workspaces/files/context";
-import {
-	FolderClosedIcon,
-	FolderOpenIcon,
-	fileIconForPath,
-} from "@/workspaces/files/icons";
+import { FileIcon } from "@/workspaces/files/icons";
 import { useGitSidebar } from "@/workspaces/git/context";
 import { useWorkspaceRouteParams } from "@/workspaces/routes/params";
 import { fileSessionHref } from "@/workspaces/routes/paths";
@@ -216,7 +212,6 @@ function TreeRow({
 }) {
 	if (node.type === "directory") {
 		const open = expandedPaths.has(node.path);
-		const FolderIcon = open ? FolderOpenIcon : FolderClosedIcon;
 		const folderDiff = dirStatusByPath.get(node.path);
 
 		return (
@@ -224,7 +219,7 @@ function TreeRow({
 				<button
 					type="button"
 					onClick={() => onToggleFolder(node.path)}
-					className="relative w-full flex items-center gap-1.5 px-3 py-[3px] text-[11px] text-text hover:bg-btn-hover transition-colors"
+					className="relative w-full flex items-center gap-1 px-3 py-[3px] text-[11px] text-text hover:bg-btn-hover transition-colors"
 					style={{
 						paddingLeft: `${depth * 12 + 8}px`,
 						...gitRowStyle(
@@ -233,14 +228,12 @@ function TreeRow({
 					}}
 				>
 					<TreeGuideLines depth={depth} />
-					<ChevronRight
-						size={11}
-						className={`shrink-0 text-text-muted transition-transform duration-150 ${open ? "rotate-90" : ""}`}
-					/>
-					<FolderIcon
-						size={12}
-						className="shrink-0 text-text-muted"
-					/>
+					<span className="w-4 flex items-center justify-center shrink-0">
+						<ChevronRight
+							size={11}
+							className={`text-text-muted transition-transform duration-150 ${open ? "rotate-90" : ""}`}
+						/>
+					</span>
 					<span className="truncate">{node.name}</span>
 					{folderDiff && (
 						<span className="shrink-0 ml-auto text-[10px] tabular-nums text-text-muted">
@@ -267,7 +260,6 @@ function TreeRow({
 		);
 	}
 
-	const Icon = fileIconForPath(node.path);
 	const diff = diffByPath.get(node.path) ?? null;
 
 	return (
@@ -281,7 +273,7 @@ function TreeRow({
 			}}
 			className="relative w-full flex items-center justify-between gap-2 px-3 py-[3px] text-[11px] text-text hover:bg-btn-hover transition-colors"
 			style={{
-				paddingLeft: `${depth * 12 + 25}px`,
+				paddingLeft: `${depth * 12 + 8}px`,
 				...gitRowStyle(
 					diff
 						? diff.status === "added"
@@ -294,8 +286,10 @@ function TreeRow({
 			}}
 		>
 			<TreeGuideLines depth={depth} />
-			<span className="min-w-0 flex items-center gap-1.5">
-				<Icon size={12} className="shrink-0 text-text-muted" />
+			<span className="min-w-0 flex items-center gap-1">
+				<span className="w-4 flex items-center justify-center shrink-0">
+					<FileIcon path={node.path} size={12} />
+				</span>
 				<span className="truncate">{node.name}</span>
 			</span>
 			{diff && (

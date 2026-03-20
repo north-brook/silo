@@ -23,7 +23,7 @@ import {
 	FileSessionsProvider,
 	useFileSessions,
 } from "@/workspaces/files/context";
-import { fileIconForPath } from "@/workspaces/files/icons";
+import { FileIcon } from "@/workspaces/files/icons";
 import { GitSidebarProvider } from "@/workspaces/git/context";
 import { GitSidebar } from "@/workspaces/git/sidebar";
 import { useSessionHosts } from "@/workspaces/hosts/provider";
@@ -109,9 +109,8 @@ function browserTabPresentation(session: WorkspaceSession) {
 }
 
 function fileTabPresentation(session: WorkspaceSession) {
-	const Icon = fileIconForPath(session.path ?? session.name);
 	return {
-		icon: <Icon size={12} />,
+		icon: <FileIcon path={session.path ?? session.name} size={12} />,
 		label: session.name.trim() || session.path?.trim() || "file",
 	};
 }

@@ -38,6 +38,7 @@ serial_log "Starting silo base image provisioning"
 apt-get update
 apt-get install -y \
   build-essential \
+  bubblewrap \
   ca-certificates \
   cmake \
   coreutils \

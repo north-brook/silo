@@ -26,10 +26,7 @@ pub(crate) fn list_zmx_sessions() -> Result<Vec<ZmxSession>, String> {
         ));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(parse_zmx_session)
-        .collect())
+    parse_zmx_sessions(&String::from_utf8_lossy(&output.stdout))
 }
 
 pub(crate) fn parse_zmx_session(line: &str) -> Option<ZmxSession> {
@@ -38,7 +35,7 @@ pub(crate) fn parse_zmx_session(line: &str) -> Option<ZmxSession> {
     for field in line.split('\t') {
         let (key, value) = field.split_once('=')?;
         match key {
-            "session_name" => name = Some(value.to_string()),
+            "name" | "session_name" => name = Some(value.to_string()),
             "cmd" => {
                 let trimmed = value.trim();
                 if !trimmed.is_empty() {
@@ -53,6 +50,25 @@ pub(crate) fn parse_zmx_session(line: &str) -> Option<ZmxSession> {
         name: name?,
         command,
     })
+}
+
+pub(crate) fn parse_zmx_sessions(stdout: &str) -> Result<Vec<ZmxSession>, String> {
+    let mut sessions = Vec::new();
+    for line in stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if line.starts_with("no sessions found ") {
+            continue;
+        }
+
+        let session = parse_zmx_session(line)
+            .ok_or_else(|| format!("failed to parse zmx session line: {line}"))?;
+        sessions.push(session);
+    }
+
+    Ok(sessions)
 }
 
 pub(crate) fn read_workspace_branch() -> Option<String> {

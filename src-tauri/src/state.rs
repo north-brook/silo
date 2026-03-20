@@ -159,10 +159,7 @@ fn should_drop_pending_session(
     match metadata {
         Some(metadata_session) if metadata_session == pending => true,
         Some(_) => {
-            pending.kind == "terminal"
-                && pending.name == "shell"
-                && pending.working.is_none()
-                && pending.unread.is_none()
+            pending.kind == "terminal" && pending.working.is_none() && pending.unread.is_none()
         }
         None => false,
     }
@@ -688,5 +685,31 @@ mod tests {
             pending.entries.get("active-session-kind"),
             Some(&Some("terminal".to_string()))
         );
+    }
+
+    #[test]
+    fn should_drop_pending_terminal_without_status_when_metadata_exists() {
+        let pending = WorkspaceSession {
+            kind: "terminal".to_string(),
+            name: "codex".to_string(),
+            attachment_id: "terminal-1".to_string(),
+            path: None,
+            url: None,
+            logical_url: None,
+            resolved_url: None,
+            title: None,
+            favicon_url: None,
+            can_go_back: None,
+            can_go_forward: None,
+            working: None,
+            unread: None,
+        };
+        let metadata = WorkspaceSession {
+            working: Some(true),
+            unread: Some(false),
+            ..pending.clone()
+        };
+
+        assert!(should_drop_pending_session(&pending, Some(&metadata)));
     }
 }

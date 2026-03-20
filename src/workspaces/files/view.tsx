@@ -23,6 +23,8 @@ import {
 	Decoration,
 	type DecorationSet,
 	EditorView,
+	ViewPlugin,
+	type ViewUpdate,
 } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
 import {
@@ -100,46 +102,75 @@ const editorTheme = EditorView.theme(
 			backgroundColor: "rgba(252, 211, 77, 0.06)",
 			boxShadow: "inset 2px 0 0 rgba(252, 211, 77, 0.5)",
 		},
+		".cm-diff-scrollbar-markers": {
+			position: "absolute",
+			top: "0",
+			right: "0",
+			bottom: "0",
+			width: "6px",
+			pointerEvents: "none",
+			zIndex: "6",
+		},
+		".cm-diff-scrollbar-marker-added": {
+			position: "absolute",
+			right: "0",
+			width: "6px",
+			minHeight: "2px",
+			borderRadius: "1px",
+			backgroundColor: "rgba(52, 211, 153, 0.7)",
+		},
+		".cm-diff-scrollbar-marker-modified": {
+			position: "absolute",
+			right: "0",
+			width: "6px",
+			minHeight: "2px",
+			borderRadius: "1px",
+			backgroundColor: "rgba(252, 211, 77, 0.7)",
+		},
 	},
 	{ dark: true },
 );
 
 const highlightStyle = HighlightStyle.define([
-	{ tag: [t.keyword, t.operatorKeyword, t.modifier], color: "#c678dd" },
-	{ tag: [t.string, t.special(t.string), t.regexp], color: "#98c379" },
+	{ tag: [t.keyword, t.operatorKeyword, t.modifier], color: "#569CD6" },
+	{
+		tag: [t.controlKeyword],
+		color: "#C586C0",
+	},
+	{ tag: [t.string, t.special(t.string), t.regexp], color: "#CE9178" },
 	{
 		tag: [t.typeName, t.className, t.tagName, t.namespace],
-		color: "#e5c07b",
+		color: "#4EC9B0",
 	},
-	{ tag: [t.number, t.bool, t.null, t.atom, t.self], color: "#d19a66" },
-	{ tag: t.constant(t.name), color: "#d19a66" },
+	{ tag: [t.number, t.bool, t.null, t.atom, t.self], color: "#B5CEA8" },
+	{ tag: t.constant(t.name), color: "#4FC1FF" },
 	{
 		tag: [t.function(t.variableName), t.function(t.propertyName)],
-		color: "#61afef",
+		color: "#DCDCAA",
 	},
-	{ tag: t.definition(t.variableName), color: "#61afef" },
-	{ tag: [t.variableName], color: "#e06c75" },
-	{ tag: [t.propertyName], color: "#e5c07b" },
-	{ tag: t.definition(t.propertyName), color: "#e5c07b" },
-	{ tag: t.operator, color: "#56b6c2" },
-	{ tag: [t.punctuation, t.separator, t.bracket], color: "#abb2bf" },
+	{ tag: t.definition(t.variableName), color: "#DCDCAA" },
+	{ tag: [t.variableName], color: "#9CDCFE" },
+	{ tag: [t.propertyName], color: "#9CDCFE" },
+	{ tag: t.definition(t.propertyName), color: "#9CDCFE" },
+	{ tag: t.operator, color: "#D4D4D4" },
+	{ tag: [t.punctuation, t.separator, t.bracket], color: "#D4D4D4" },
 	{
 		tag: [t.comment, t.lineComment, t.blockComment],
-		color: "#5c6370",
+		color: "#6A9955",
 		fontStyle: "italic",
 	},
-	{ tag: [t.meta, t.annotation], color: "#7f848e" },
-	{ tag: t.attributeName, color: "#d19a66" },
-	{ tag: t.attributeValue, color: "#98c379" },
-	{ tag: t.heading, fontWeight: "bold", color: "#e06c75" },
+	{ tag: [t.meta, t.annotation], color: "#569CD6" },
+	{ tag: t.attributeName, color: "#9CDCFE" },
+	{ tag: t.attributeValue, color: "#CE9178" },
+	{ tag: t.heading, fontWeight: "bold", color: "#569CD6" },
 	{ tag: t.strong, fontWeight: "bold" },
 	{ tag: t.emphasis, fontStyle: "italic" },
-	{ tag: t.link, color: "#61afef", textDecoration: "underline" },
-	{ tag: t.url, color: "#61afef" },
-	{ tag: t.inserted, color: "#98c379" },
-	{ tag: t.deleted, color: "#e06c75" },
-	{ tag: t.changed, color: "#e5c07b" },
-	{ tag: t.escape, color: "#56b6c2" },
+	{ tag: t.link, color: "#569CD6", textDecoration: "underline" },
+	{ tag: t.url, color: "#569CD6" },
+	{ tag: t.inserted, color: "#B5CEA8" },
+	{ tag: t.deleted, color: "#CE9178" },
+	{ tag: t.changed, color: "#569CD6" },
+	{ tag: t.escape, color: "#D7BA7D" },
 	{ tag: t.invalid, color: "#f44747" },
 ]);
 
@@ -254,6 +285,69 @@ function buildPatchDecorations(
 	return builder.finish();
 }
 
+// --- Scrollbar diff markers ---
+
+function consolidateChangedRanges(
+	changedLines: Map<number, "added" | "modified">,
+): { start: number; end: number; status: "added" | "modified" }[] {
+	const sorted = [...changedLines.entries()].sort((a, b) => a[0] - b[0]);
+	const ranges: { start: number; end: number; status: "added" | "modified" }[] =
+		[];
+
+	for (const [line, status] of sorted) {
+		const last = ranges[ranges.length - 1];
+		if (last && last.status === status && line === last.end + 1) {
+			last.end = line;
+		} else {
+			ranges.push({ start: line, end: line, status });
+		}
+	}
+
+	return ranges;
+}
+
+function createScrollbarMarkersExtension(
+	changedLines: Map<number, "added" | "modified">,
+): Extension {
+	return ViewPlugin.fromClass(
+		class {
+			container: HTMLElement;
+
+			constructor(view: EditorView) {
+				this.container = document.createElement("div");
+				this.container.className = "cm-diff-scrollbar-markers";
+				view.dom.appendChild(this.container);
+				this.buildMarkers(view);
+			}
+
+			update(update: ViewUpdate) {
+				if (update.geometryChanged || update.docChanged) {
+					this.buildMarkers(update.view);
+				}
+			}
+
+			buildMarkers(view: EditorView) {
+				this.container.textContent = "";
+				const totalLines = view.state.doc.lines;
+				if (totalLines === 0) return;
+
+				const ranges = consolidateChangedRanges(changedLines);
+				for (const range of ranges) {
+					const marker = document.createElement("div");
+					marker.className = `cm-diff-scrollbar-marker-${range.status}`;
+					marker.style.top = `${((range.start - 1) / totalLines) * 100}%`;
+					marker.style.height = `${((range.end - range.start + 1) / totalLines) * 100}%`;
+					this.container.appendChild(marker);
+				}
+			}
+
+			destroy() {
+				this.container.remove();
+			}
+		},
+	);
+}
+
 // --- Component ---
 
 export function WorkspaceFileSessionView() {
@@ -311,7 +405,10 @@ export function WorkspaceFileSessionView() {
 			syntaxHighlighting(highlightStyle),
 			EditorView.lineWrapping,
 			...(changedLines && changedLines.size > 0
-				? [createPatchDiffExtension(changedLines)]
+				? [
+						createPatchDiffExtension(changedLines),
+						createScrollbarMarkersExtension(changedLines),
+					]
 				: []),
 			languageExtensionForPath(path ?? ""),
 		],

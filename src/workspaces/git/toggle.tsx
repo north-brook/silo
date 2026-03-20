@@ -20,10 +20,12 @@ export function GitSidebarToggle() {
 					onClick={toggle}
 					className="flex items-center gap-2.5 px-1.5 py-0.5 rounded text-text-muted hover:bg-btn-hover hover:text-text-bright transition-colors"
 				>
-					<span className="flex items-center gap-1.5 text-[11px] font-medium">
-						<span className="text-emerald-400">+{additions}</span>
-						<span className="text-red-400">-{deletions}</span>
-					</span>
+					{(additions > 0 || deletions > 0) && (
+						<span className="flex items-center gap-1.5 text-[11px] font-medium">
+							<span className="text-emerald-400">+{additions}</span>
+							<span className="text-red-400">-{deletions}</span>
+						</span>
+					)}
 					<PanelRight size={12} />
 				</button>
 			</TooltipTrigger>

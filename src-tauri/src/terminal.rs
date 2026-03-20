@@ -374,8 +374,10 @@ pub(crate) async fn start_terminal_command(
     command: &str,
 ) -> Result<String, String> {
     let attachment_id = create_terminal_attachment_id(workspace).await?;
-    workspace_state
-        .upsert_workspace_session(workspace, session_for_command(&attachment_id, command));
+    workspace_state.upsert_workspace_session(
+        workspace,
+        startup_session_for_command(&attachment_id, command),
+    );
     manager.set_startup_command(
         AttachmentKey {
             workspace: workspace.to_string(),
@@ -1143,6 +1145,13 @@ fn session_for_command(attachment_id: &str, command: &str) -> WorkspaceSession {
     }
 }
 
+fn startup_session_for_command(attachment_id: &str, command: &str) -> WorkspaceSession {
+    let mut session = session_for_command(attachment_id, command);
+    session.working = None;
+    session.unread = None;
+    session
+}
+
 fn sanitize_session_display_name(command: &str) -> String {
     let trimmed = command.trim();
     if trimmed.is_empty() {
@@ -1366,6 +1375,14 @@ mod tests {
         assert_eq!(session.name, "claude");
         assert_eq!(session.working, Some(false));
         assert_eq!(session.unread, Some(false));
+    }
+
+    #[test]
+    fn startup_session_for_command_defers_assistant_state_to_agent() {
+        let session = startup_session_for_command("terminal-1", "codex");
+        assert_eq!(session.name, "codex");
+        assert_eq!(session.working, None);
+        assert_eq!(session.unread, None);
     }
 
     #[test]
