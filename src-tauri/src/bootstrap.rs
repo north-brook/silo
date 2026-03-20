@@ -4,6 +4,7 @@ use crate::remote::{
     run_terminal_user_command, shell_quote, workspace_shell_command_with_credentials,
     REMOTE_WORKSPACE_AGENT_BIN, TERMINAL_WORKSPACE_DIR,
 };
+use crate::state::WorkspaceMetadataManager;
 use crate::workspaces::{self, Workspace, WorkspaceLookup};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -12,7 +13,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::Instant;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
@@ -35,6 +36,7 @@ const WORKSPACE_AGENT_BIN_BYTES: &[u8] = include_bytes!(concat!(
 ));
 static WORKSPACE_STARTUP_RECONCILE_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
+static WORKSPACE_METADATA_MANAGER: OnceLock<WorkspaceMetadataManager> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 struct WorkspaceBootstrap {
@@ -94,6 +96,14 @@ pub(crate) fn start_template_bootstrap(workspace: String) {
     start_workspace_startup_reconcile(workspace);
 }
 
+pub(crate) fn initialize_workspace_metadata_manager(manager: WorkspaceMetadataManager) {
+    let _ = WORKSPACE_METADATA_MANAGER.set(manager);
+}
+
+fn workspace_metadata_manager() -> Option<&'static WorkspaceMetadataManager> {
+    WORKSPACE_METADATA_MANAGER.get()
+}
+
 pub(crate) fn start_workspace_startup_reconcile_if_needed(workspace: Workspace) {
     if workspace.should_reconcile_startup() {
         start_workspace_startup_reconcile(workspace.name().to_string());
@@ -112,18 +122,18 @@ pub(crate) fn start_workspace_startup_reconcile(workspace: String) {
     tauri::async_runtime::spawn(async move {
         let result = reconcile_workspace_startup(&workspace).await;
         if let Err(error) = result {
-            if let Err(update_error) = workspaces::set_workspace_lifecycle(
-                &workspace,
-                "failed",
-                Some("Workspace startup failed"),
-                Some(&error),
-            )
-            .await
-            {
+            if let Some(manager) = workspace_metadata_manager() {
+                manager.enqueue_workspace_lifecycle(
+                    &workspace,
+                    None,
+                    "failed",
+                    Some("Workspace startup failed"),
+                    Some(&error),
+                );
+            } else {
                 log::warn!(
-                    "failed to publish startup failure lifecycle for workspace {}: {}",
-                    workspace,
-                    update_error
+                    "workspace metadata manager unavailable while publishing startup failure for {}",
+                    workspace
                 );
             }
             log::warn!(
@@ -426,8 +436,20 @@ impl LifecycleReporter {
             return Ok(());
         }
 
-        workspaces::set_workspace_lifecycle_in_lookup(lookup.clone(), phase, detail, last_error)
-            .await?;
+        if let Some(manager) = workspace_metadata_manager() {
+            manager.enqueue_workspace_lifecycle(
+                lookup.workspace.name(),
+                Some(lookup.clone()),
+                phase,
+                detail,
+                last_error,
+            );
+        } else {
+            log::warn!(
+                "workspace metadata manager unavailable while publishing lifecycle for {}",
+                lookup.workspace.name()
+            );
+        }
         self.phase = next_phase;
         self.detail = next_detail;
         self.last_error = next_error;
