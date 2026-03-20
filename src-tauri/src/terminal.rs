@@ -209,13 +209,16 @@ pub async fn terminal_create_terminal(
 ) -> Result<TerminalCreateResult, String> {
     log::trace!("creating terminal attachment id for workspace {workspace}");
     let attachment_id = create_terminal_attachment_id(&workspace).await?;
-    workspace_state.upsert_workspace_session(&workspace, pending_terminal_session(&attachment_id));
+    workspace_state
+        .inner()
+        .upsert_workspace_session(&workspace, pending_terminal_session(&attachment_id));
     Ok(TerminalCreateResult { attachment_id })
 }
 
 #[tauri::command]
 pub async fn terminal_create_assistant(
     state: State<'_, TerminalManager>,
+    workspace_state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
     model: String,
 ) -> Result<TerminalCreateResult, String> {
@@ -224,7 +227,8 @@ pub async fn terminal_create_assistant(
         "claude" => "silo claude",
         other => return Err(format!("unsupported assistant model: {other}")),
     };
-    let attachment_id = start_terminal_command(state.inner(), &workspace, command).await?;
+    let attachment_id =
+        start_terminal_command(state.inner(), workspace_state.inner(), &workspace, command).await?;
     Ok(TerminalCreateResult { attachment_id })
 }
 
@@ -357,16 +361,21 @@ pub async fn terminal_run_terminal(
         ));
     }
 
-    workspace_state.upsert_workspace_session(&workspace, session.clone());
+    workspace_state
+        .inner()
+        .upsert_workspace_session(&workspace, session.clone());
     Ok(TerminalRunResult { session, created })
 }
 
 pub(crate) async fn start_terminal_command(
     manager: &TerminalManager,
+    workspace_state: &WorkspaceMetadataManager,
     workspace: &str,
     command: &str,
 ) -> Result<String, String> {
     let attachment_id = create_terminal_attachment_id(workspace).await?;
+    workspace_state
+        .upsert_workspace_session(workspace, session_for_command(&attachment_id, command));
     manager.set_startup_command(
         AttachmentKey {
             workspace: workspace.to_string(),
@@ -424,7 +433,9 @@ pub fn terminal_kill_terminal(
         kill_local_attachment(&attachment)?;
     }
 
-    workspace_state.remove_workspace_session(&workspace, "terminal", &attachment_id);
+    workspace_state
+        .inner()
+        .remove_workspace_session(&workspace, "terminal", &attachment_id);
     let cleared_active_session = workspace_state.clear_active_workspace_session_if_matches(
         &workspace,
         "terminal",
@@ -507,12 +518,7 @@ pub async fn terminal_read_terminal(
             &result.stderr,
         ));
     }
-    let session = lookup
-        .workspace
-        .terminals()
-        .iter()
-        .find(|session| session.attachment_id == attachment_id)
-        .cloned();
+    let session = find_terminal_session(&lookup, &attachment_id).await?;
     workspace_state.mark_workspace_session_read(&workspace, &attachment_id, session);
 
     Ok(TerminalReadResult { updated: true })
@@ -975,12 +981,54 @@ fn write_attachment_input(attachment: &Attachment, data: &[u8]) -> Result<(), St
         .map_err(|error| format!("failed to flush terminal input: {error}"))
 }
 
-async fn list_terminals_in_workspace(
+pub(crate) async fn list_terminals_in_workspace(
     lookup: &WorkspaceLookup,
 ) -> Result<Vec<WorkspaceSession>, String> {
-    let mut sessions = lookup.workspace.terminals().to_vec();
+    let mut sessions = match list_live_terminals_in_workspace(lookup).await {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            log::warn!(
+                "failed to read live terminal sessions for workspace {}: {}; falling back to metadata",
+                lookup.workspace.name(),
+                error
+            );
+            lookup.workspace.terminals().to_vec()
+        }
+    };
     sort_workspace_sessions_oldest_to_newest(&mut sessions);
     Ok(sessions)
+}
+
+async fn list_live_terminals_in_workspace(
+    lookup: &WorkspaceLookup,
+) -> Result<Vec<WorkspaceSession>, String> {
+    if !lookup.workspace.is_ready() {
+        return Ok(lookup.workspace.terminals().to_vec());
+    }
+
+    let command = run_terminal_user_command(&format!(
+        "if [ -x {agent_bin} ]; then {agent_bin} terminals; else printf '[]'; fi",
+        agent_bin = shell_quote(REMOTE_WORKSPACE_AGENT_BIN),
+    ));
+    let result = run_remote_command(lookup, &command).await?;
+    if !result.success {
+        return Err(remote_command_error(
+            "failed to list live terminal sessions",
+            &result.stderr,
+        ));
+    }
+
+    parse_live_terminal_sessions(&result.stdout)
+}
+
+fn parse_live_terminal_sessions(stdout: &str) -> Result<Vec<WorkspaceSession>, String> {
+    let stdout = stdout.trim();
+    if stdout.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    serde_json::from_str(stdout)
+        .map_err(|error| format!("failed to parse live terminal sessions: {error}"))
 }
 
 async fn find_terminal_session(
@@ -1318,6 +1366,31 @@ mod tests {
         assert_eq!(session.name, "claude");
         assert_eq!(session.working, Some(false));
         assert_eq!(session.unread, Some(false));
+    }
+
+    #[test]
+    fn parse_live_terminal_sessions_accepts_agent_published_shape() {
+        let sessions = parse_live_terminal_sessions(
+            r#"
+            [
+              {
+                "type": "terminal",
+                "name": "codex",
+                "attachment_id": "terminal-1",
+                "working": true,
+                "unread": false
+              }
+            ]
+            "#,
+        )
+        .expect("agent terminal payload should parse");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].kind, "terminal");
+        assert_eq!(sessions[0].name, "codex");
+        assert_eq!(sessions[0].attachment_id, "terminal-1");
+        assert_eq!(sessions[0].working, Some(true));
+        assert_eq!(sessions[0].unread, Some(false));
     }
 
     #[test]
