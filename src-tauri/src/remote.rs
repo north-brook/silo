@@ -105,8 +105,10 @@ pub(crate) fn command_result_with_stdin_write_error(
     error: &std::io::Error,
 ) -> CommandResult {
     let mut result = command_result_from_output(output);
+    if result.success {
+        return result;
+    }
     let write_error = format!("failed to write gcloud ssh stdin: {error}");
-    result.success = false;
     result.stderr = if result.stderr.trim().is_empty() {
         write_error
     } else {
@@ -276,7 +278,7 @@ mod tests {
     #[test]
     fn stdin_write_error_preserves_remote_stderr_and_forces_failure() {
         let output = Output {
-            status: ExitStatus::from_raw(0),
+            status: ExitStatus::from_raw(1 << 8),
             stdout: Vec::new(),
             stderr: b"ssh: connect to host 1.2.3.4 port 22: Connection refused\n".to_vec(),
         };
@@ -287,5 +289,23 @@ mod tests {
         assert!(!result.success);
         assert!(result.stderr.contains("Connection refused"));
         assert!(result.stderr.contains("Broken pipe"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdin_write_error_preserves_successful_remote_exit() {
+        let output = Output {
+            status: ExitStatus::from_raw(0),
+            stdout: b"done\n".to_vec(),
+            stderr: b"bootstrap state already up to date\n".to_vec(),
+        };
+        let error = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Broken pipe");
+
+        let result = command_result_with_stdin_write_error(output, &error);
+
+        assert!(result.success);
+        assert_eq!(result.stdout, "done\n");
+        assert_eq!(result.stderr, "bootstrap state already up to date\n");
+        assert!(!result.stderr.contains("Broken pipe"));
     }
 }
