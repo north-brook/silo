@@ -3,12 +3,15 @@ use std::env;
 use crate::args::required_flag_value;
 use crate::assistant::run_assistant_proxy;
 use crate::daemon::run_daemon;
-use crate::daemon::state::{AssistantProvider, ObserverEvent};
+use crate::daemon::state::{
+    build_published_state, reconcile_sessions, AssistantProvider, ObserverEvent,
+};
+use crate::daemon::zmx::list_zmx_sessions;
 use crate::files::{
     run_files_read, run_files_sync_watch_set, run_files_tree, run_files_watch_state,
     run_files_write,
 };
-use crate::runtime::{send_event, RuntimePaths};
+use crate::runtime::{load_state, send_event, write_json_stdout, RuntimePaths};
 
 pub(crate) fn run() -> Result<(), String> {
     let args = env::args().skip(1).collect::<Vec<_>>();
@@ -20,6 +23,7 @@ pub(crate) fn run() -> Result<(), String> {
         "daemon" => run_daemon(&args[1..]),
         "emit" => run_emit(&args[1..]),
         "mark-read" => run_mark_read(&args[1..]),
+        "terminals" => run_terminals(),
         "assistant-proxy" => run_assistant_proxy(&args[1..]),
         "files-tree" => run_files_tree(),
         "files-read" => run_files_read(&args[1..]),
@@ -43,6 +47,16 @@ fn run_mark_read(args: &[String]) -> Result<(), String> {
             session: session.to_string(),
         },
     )
+}
+
+fn run_terminals() -> Result<(), String> {
+    let runtime = RuntimePaths::new();
+    let mut state = load_state(&runtime.state_file).unwrap_or_default();
+    if let Ok(live_sessions) = list_zmx_sessions() {
+        reconcile_sessions(&mut state, &live_sessions);
+    }
+    let published = build_published_state(&state);
+    write_json_stdout(&published.terminals)
 }
 
 fn parse_emit_event(args: &[String]) -> Result<ObserverEvent, String> {
