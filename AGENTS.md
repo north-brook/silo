@@ -15,6 +15,8 @@ Keep this file durable. Prefer guidance on how to discover the current state of 
 
 - Frontend typecheck: `bun x tsc --noEmit`
 - Frontend app dev server: `bun run dev`
+- Website dev server: `bun run website:dev`
+- Website production build: `bun run website:build`
 - Tauri app: `bun run tauri dev`
 - Tauri Rust check: `cd src-tauri && cargo check`
 - Tauri Rust tests: `cd src-tauri && cargo test --lib`
@@ -37,7 +39,9 @@ Many bugs that look like frontend issues are actually stale VM state, agent stat
 
 ## Local Logs
 
-- By default, Tauri/plugin logs live under `~/.silo/logs`
+- The production app uses `~/.silo` by default
+- The dev app (`Silo Dev`) uses `~/.silo-dev` by default
+- By default, Tauri/plugin logs live under the active state dir's `logs/` folder
 - When `SILO_STATE_DIR` is set, app-local logs live under `$SILO_STATE_DIR/logs`
 - Driver-launched runs emit a trace bundle under the source Silo home, usually `~/.silo/traces/<trace-id>/`
 - Start by listing recent log files: `ls -lt ~/.silo/logs | head`
@@ -59,9 +63,11 @@ Driver-launched verification runs produce a trace bundle under the active Silo h
 
 ## Local State
 
-Silo stores app-local state under `.silo`. For normal development this is usually `~/.silo`.
+Silo stores app-local state under the active app flavor's state directory.
 
 - Use `SILO_STATE_DIR` when you need isolated app state without changing the real user home directory
+- The production app defaults to `~/.silo`
+- The dev app defaults to `~/.silo-dev`
 - Prefer this for e2e runs so logs, browser profiles, config, and generated service account keys do not mix with your normal local state
 - Keep real `HOME`-backed credentials and tools intact for live-service tests unless the task explicitly requires a separate auth context
 
