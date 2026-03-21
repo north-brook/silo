@@ -23,8 +23,6 @@ import {
 	Decoration,
 	type DecorationSet,
 	EditorView,
-	ViewPlugin,
-	type ViewUpdate,
 } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
 import {
@@ -69,6 +67,24 @@ const editorTheme = EditorView.theme(
 			fontFamily: "var(--font-mono)",
 			overflow: "auto",
 		},
+		".cm-scroller::-webkit-scrollbar": {
+			width: "10px",
+		},
+		".cm-scroller::-webkit-scrollbar-track": {
+			background: "transparent",
+		},
+		".cm-scroller::-webkit-scrollbar-thumb": {
+			background: "var(--color-border-light)",
+			borderRadius: "0",
+			border: "2px solid transparent",
+			backgroundClip: "padding-box",
+		},
+		".cm-scroller::-webkit-scrollbar-thumb:hover": {
+			background: "var(--color-border-hover)",
+			borderRadius: "0",
+			border: "2px solid transparent",
+			backgroundClip: "padding-box",
+		},
 		".cm-content": {
 			caretColor: "var(--color-text-bright)",
 		},
@@ -102,76 +118,52 @@ const editorTheme = EditorView.theme(
 			backgroundColor: "rgba(252, 211, 77, 0.06)",
 			boxShadow: "inset 2px 0 0 rgba(252, 211, 77, 0.5)",
 		},
-		".cm-diff-scrollbar-markers": {
-			position: "absolute",
-			top: "0",
-			right: "0",
-			bottom: "0",
-			width: "6px",
-			pointerEvents: "none",
-			zIndex: "6",
-		},
-		".cm-diff-scrollbar-marker-added": {
-			position: "absolute",
-			right: "0",
-			width: "6px",
-			minHeight: "2px",
-			borderRadius: "1px",
-			backgroundColor: "rgba(52, 211, 153, 0.7)",
-		},
-		".cm-diff-scrollbar-marker-modified": {
-			position: "absolute",
-			right: "0",
-			width: "6px",
-			minHeight: "2px",
-			borderRadius: "1px",
-			backgroundColor: "rgba(252, 211, 77, 0.7)",
-		},
 	},
 	{ dark: true },
 );
 
 const highlightStyle = HighlightStyle.define([
-	{ tag: [t.keyword, t.operatorKeyword, t.modifier], color: "#569CD6" },
+	{ tag: [t.keyword, t.operatorKeyword, t.controlKeyword], color: "#ff7b72" },
+	{ tag: [t.moduleKeyword], color: "#ff7b72" },
+	{ tag: [t.modifier], color: "#e6edf3" },
+	{ tag: [t.string, t.special(t.string)], color: "#a5d6ff" },
+	{ tag: [t.regexp], color: "#a5d6ff" },
 	{
-		tag: [t.controlKeyword],
-		color: "#C586C0",
+		tag: [t.typeName, t.className, t.namespace],
+		color: "#ffa657",
 	},
-	{ tag: [t.string, t.special(t.string), t.regexp], color: "#CE9178" },
-	{
-		tag: [t.typeName, t.className, t.tagName, t.namespace],
-		color: "#4EC9B0",
-	},
-	{ tag: [t.number, t.bool, t.null, t.atom, t.self], color: "#B5CEA8" },
-	{ tag: t.constant(t.name), color: "#4FC1FF" },
+	{ tag: [t.tagName], color: "#7ee787" },
+	{ tag: [t.number, t.bool, t.null, t.atom], color: "#79c0ff" },
+	{ tag: [t.self], color: "#ff7b72" },
+	{ tag: t.constant(t.name), color: "#79c0ff" },
 	{
 		tag: [t.function(t.variableName), t.function(t.propertyName)],
-		color: "#DCDCAA",
+		color: "#d2a8ff",
 	},
-	{ tag: t.definition(t.variableName), color: "#DCDCAA" },
-	{ tag: [t.variableName], color: "#9CDCFE" },
-	{ tag: [t.propertyName], color: "#9CDCFE" },
-	{ tag: t.definition(t.propertyName), color: "#9CDCFE" },
-	{ tag: t.operator, color: "#D4D4D4" },
-	{ tag: [t.punctuation, t.separator, t.bracket], color: "#D4D4D4" },
+	{ tag: t.definition(t.variableName), color: "#e6edf3" },
+	{ tag: [t.variableName], color: "#e6edf3" },
+	{ tag: [t.propertyName], color: "#79c0ff" },
+	{ tag: t.definition(t.propertyName), color: "#79c0ff" },
+	{ tag: t.operator, color: "#ff7b72" },
+	{ tag: [t.punctuation, t.separator, t.bracket], color: "#e6edf3" },
 	{
 		tag: [t.comment, t.lineComment, t.blockComment],
-		color: "#6A9955",
+		color: "#8b949e",
 		fontStyle: "italic",
 	},
-	{ tag: [t.meta, t.annotation], color: "#569CD6" },
-	{ tag: t.attributeName, color: "#9CDCFE" },
-	{ tag: t.attributeValue, color: "#CE9178" },
-	{ tag: t.heading, fontWeight: "bold", color: "#569CD6" },
+	{ tag: [t.meta, t.annotation], color: "#ff7b72" },
+	{ tag: t.attributeName, color: "#79c0ff" },
+	{ tag: t.attributeValue, color: "#a5d6ff" },
+	{ tag: t.heading, fontWeight: "bold", color: "#79c0ff" },
 	{ tag: t.strong, fontWeight: "bold" },
 	{ tag: t.emphasis, fontStyle: "italic" },
-	{ tag: t.link, color: "#569CD6", textDecoration: "underline" },
-	{ tag: t.url, color: "#569CD6" },
-	{ tag: t.inserted, color: "#B5CEA8" },
-	{ tag: t.deleted, color: "#CE9178" },
-	{ tag: t.changed, color: "#569CD6" },
-	{ tag: t.escape, color: "#D7BA7D" },
-	{ tag: t.invalid, color: "#f44747" },
+	{ tag: t.link, color: "#79c0ff", textDecoration: "underline" },
+	{ tag: t.url, color: "#79c0ff" },
+	{ tag: t.inserted, color: "#7ee787" },
+	{ tag: t.deleted, color: "#ffa198" },
+	{ tag: t.changed, color: "#79c0ff" },
+	{ tag: t.escape, color: "#79c0ff" },
+	{ tag: t.invalid, color: "#ffa198" },
 ]);
 
 // --- Diff line decorations (from git patch) ---
@@ -285,68 +277,6 @@ function buildPatchDecorations(
 	return builder.finish();
 }
 
-// --- Scrollbar diff markers ---
-
-function consolidateChangedRanges(
-	changedLines: Map<number, "added" | "modified">,
-): { start: number; end: number; status: "added" | "modified" }[] {
-	const sorted = [...changedLines.entries()].sort((a, b) => a[0] - b[0]);
-	const ranges: { start: number; end: number; status: "added" | "modified" }[] =
-		[];
-
-	for (const [line, status] of sorted) {
-		const last = ranges[ranges.length - 1];
-		if (last && last.status === status && line === last.end + 1) {
-			last.end = line;
-		} else {
-			ranges.push({ start: line, end: line, status });
-		}
-	}
-
-	return ranges;
-}
-
-function createScrollbarMarkersExtension(
-	changedLines: Map<number, "added" | "modified">,
-): Extension {
-	return ViewPlugin.fromClass(
-		class {
-			container: HTMLElement;
-
-			constructor(view: EditorView) {
-				this.container = document.createElement("div");
-				this.container.className = "cm-diff-scrollbar-markers";
-				view.dom.appendChild(this.container);
-				this.buildMarkers(view);
-			}
-
-			update(update: ViewUpdate) {
-				if (update.geometryChanged || update.docChanged) {
-					this.buildMarkers(update.view);
-				}
-			}
-
-			buildMarkers(view: EditorView) {
-				this.container.textContent = "";
-				const totalLines = view.state.doc.lines;
-				if (totalLines === 0) return;
-
-				const ranges = consolidateChangedRanges(changedLines);
-				for (const range of ranges) {
-					const marker = document.createElement("div");
-					marker.className = `cm-diff-scrollbar-marker-${range.status}`;
-					marker.style.top = `${((range.start - 1) / totalLines) * 100}%`;
-					marker.style.height = `${((range.end - range.start + 1) / totalLines) * 100}%`;
-					this.container.appendChild(marker);
-				}
-			}
-
-			destroy() {
-				this.container.remove();
-			}
-		},
-	);
-}
 
 // --- Component ---
 
@@ -405,10 +335,7 @@ export function WorkspaceFileSessionView() {
 			syntaxHighlighting(highlightStyle),
 			EditorView.lineWrapping,
 			...(changedLines && changedLines.size > 0
-				? [
-						createPatchDiffExtension(changedLines),
-						createScrollbarMarkersExtension(changedLines),
-					]
+				? [createPatchDiffExtension(changedLines)]
 				: []),
 			languageExtensionForPath(path ?? ""),
 		],
