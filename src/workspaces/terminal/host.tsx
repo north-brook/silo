@@ -23,8 +23,8 @@ const MIN_ATTACH_COLS = 10;
 const MIN_ATTACH_ROWS = 4;
 const MIN_ATTACH_PIXEL_SIZE = 4;
 
-function normalizeTerminalOutput(data: ArrayBuffer): Uint8Array {
-	const bytes = new Uint8Array(data);
+function normalizeTerminalOutput(data: ArrayBuffer | Uint8Array): Uint8Array {
+	const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
 	if (!bytes.includes(DELETE_BYTE)) {
 		return bytes;
 	}
@@ -41,9 +41,19 @@ function normalizeTerminalOutput(data: ArrayBuffer): Uint8Array {
 	return Uint8Array.from(normalized);
 }
 
+function writeTerminalOutput(term: Terminal, data: Uint8Array): Promise<void> {
+	if (data.length === 0) {
+		return Promise.resolve();
+	}
+	return new Promise((resolve) => {
+		term.write(data, resolve);
+	});
+}
+
 interface TerminalAttachResult {
 	terminal_id: string;
 	session: WorkspaceSession;
+	initial_output: number[];
 }
 
 interface TerminalSize {
@@ -603,6 +613,10 @@ export function TerminalSessionHost({
 
 				term.reset();
 				lastResizeRef.current = null;
+				await writeTerminalOutput(
+					term,
+					normalizeTerminalOutput(Uint8Array.from(result.initial_output)),
+				);
 				await invoke("terminal_finish_attach", {
 					terminal: result.terminal_id,
 				});
