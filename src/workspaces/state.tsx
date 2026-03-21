@@ -8,6 +8,11 @@ import {
 	useEffect,
 	useMemo,
 } from "react";
+import { useNavigate } from "react-router-dom";
+import {
+	type BrowserStateEventPayload,
+	popupBrowserSessionHrefForEvent,
+} from "@/workspaces/browser/events";
 import {
 	type CloudSession,
 	normalizeWorkspaceSession,
@@ -16,9 +21,11 @@ import { type TemplateState, getTemplateState } from "@/projects/api";
 import { useWorkspaceRouteParams } from "@/workspaces/routes/params";
 import { invoke } from "@/shared/lib/invoke";
 import {
-	isTemplateWorkspace,
+	applyWorkspaceStateEventToWorkspace,
+	type WorkspaceStateEventPayload,
+} from "@/workspaces/state-events";
+import {
 	type Workspace,
-	type WorkspaceActiveSession,
 	type WorkspaceSession,
 	workspaceIsReady,
 	workspaceSessions,
@@ -42,13 +49,6 @@ const WorkspaceStateContext = createContext<WorkspaceStateContextValue>({
 	invalidateWorkspace: () => {},
 });
 
-interface WorkspaceStateEventPayload {
-	workspace: string;
-	clearedActiveSession: boolean;
-	removedSessionAttachmentId?: string | null;
-	removedSessionKind?: string | null;
-}
-
 function WorkspaceStateProviderInner({
 	children,
 	projectParam,
@@ -58,6 +58,7 @@ function WorkspaceStateProviderInner({
 	projectParam: string;
 	workspaceName: string;
 }) {
+	const navigate = useNavigate();
 	const queryClient = useQueryClient();
 
 	const workspaceQuery = useQuery({
@@ -84,87 +85,6 @@ function WorkspaceStateProviderInner({
 		});
 	}, [queryClient, workspaceName]);
 
-	const applyWorkspaceStateEvent = useCallback(
-		(
-			current: Workspace | null | undefined,
-			event: WorkspaceStateEventPayload,
-		): Workspace | null | undefined => {
-			if (!current) {
-				return current;
-			}
-
-			const nextActiveSession: WorkspaceActiveSession | null | undefined =
-				event.clearedActiveSession
-					? null
-					: current.active_session ?? null;
-
-			if (
-				!event.removedSessionAttachmentId ||
-				!event.removedSessionKind
-			) {
-				if (nextActiveSession === current.active_session) {
-					return current;
-				}
-				return {
-					...current,
-					active_session: nextActiveSession,
-				};
-			}
-
-			const removeSession = (sessions: WorkspaceSession[]) =>
-				sessions.filter(
-					(session) =>
-						!(
-							session.type === event.removedSessionKind &&
-							session.attachment_id === event.removedSessionAttachmentId
-						),
-				);
-
-			const nextTerminals = removeSession(current.terminals);
-			const nextBrowsers = removeSession(current.browsers);
-			const nextFiles = removeSession(current.files);
-			const assistantPresent = nextTerminals.some(
-				(session) => session.working != null || session.unread != null,
-			);
-			const nextWorking = assistantPresent
-				? nextTerminals.some((session) => session.working === true)
-				: null;
-			const nextUnread = nextTerminals.some(
-				(session) => session.unread === true,
-			);
-
-			if (
-				nextTerminals.length === current.terminals.length &&
-				nextBrowsers.length === current.browsers.length &&
-				nextFiles.length === current.files.length &&
-				nextActiveSession === current.active_session
-			) {
-				return current;
-			}
-
-			if (isTemplateWorkspace(current)) {
-				return {
-					...current,
-					active_session: nextActiveSession,
-					terminals: nextTerminals,
-					browsers: nextBrowsers,
-					files: nextFiles,
-				};
-			}
-
-			return {
-				...current,
-				active_session: nextActiveSession,
-				terminals: nextTerminals,
-				browsers: nextBrowsers,
-				files: nextFiles,
-				unread: nextUnread,
-				working: nextWorking,
-			};
-		},
-		[],
-	);
-
 	useEffect(() => {
 		if (!workspaceName) {
 			return;
@@ -179,11 +99,45 @@ function WorkspaceStateProviderInner({
 			}
 		};
 
-		void listen<{ workspace: string }>("browser://state", (event) => {
+		void listen<BrowserStateEventPayload>("browser://state", (event) => {
 			if (disposed || event.payload.workspace !== workspaceName) {
 				return;
 			}
-			invalidateWorkspace();
+
+			const popupHref = popupBrowserSessionHrefForEvent(event.payload, {
+				project: projectParam,
+				workspaceName,
+			});
+			const popupAttachmentId = event.payload.popupAttachmentId?.trim();
+			if (!popupHref || !popupAttachmentId) {
+				invalidateWorkspace();
+				return;
+			}
+
+			void queryClient
+				.invalidateQueries({
+					queryKey: ["workspaces_get_workspace", workspaceName],
+				})
+				.then(() => {
+					if (disposed) {
+						return;
+					}
+
+					const workspace = queryClient.getQueryData<Workspace | null>([
+						"workspaces_get_workspace",
+						workspaceName,
+					]);
+					const popupPresent =
+						workspace != null &&
+						workspaceSessions(workspace).some(
+							(session) =>
+								session.type === "browser" &&
+								session.attachment_id === popupAttachmentId,
+						);
+					if (popupPresent) {
+						navigate(popupHref);
+					}
+				});
 		}).then((nextUnlisten) => {
 			if (disposed) {
 				void Promise.resolve(nextUnlisten()).catch(() => {});
@@ -200,7 +154,8 @@ function WorkspaceStateProviderInner({
 				}
 				queryClient.setQueryData<Workspace | null>(
 					["workspaces_get_workspace", workspaceName],
-					(current) => applyWorkspaceStateEvent(current, event.payload) ?? null,
+					(current) =>
+						applyWorkspaceStateEventToWorkspace(current, event.payload) ?? null,
 				);
 				invalidateWorkspace();
 			},
@@ -216,7 +171,13 @@ function WorkspaceStateProviderInner({
 			disposed = true;
 			disposeListeners();
 		};
-	}, [applyWorkspaceStateEvent, invalidateWorkspace, queryClient, workspaceName]);
+	}, [
+		invalidateWorkspace,
+		navigate,
+		projectParam,
+		queryClient,
+		workspaceName,
+	]);
 
 	const workspace = workspaceQuery.data ?? null;
 	const isMissing =
