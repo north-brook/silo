@@ -1,4 +1,4 @@
-import { useMutation, useMutationState } from "@tanstack/react-query";
+import { useMutation, useMutationState, useQueryClient } from "@tanstack/react-query";
 import { Globe, Plus, Terminal, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useMatch, useNavigate } from "react-router-dom";
@@ -17,7 +17,7 @@ import { CodexIcon } from "@/shared/ui/icons/codex";
 import { Loader } from "@/shared/ui/loader";
 import { toast } from "@/shared/ui/toaster";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import type { WorkspaceSession } from "@/workspaces/api";
+import type { Workspace, WorkspaceSession } from "@/workspaces/api";
 import {
 	type DisplayWorkspaceSession,
 	FileSessionsProvider,
@@ -43,6 +43,7 @@ import {
 	useWorkspaceSessions,
 	useWorkspaceState,
 } from "@/workspaces/state";
+import { removeWorkspaceSessionFromWorkspace } from "@/workspaces/state-events";
 import { assistantTerminalModel } from "@/workspaces/terminal/session";
 
 export function WorkspaceShell() {
@@ -142,6 +143,7 @@ function findLiveNeighbor(
 function WorkspaceShellInner() {
 	const pathname = useLocation().pathname;
 	const navigate = useNavigate();
+	const queryClient = useQueryClient();
 	const browserMatch = useMatch(
 		"/projects/:project/workspaces/:workspace/browser/:attachmentId",
 	);
@@ -299,6 +301,25 @@ function WorkspaceShellInner() {
 							workspace: workspaceName,
 							attachmentId: session.attachment_id,
 						}),
+		onMutate: (session) => {
+			const previousWorkspace = queryClient.getQueryData<Workspace | null>([
+				"workspaces_get_workspace",
+				workspaceName,
+			]);
+			const attachmentId =
+				session.type === "file"
+					? (session.persistentAttachmentId ?? session.attachment_id)
+					: session.attachment_id;
+			queryClient.setQueryData<Workspace | null>(
+				["workspaces_get_workspace", workspaceName],
+				(current) =>
+					removeWorkspaceSessionFromWorkspace(current, {
+						kind: session.type,
+						attachmentId,
+					}) ?? null,
+			);
+			return { previousWorkspace };
+		},
 		onSuccess: (_, session) => {
 			invalidateWorkspace();
 			removeSession(
@@ -307,10 +328,14 @@ function WorkspaceShellInner() {
 				session.type === "file"
 					? (session.persistentAttachmentId ?? session.attachment_id)
 					: session.attachment_id,
-			);
+				);
 			clearSession(session.attachment_id);
 		},
-		onError: (error, session) => {
+		onError: (error, session, context) => {
+			queryClient.setQueryData<Workspace | null>(
+				["workspaces_get_workspace", workspaceName],
+				context?.previousWorkspace ?? null,
+			);
 			toast({
 				variant: "error",
 				title:
@@ -321,6 +346,9 @@ function WorkspaceShellInner() {
 							: "Failed to close terminal",
 				description: error.message,
 			});
+		},
+		onSettled: () => {
+			invalidateWorkspace();
 		},
 	});
 
@@ -342,41 +370,42 @@ function WorkspaceShellInner() {
 		(session: DisplayWorkspaceSession) => {
 			if (deletingIds.has(session.attachment_id)) return;
 
+			const isLocalOnly = isLocalOnlyFileSession(session, workspaceSessions);
 			const isActive =
 				activeKind === session.type &&
 				activeAttachmentId === session.attachment_id;
-			if (isActive) {
-				const idx = sessions.findIndex(
-					(s) => s.attachment_id === session.attachment_id,
-				);
-				// Build a preview set including the tab we're about to close
-				const preview = new Set(deletingIds);
-				preview.add(session.attachment_id);
-				const neighbor = findLiveNeighbor(sessions, idx, preview);
-				if (neighbor) {
-					navigate(
-						workspaceSessionHref({
-							project,
-							workspace: workspaceName,
-							kind: neighbor.type,
-							attachmentId: neighbor.attachment_id,
-						}),
-						{ replace: true },
-					);
-				} else {
-					navigate(currentWorkspaceHref, { replace: true });
-				}
+			const navigateTo =
+				isActive
+					? (() => {
+							const idx = sessions.findIndex(
+								(s) => s.attachment_id === session.attachment_id,
+							);
+							const preview = new Set(deletingIds);
+							preview.add(session.attachment_id);
+							const neighbor = findLiveNeighbor(sessions, idx, preview);
+							return neighbor
+								? workspaceSessionHref({
+										project,
+										workspace: workspaceName,
+										kind: neighbor.type,
+										attachmentId: neighbor.attachment_id,
+									})
+								: currentWorkspaceHref;
+						})()
+					: null;
+
+			if (!session.preview && !isLocalOnly) {
+				killSession.mutate(session);
 			}
 
-			if (
-				session.preview ||
-				isLocalOnlyFileSession(session, workspaceSessions)
-			) {
+			if (isActive) {
+				navigate(navigateTo ?? currentWorkspaceHref, { replace: true });
+			}
+
+			if (session.preview || isLocalOnly) {
 				clearSession(session.attachment_id);
 				return;
 			}
-
-			killSession.mutate(session);
 		},
 		[
 			deletingIds,
@@ -502,6 +531,32 @@ function WorkspaceShellInner() {
 			if (e.metaKey && e.shiftKey && e.code === "BracketRight") {
 				e.preventDefault();
 				navigateToNextTab();
+			}
+		},
+	});
+	useShortcut<void>({
+		event: shortcutEvents.newTerminalTab,
+		onTrigger: () => {
+			createTerminal.mutate();
+		},
+		onKeyDown: (e) => {
+			if (!e.metaKey || !e.shiftKey || e.altKey || e.ctrlKey) return;
+			if (e.key.toLowerCase() === "t") {
+				e.preventDefault();
+				createTerminal.mutate();
+			}
+		},
+	});
+	useShortcut<void>({
+		event: shortcutEvents.newBrowserTab,
+		onTrigger: () => {
+			createBrowser.mutate();
+		},
+		onKeyDown: (e) => {
+			if (!e.metaKey || !e.shiftKey || e.altKey || e.ctrlKey) return;
+			if (e.key.toLowerCase() === "b") {
+				e.preventDefault();
+				createBrowser.mutate();
 			}
 		},
 	});
