@@ -26,11 +26,19 @@ const ATTACH_COMMAND_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const ATTACH_RESERVATION_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const ATTACH_RESERVATION_WAIT_INTERVAL: Duration = Duration::from_millis(50);
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TerminalAttachMode {
+    Fresh,
+    Reused,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TerminalAttachResult {
     terminal_id: String,
     session: WorkspaceSession,
     initial_output: Vec<u8>,
+    attach_mode: TerminalAttachMode,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -325,6 +333,7 @@ pub async fn terminal_attach_terminal(
         terminal_id: attachment.id.clone(),
         session: resolve_attached_session(&lookup, &attachment_id).await?,
         initial_output: Vec::new(),
+        attach_mode: TerminalAttachMode::Fresh,
     })
 }
 
@@ -979,6 +988,7 @@ async fn attach_existing_terminal(
         terminal_id: existing.id.clone(),
         session: resolve_attached_session(lookup, name).await?,
         initial_output,
+        attach_mode: TerminalAttachMode::Reused,
     })
 }
 
@@ -1250,9 +1260,22 @@ mod tests {
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
     use portable_pty::{native_pty_system, ChildKiller};
+    use serde_json::json;
     use std::collections::HashSet;
     use std::sync::{Arc, Condvar, Mutex};
     use tauri::ipc::{Channel, InvokeResponseBody};
+
+    #[test]
+    fn terminal_attach_mode_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_value(TerminalAttachMode::Fresh).expect("serialize attach mode"),
+            json!("fresh")
+        );
+        assert_eq!(
+            serde_json::to_value(TerminalAttachMode::Reused).expect("serialize attach mode"),
+            json!("reused")
+        );
+    }
 
     #[test]
     fn terminal_run_remote_command_passes_command_as_argument() {
