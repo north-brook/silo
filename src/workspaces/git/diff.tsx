@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import { ExternalLink } from "lucide-react";
+import { ChevronsDownUp, ChevronsUpDown, ExternalLink } from "lucide-react";
 import { PatchDiff } from "@pierre/diffs/react";
 import { useNavigate } from "react-router-dom";
 import { useFileSessions } from "@/workspaces/files/context";
@@ -69,26 +69,66 @@ function DiffSectionView({
 	label: string;
 	section: DiffSection;
 }) {
+	const [allCollapsed, setAllCollapsed] = useState(false);
+	const [toggleGeneration, setToggleGeneration] = useState(0);
+
 	if (section.files.length === 0) return null;
 
 	return (
 		<div>
-			<div className="sticky top-0 z-10 bg-surface flex items-center px-3 py-1.5 text-[11px]">
+			<div className="sticky top-0 z-10 bg-surface flex items-center justify-between px-3 py-1.5 text-[11px]">
 				<span className="text-[10px] text-text-muted font-medium uppercase tracking-wide">
 					{label}
 				</span>
+				<button
+					type="button"
+					onClick={() => {
+						setAllCollapsed((c) => !c);
+						setToggleGeneration((g) => g + 1);
+					}}
+					className="text-text-muted hover:text-text transition-colors"
+					title={allCollapsed ? "Expand all" : "Collapse all"}
+				>
+					{allCollapsed ? (
+						<ChevronsUpDown size={12} />
+					) : (
+						<ChevronsDownUp size={12} />
+					)}
+				</button>
 			</div>
 			<div className="flex flex-col gap-2 px-2">
 				{section.files.map((file) => (
-					<DiffFileView key={file.path} file={file} />
+					<DiffFileView
+						key={file.path}
+						file={file}
+						forceCollapsed={allCollapsed}
+						toggleGeneration={toggleGeneration}
+					/>
 				))}
 			</div>
 		</div>
 	);
 }
 
-function DiffFileView({ file }: { file: DiffFile }) {
-	const [collapsed, setCollapsed] = useState(true);
+function DiffFileView({
+	file,
+	forceCollapsed,
+	toggleGeneration,
+}: {
+	file: DiffFile;
+	forceCollapsed: boolean;
+	toggleGeneration: number;
+}) {
+	const [localCollapsed, setLocalCollapsed] = useState<{
+		value: boolean;
+		generation: number;
+	}>({ value: false, generation: 0 });
+
+	const collapsed =
+		localCollapsed.generation >= toggleGeneration
+			? localCollapsed.value
+			: forceCollapsed;
+
 	const navigate = useNavigate();
 	const workspaceSessions = useWorkspaceSessions();
 	const { openFileTab } = useFileSessions();
@@ -149,11 +189,19 @@ function DiffFileView({ file }: { file: DiffFile }) {
 	return (
 		<div
 			className="pierre-diff-container rounded border border-border-light"
-			onClick={() => setCollapsed((c) => !c)}
+			onClick={() =>
+				setLocalCollapsed({
+					value: !collapsed,
+					generation: toggleGeneration + 1,
+				})
+			}
 			onKeyDown={(e) => {
 				if (e.key === "Enter" || e.key === " ") {
 					e.preventDefault();
-					setCollapsed((c) => !c);
+					setLocalCollapsed({
+						value: !collapsed,
+						generation: toggleGeneration + 1,
+					});
 				}
 			}}
 		>
