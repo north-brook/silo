@@ -573,6 +573,7 @@ export function TerminalSessionHost({
 		let unlistenExit: (() => void | Promise<void>) | null = null;
 		let unlistenError: (() => void | Promise<void>) | null = null;
 		let unlistenDisconnect: (() => void | Promise<void>) | null = null;
+		let resizeRafId: number | null = null;
 
 		const term = new Terminal({
 			theme: THEME,
@@ -705,17 +706,32 @@ export function TerminalSessionHost({
 				unlistenDisconnect = unlisten;
 			});
 
-		const resizeObserver = new ResizeObserver(() => {
-			scheduleFitAndResize();
-			if (!terminalIdRef.current) {
-				triggerAttach();
+		const requestResizeSync = () => {
+			if (resizeRafId !== null) {
+				window.cancelAnimationFrame(resizeRafId);
 			}
+			resizeRafId = window.requestAnimationFrame(() => {
+				resizeRafId = null;
+				scheduleFitAndResize();
+				if (!terminalIdRef.current) {
+					triggerAttach();
+				}
+			});
+		};
+
+		const resizeObserver = new ResizeObserver(() => {
+			requestResizeSync();
 		});
 		resizeObserver.observe(mountElement);
+		window.addEventListener("resize", requestResizeSync);
 
 		return () => {
 			disposed = true;
 			clearReconnectTimer();
+			if (resizeRafId !== null) {
+				window.cancelAnimationFrame(resizeRafId);
+			}
+			window.removeEventListener("resize", requestResizeSync);
 			resizeObserver.disconnect();
 			detachBindings();
 			term.dispose();
