@@ -21,6 +21,7 @@ interface GitSidebarContextValue {
 	activeTab: GitSidebarTab;
 	openTab: (tab: GitSidebarTab) => void;
 	diff: Diff | null;
+	diffLoading: boolean;
 	hasChanges: boolean;
 	workspace: string;
 	project: string;
@@ -37,6 +38,7 @@ const GitSidebarContext = createContext<GitSidebarContextValue>({
 	activeTab: "diff",
 	openTab: () => {},
 	diff: null,
+	diffLoading: false,
 	hasChanges: false,
 	workspace: "",
 	project: "",
@@ -175,6 +177,7 @@ export function GitSidebarProvider({ children }: { children: ReactNode }) {
 				activeTab: visibleTab,
 				openTab,
 				diff: diff.data ?? null,
+				diffLoading: diff.isLoading,
 				hasChanges,
 				workspace: workspaceName,
 				project,

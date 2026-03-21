@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { ChevronsDownUp, ChevronsUpDown, ExternalLink } from "lucide-react";
 import { PatchDiff } from "@pierre/diffs/react";
 import { useNavigate } from "react-router-dom";
+import { Loader } from "@/shared/ui/loader";
 import { useFileSessions } from "@/workspaces/files/context";
 import type { DiffFile, DiffSection } from "@/workspaces/git/api";
 import { useGitSidebar } from "@/workspaces/git/context";
@@ -50,7 +51,15 @@ const baseDiffOptions = {
 };
 
 export function GitDiffTab() {
-	const { diff } = useGitSidebar();
+	const { diff, diffLoading } = useGitSidebar();
+
+	if (diffLoading && !diff) {
+		return (
+			<div className="h-full flex items-center justify-center">
+				<Loader />
+			</div>
+		);
+	}
 
 	if (!diff) return null;
 

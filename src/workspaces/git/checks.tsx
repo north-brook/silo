@@ -24,7 +24,9 @@ export function GitChecksStatusIndicator({
 	observation: PullRequestObservation | null;
 	isLoading: boolean;
 }) {
-	if (isLoading) return <Loader />;
+	if (isLoading) {
+		return <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" />;
+	}
 
 	const checks = observation?.checks ?? [];
 	if (checks.length === 0) return null;
@@ -47,7 +49,7 @@ export function GitChecksStatusIndicator({
 		return <X size={10} className="text-red-400" />;
 	}
 	if (checks.some((check) => pendingStates.includes(check.state))) {
-		return <Loader />;
+		return <span className="w-1.5 h-1.5 rounded-full bg-yellow-400" />;
 	}
 
 	return <Check size={10} className="text-emerald-400" />;
