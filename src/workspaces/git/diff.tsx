@@ -1,3 +1,6 @@
+import { useCallback, useMemo, useState } from "react";
+import { ExternalLink } from "lucide-react";
+import { PatchDiff } from "@pierre/diffs/react";
 import { useNavigate } from "react-router-dom";
 import { useFileSessions } from "@/workspaces/files/context";
 import type { DiffFile, DiffSection } from "@/workspaces/git/api";
@@ -5,13 +8,54 @@ import { useGitSidebar } from "@/workspaces/git/context";
 import { fileSessionHref } from "@/workspaces/routes/paths";
 import { useWorkspaceSessions } from "@/workspaces/state";
 
+const baseDiffOptions = {
+	theme: "github-dark-default" as const,
+	diffStyle: "unified" as const,
+	diffIndicators: "bars" as const,
+	disableLineNumbers: false,
+	overflow: "wrap" as const,
+	lineDiffType: "word" as const,
+	disableBackground: true,
+	expandUnchanged: false,
+	hunkSeparators: "simple" as const,
+	unsafeCSS: `
+		:host {
+			--diffs-header-font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', ui-monospace, monospace;
+			--diffs-font-size: 12px;
+			--diffs-line-height: 18px;
+			--diffs-addition-color-override: #16a34a;
+			--diffs-deletion-color-override: #f87171;
+		}
+		[data-diffs-header] {
+			font-size: 11px;
+			min-height: unset;
+			padding-block: 6px;
+			cursor: pointer;
+			position: sticky;
+			top: 26px;
+			z-index: 3;
+			background: var(--diffs-bg);
+		}
+		[data-change-icon] {
+			display: none;
+		}
+		[data-diffs-header] [data-metadata] {
+			gap: 8px;
+		}
+		[data-diffs-header] [data-additions-count],
+		[data-diffs-header] [data-deletions-count] {
+			font-size: 10px;
+		}
+	`,
+};
+
 export function GitDiffTab() {
 	const { diff } = useGitSidebar();
 
 	if (!diff) return null;
 
 	return (
-		<div className="flex flex-col gap-2">
+		<div className="flex flex-col gap-2 pb-2">
 			<DiffSectionView label="Local" section={diff.local} />
 			<DiffSectionView label="Remote" section={diff.remote} />
 		</div>
@@ -29,56 +73,95 @@ function DiffSectionView({
 
 	return (
 		<div>
-			<div className="flex items-center px-3 py-1.5 text-[11px]">
+			<div className="sticky top-0 z-10 bg-surface flex items-center px-3 py-1.5 text-[11px]">
 				<span className="text-[10px] text-text-muted font-medium uppercase tracking-wide">
 					{label}
 				</span>
 			</div>
-			{section.files.map((file) => (
-				<DiffFileRow key={file.path} file={file} />
-			))}
+			<div className="flex flex-col gap-2 px-2">
+				{section.files.map((file) => (
+					<DiffFileView key={file.path} file={file} />
+				))}
+			</div>
 		</div>
 	);
 }
 
-function DiffFileRow({ file }: { file: DiffFile }) {
+function DiffFileView({ file }: { file: DiffFile }) {
+	const [collapsed, setCollapsed] = useState(true);
 	const navigate = useNavigate();
 	const workspaceSessions = useWorkspaceSessions();
 	const { openFileTab } = useFileSessions();
 	const { workspace, project } = useGitSidebar();
 
+	const options = useMemo(
+		() => ({ ...baseDiffOptions, collapsed }),
+		[collapsed],
+	);
+
+	const openFile = useCallback(
+		(e: React.MouseEvent) => {
+			e.stopPropagation();
+			void openFileTab({
+				localFirst: true,
+				path: file.path,
+				persistent: true,
+				workspace,
+				workspaceSessions,
+			}).then((result) => {
+				navigate(
+					fileSessionHref({
+						project,
+						workspace,
+						attachmentId: result.attachmentId,
+					}),
+				);
+			});
+		},
+		[file.path, workspace, workspaceSessions, project, navigate, openFileTab],
+	);
+
+	const renderHeaderMetadata = useCallback(
+		() => (
+			<button
+				type="button"
+				onClick={openFile}
+				className="inline-flex items-center text-text-muted hover:text-text transition-colors translate-y-px"
+				title="Open file"
+			>
+				<ExternalLink size={12} />
+			</button>
+		),
+		[openFile],
+	);
+
+	if (file.binary || file.patch == null) {
+		return (
+			<div className="flex items-center px-1 py-1 text-[11px] text-text-muted">
+				<span className="truncate min-w-0">{file.path}</span>
+				<span className="shrink-0 ml-auto text-text-placeholder italic">
+					binary
+				</span>
+			</div>
+		);
+	}
+
 	return (
-		<button
-			type="button"
-			onClick={() => {
-				void openFileTab({
-					localFirst: true,
-					path: file.path,
-					persistent: true,
-					workspace,
-					workspaceSessions,
-				}).then((result) => {
-					navigate(
-						fileSessionHref({
-							project,
-							workspace,
-							attachmentId: result.attachmentId,
-						}),
-					);
-				});
+		<div
+			className="pierre-diff-container rounded border border-border-light"
+			onClick={() => setCollapsed((c) => !c)}
+			onKeyDown={(e) => {
+				if (e.key === "Enter" || e.key === " ") {
+					e.preventDefault();
+					setCollapsed((c) => !c);
+				}
 			}}
-			className="w-full flex items-center justify-between px-3 py-1 text-[11px] hover:bg-btn-hover transition-colors text-left"
 		>
-			<span className="truncate min-w-0 text-text">{file.path}</span>
-			<span className="shrink-0 ml-2 text-text-muted">
-				{file.additions > 0 && (
-					<span className="text-emerald-400">+{file.additions}</span>
-				)}
-				{file.additions > 0 && file.deletions > 0 && " "}
-				{file.deletions > 0 && (
-					<span className="text-red-400">-{file.deletions}</span>
-				)}
-			</span>
-		</button>
+			<PatchDiff
+				patch={file.patch}
+				options={options}
+				renderHeaderMetadata={renderHeaderMetadata}
+			/>
+		</div>
 	);
 }
