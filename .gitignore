@@ -18,6 +18,8 @@ target
 *.local
 .next
 tsconfig.tsbuildinfo
+src-tauri/tauri.release.conf.json
+.vercel
 
 # Editor directories and files
 .vscode/*
