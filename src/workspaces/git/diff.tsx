@@ -21,8 +21,8 @@ const baseDiffOptions = {
 	unsafeCSS: `
 		:host {
 			--diffs-header-font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', ui-monospace, monospace;
-			--diffs-font-size: 12px;
-			--diffs-line-height: 18px;
+			--diffs-font-size: 11px;
+			--diffs-line-height: 16px;
 			--diffs-addition-color-override: #16a34a;
 			--diffs-deletion-color-override: #f87171;
 		}
