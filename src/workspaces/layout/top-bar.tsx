@@ -23,6 +23,7 @@ import {
 } from "@/workspaces/api";
 import { useGitSidebar } from "@/workspaces/git/context";
 import { GitSidebarToggle } from "@/workspaces/git/toggle";
+import { GitTopBarActions } from "@/workspaces/git/top-bar-actions";
 import { useTemplateState } from "@/workspaces/state";
 import Image from "@/shared/ui/image";
 import { Loader } from "@/shared/ui/loader";
@@ -370,7 +371,8 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 					</Popover>
 				</div>
 				<div data-tauri-drag-region className="h-full flex-1" />
-				<GitSidebarToggle />
+				<GitTopBarActions />
+			<GitSidebarToggle />
 			</div>
 		</header>
 	);
