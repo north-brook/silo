@@ -49,6 +49,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { toast } from "@/shared/ui/toaster";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { WorkspaceIndicator } from "@/workspaces/layout/status";
+import { gitPrStatus, gitPrObserve, gitTreeDirty } from "@/workspaces/git/api";
 import {
 	type WorkspaceRouteState,
 	workspaceHref,
@@ -534,6 +535,32 @@ function WorkspaceRow({
 		optimisticStopping || optimisticSuspending || isStopping || isSuspending;
 	const [menuOpen, setMenuOpen] = useState(false);
 
+	const isReadyBranch =
+		!isTemplate && isRunning && workspace.lifecycle.phase === "ready";
+
+	const prStatusQuery = useQuery({
+		queryKey: ["git_pr_status", workspace.name],
+		queryFn: () => gitPrStatus(workspace.name),
+		enabled: isReadyBranch,
+		refetchInterval: 10000,
+	});
+
+	const hasPr = prStatusQuery.data?.status === "open";
+
+	const observationQuery = useQuery({
+		queryKey: ["git_pr_observe", workspace.name],
+		queryFn: () => gitPrObserve(workspace.name),
+		enabled: isReadyBranch && hasPr,
+		refetchInterval: 15000,
+	});
+
+	const dirtyQuery = useQuery({
+		queryKey: ["git_tree_dirty", workspace.name],
+		queryFn: () => gitTreeDirty(workspace.name),
+		enabled: isReadyBranch,
+		refetchInterval: 5000,
+	});
+
 	const openWorkspace = () =>
 		navigate(
 			workspaceHref({
@@ -580,6 +607,9 @@ function WorkspaceRow({
 						optimisticStarting,
 						optimisticStopping,
 						optimisticSuspending,
+						prStatus: prStatusQuery.data ?? null,
+						observation: observationQuery.data ?? null,
+						dirty: dirtyQuery.data ?? false,
 					}}
 				/>
 				<span className={`truncate ${isDisabled ? "opacity-30" : ""}`}>
