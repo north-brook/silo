@@ -29,6 +29,7 @@ indexmap = { version = "2", features = ["serde"] }
 toml = { version = "0.9", features = ["preserve_order"] }
 tauri-plugin-dialog = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "feat/cef" }
 tauri-plugin-fs = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "feat/cef" }
+tauri-plugin-updater = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "feat/cef" }
 sysinfo = "0.38.4"
 log = "0.4"
 portable-pty = "0.9.0"
