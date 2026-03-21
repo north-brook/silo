@@ -12,6 +12,8 @@ export const shortcutEvents = {
 	newWorkspace: "silo://new-workspace",
 	openProject: "silo://open-project",
 	newTab: "silo://new-tab",
+	newTerminalTab: "silo://new-terminal-tab",
+	newBrowserTab: "silo://new-browser-tab",
 	closeTab: "silo://close-tab",
 	goBackBrowser: "silo://go-back-browser",
 	goForwardBrowser: "silo://go-forward-browser",
