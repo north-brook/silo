@@ -223,7 +223,7 @@ export function GitSidebarHeader() {
 	});
 
 	return (
-		<div className="h-9 flex items-center justify-between pl-1.5 pr-3 border-b border-border-light shrink-0">
+		<div className="h-9 flex items-center pl-1.5 pr-3 border-b border-border-light shrink-0">
 			<div className="flex items-center gap-2">
 				<Tooltip>
 					<TooltipTrigger asChild>
@@ -255,6 +255,7 @@ export function GitSidebarHeader() {
 					</button>
 				)}
 			</div>
+			<div data-tauri-drag-region className="h-full flex-1" />
 			<div>
 				{isLoading && <Loader />}
 				{showCreatePr && (
