@@ -12,6 +12,7 @@ The app gives the user a local UI for:
 At a high level:
 
 - the frontend is a Vite + React app in [`src`](./src)
+- the website is a standalone Next.js app in [`website`](./website)
 - the desktop shell and backend are Tauri + Rust in [`src-tauri`](./src-tauri)
 - cloud workspaces are remote VMs managed through `gcloud`
 - a small Rust daemon, [`workspace-agent`](./tools/workspace-agent), runs inside each workspace VM
@@ -108,16 +109,30 @@ Run the frontend dev server:
 bun run dev
 ```
 
+Run the website:
+
+```bash
+bun run website:dev
+```
+
 Run the desktop app:
 
 ```bash
 bun run tauri dev
 ```
 
+`bun run tauri dev` launches the isolated development app identity (`Silo Dev`) and uses `~/.silo-dev` unless `SILO_STATE_DIR` is set. Production builds keep the `Silo` app identity and default to `~/.silo`.
+
 Build the frontend:
 
 ```bash
 bun run build
+```
+
+Build the website:
+
+```bash
+bun run website:build
 ```
 
 Check frontend types:
@@ -165,6 +180,22 @@ bun run e2e
 ```
 
 The e2e suite lives in [`tests/e2e`](./tests/e2e) and currently targets the live desktop app over Playwright.
+
+## Production Releases
+
+Pushes to `main` trigger [`.github/workflows/release.yml`](./.github/workflows/release.yml), which builds the production macOS app, publishes a GitHub Release, and updates the Tauri updater feed.
+
+Required GitHub secrets:
+
+- `SILO_UPDATER_PUBLIC_KEY`
+- `TAURI_SIGNING_PRIVATE_KEY`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+- `APPLE_CERTIFICATE`
+- `APPLE_CERTIFICATE_PASSWORD`
+- `APPLE_SIGNING_IDENTITY`
+- `APPLE_ID`
+- `APPLE_PASSWORD`
+- `APPLE_TEAM_ID`
 
 ## Repo Layout
 

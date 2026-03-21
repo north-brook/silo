@@ -1,0 +1,82 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish-macos:
+    runs-on: macos-14
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install Zig
+        run: brew install zig
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install Tauri CLI
+        run: bun run tauri:cef:install-cli
+
+      - name: Compute release version
+        id: version
+        run: |
+          year="$(date -u +%Y)"
+          day_of_year="$((10#$(date -u +%j)))"
+          echo "value=${year}.${day_of_year}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare production Tauri config
+        id: tauri-config
+        env:
+          SILO_RELEASE_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          path="$(bun run tauri:prepare-release-config)"
+          echo "path=${path}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and publish macOS release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SILO_BUILD_FLAVOR: prod
+          SILO_GITHUB_REPOSITORY: ${{ github.repository }}
+          SILO_TAURI_CONFIG_PATH: ${{ steps.tauri-config.outputs.path }}
+          SILO_UPDATER_PUBLIC_KEY: ${{ secrets.SILO_UPDATER_PUBLIC_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: .
+          tauriScript: bun run tauri:prod
+          args: --target aarch64-apple-darwin
+          tagName: v__VERSION__
+          releaseName: Silo v__VERSION__
+          releaseBody: |
+            Production release built from `${{ github.sha }}`.
+          releaseDraft: false
+          prerelease: false
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
+          releaseAssetNamePattern: Silo-macos-arm64-[bundle].[ext]
