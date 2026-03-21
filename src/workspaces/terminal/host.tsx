@@ -14,6 +14,11 @@ import {
 	isRetryableTerminalTransportMessage,
 	reconnectDelayMs,
 } from "./reconnect";
+import {
+	isMissingLocalTerminalAttachmentMessage,
+	STALE_ATTACHMENT_RECONNECT_MESSAGE,
+	STALE_ATTACHMENT_RESUME_NOTICE,
+} from "./recovery";
 import { assistantTerminalModel } from "./session";
 
 const DELETE_BYTE = 0x7f;
@@ -75,6 +80,10 @@ interface TerminalErrorPayload {
 interface TerminalDisconnectPayload {
 	terminal_id: string;
 	message: string;
+}
+
+interface TerminalProbeResult {
+	exists: boolean;
 }
 
 type HostStatus = "idle" | "attaching" | "ready" | "reconnecting" | "error";
@@ -169,11 +178,17 @@ export function TerminalSessionHost({
 	const reconnectAttemptRef = useRef(0);
 	const reconnectMessageRef = useRef<string | null>(null);
 	const pendingReconnectRef = useRef(false);
+	const probeInFlightRef = useRef<string | null>(null);
+	const staleAttachmentRecoveryRef = useRef<
+		(source: string, detail?: string) => void
+	>(() => {});
 	const attachInFlightRef = useRef(false);
 	const attachQueuedRef = useRef(false);
 	const attachSizeRef = useRef<TerminalSize | null>(null);
 	const retryNonceRef = useRef(retryNonce);
-	const isAssistantSessionRef = useRef(assistantTerminalModel(session.name) != null);
+	const isAssistantSessionRef = useRef(
+		assistantTerminalModel(session.name) != null,
+	);
 	const [isMountReady, setIsMountReady] = useState(false);
 	const [attachNonce, setAttachNonce] = useState(0);
 	const isPageForeground = usePageIsForeground();
@@ -183,7 +198,8 @@ export function TerminalSessionHost({
 	}, [visible]);
 
 	useEffect(() => {
-		isAssistantSessionRef.current = assistantTerminalModel(session.name) != null;
+		isAssistantSessionRef.current =
+			assistantTerminalModel(session.name) != null;
 	}, [session.name]);
 
 	const clearReconnectTimer = useCallback(() => {
@@ -223,8 +239,7 @@ export function TerminalSessionHost({
 			(parseFloat(style.paddingBottom) || 0);
 		if (paddingV > 0) {
 			const core = (terminal as any)._core;
-			const cellHeight =
-				core?._renderService?.dimensions?.css?.cell?.height;
+			const cellHeight = core?._renderService?.dimensions?.css?.cell?.height;
 			if (cellHeight > 0) {
 				const maxRows = Math.max(
 					MIN_ATTACH_ROWS,
@@ -251,28 +266,47 @@ export function TerminalSessionHost({
 		});
 	}, [fitAndResizeTerminal]);
 
-	const sendResize = useCallback((cols: number, rows: number) => {
-		if (!terminalIdRef.current) {
-			return;
-		}
+	const sendResize = useCallback(
+		(cols: number, rows: number) => {
+			const terminalId = terminalIdRef.current;
+			if (!terminalId) {
+				return;
+			}
 
-		const next = { cols, rows };
-		const lastResize = lastResizeRef.current;
-		if (
-			lastResize &&
-			lastResize.cols === next.cols &&
-			lastResize.rows === next.rows
-		) {
-			return;
-		}
-		lastResizeRef.current = next;
+			const next = { cols, rows };
+			const lastResize = lastResizeRef.current;
+			if (
+				lastResize &&
+				lastResize.cols === next.cols &&
+				lastResize.rows === next.rows
+			) {
+				return;
+			}
+			lastResizeRef.current = next;
 
-		void invoke("terminal_resize_terminal", {
-			terminal: terminalIdRef.current,
-			cols: next.cols,
-			rows: next.rows,
-		});
-	}, []);
+			void invoke("terminal_resize_terminal", {
+				terminal: terminalId,
+				cols: next.cols,
+				rows: next.rows,
+			}).catch((error) => {
+				const message = String(error);
+				if (
+					terminalIdRef.current === terminalId &&
+					isMissingLocalTerminalAttachmentMessage(message)
+				) {
+					staleAttachmentRecoveryRef.current("resize", message);
+					return;
+				}
+				console.warn("cloud terminal resize failed", {
+					workspace: session.workspace,
+					attachmentId: session.attachmentId,
+					terminalId,
+					error: message,
+				});
+			});
+		},
+		[session.attachmentId, session.workspace],
+	);
 
 	const triggerAttach = useCallback(() => {
 		if (
@@ -345,6 +379,80 @@ export function TerminalSessionHost({
 		[scheduleReconnectAttempt],
 	);
 
+	const recoverFromStaleAttachment = useCallback(
+		(source: string, detail?: string) => {
+			const terminalId = terminalIdRef.current;
+			if (!terminalId || pendingReconnectRef.current) {
+				return;
+			}
+
+			console.warn("stale terminal attachment detected", {
+				workspace: session.workspace,
+				attachmentId: session.attachmentId,
+				terminalId,
+				source,
+				detail,
+			});
+			lastResizeRef.current = null;
+			termRef.current?.writeln(`\r\n${STALE_ATTACHMENT_RESUME_NOTICE}`);
+			requestReconnect(STALE_ATTACHMENT_RECONNECT_MESSAGE);
+		},
+		[requestReconnect, session.attachmentId, session.workspace],
+	);
+
+	const verifyCurrentAttachment = useCallback(
+		async (source: string) => {
+			const terminalId = terminalIdRef.current;
+			if (
+				!terminalId ||
+				!visibleRef.current ||
+				!termRef.current ||
+				attachInFlightRef.current ||
+				pendingReconnectRef.current ||
+				probeInFlightRef.current === terminalId
+			) {
+				return;
+			}
+
+			probeInFlightRef.current = terminalId;
+			try {
+				const result = await invoke<TerminalProbeResult>(
+					"terminal_probe_terminal",
+					{
+						terminal: terminalId,
+					},
+				);
+				if (!result.exists && terminalIdRef.current === terminalId) {
+					recoverFromStaleAttachment(
+						source,
+						"probe reported missing attachment",
+					);
+				}
+			} catch (error) {
+				const message = String(error);
+				if (
+					terminalIdRef.current === terminalId &&
+					isMissingLocalTerminalAttachmentMessage(message)
+				) {
+					recoverFromStaleAttachment(source, message);
+					return;
+				}
+				console.warn("terminal attachment probe failed", {
+					workspace: session.workspace,
+					attachmentId: session.attachmentId,
+					terminalId,
+					source,
+					error: message,
+				});
+			} finally {
+				if (probeInFlightRef.current === terminalId) {
+					probeInFlightRef.current = null;
+				}
+			}
+		},
+		[recoverFromStaleAttachment, session.attachmentId, session.workspace],
+	);
+
 	if (typeof document !== "undefined" && !mountElementRef.current) {
 		const element = document.createElement("div");
 		element.className = "h-full w-full p-1.5";
@@ -358,6 +466,10 @@ export function TerminalSessionHost({
 	useEffect(() => {
 		onHostStateChangeRef.current = onHostStateChange;
 	}, [onHostStateChange]);
+
+	useEffect(() => {
+		staleAttachmentRecoveryRef.current = recoverFromStaleAttachment;
+	}, [recoverFromStaleAttachment]);
 
 	useEffect(() => {
 		const mountElement = mountElementRef.current;
@@ -405,14 +517,30 @@ export function TerminalSessionHost({
 
 		const encoder = new TextEncoder();
 		const sendTerminalInput = (data: string | Uint8Array) => {
-			if (!terminalIdRef.current) {
+			const terminalId = terminalIdRef.current;
+			if (!terminalId) {
 				return;
 			}
 
 			const bytes = typeof data === "string" ? encoder.encode(data) : data;
 			void invoke("terminal_write_terminal", {
-				terminal: terminalIdRef.current,
+				terminal: terminalId,
 				data: Array.from(bytes),
+			}).catch((error) => {
+				const message = String(error);
+				if (disposed || terminalIdRef.current !== terminalId) {
+					return;
+				}
+				if (isMissingLocalTerminalAttachmentMessage(message)) {
+					recoverFromStaleAttachment("input", message);
+					return;
+				}
+				console.warn("cloud terminal input failed", {
+					workspace: session.workspace,
+					attachmentId: session.attachmentId,
+					terminalId,
+					error: message,
+				});
 			});
 		};
 		const detachBindings = attachTerminalBindings(term, sendTerminalInput, {
@@ -532,6 +660,7 @@ export function TerminalSessionHost({
 	}, [
 		clearReconnectTimer,
 		isMountReady,
+		recoverFromStaleAttachment,
 		requestReconnect,
 		scheduleFitAndResize,
 		sendResize,
@@ -717,6 +846,14 @@ export function TerminalSessionHost({
 			scheduleReconnectAttempt();
 		}
 	}, [scheduleFitAndResize, scheduleReconnectAttempt, triggerAttach, visible]);
+
+	useEffect(() => {
+		if (!visible || !isPageForeground) {
+			return;
+		}
+
+		void verifyCurrentAttachment("page resume");
+	}, [isPageForeground, verifyCurrentAttachment, visible]);
 
 	useEffect(() => {
 		if (retryNonceRef.current === retryNonce) {
