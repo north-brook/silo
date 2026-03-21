@@ -2,18 +2,10 @@ use crate::config::{ConfigError, ConfigStore};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use toml::Value;
 
-pub(crate) fn detect_codex_token(home_dir: &Path) -> Option<String> {
-    codex_auth_token(home_dir)
-}
-
-pub(crate) fn detect_codex_token_from_store() -> Result<String, ConfigError> {
-    let home_dir = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or(ConfigError::HomeDirectoryNotFound)?;
-
-    Ok(detect_codex_token(&home_dir).unwrap_or_default())
+pub(crate) fn detect_codex_auth_json(home_dir: &Path) -> Option<String> {
+    let contents = codex_auth_file_contents(home_dir)?;
+    normalize_codex_auth_json(&contents)
 }
 
 #[tauri::command]
@@ -38,11 +30,15 @@ pub async fn codex_authenticate() -> Result<(), String> {
     .await
     .map_err(|error| format!("codex login task failed: {error}"))??;
 
-    let token = detect_codex_token_from_store().map_err(|error| error.to_string())?;
-    ConfigStore::new()
-        .map_err(|error| error.to_string())?
-        .write("codex.token", Value::String(token))
-        .map_err(|error| error.to_string())?;
+    let home_dir = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| ConfigError::HomeDirectoryNotFound.to_string())?;
+    let auth_json = detect_codex_auth_json(&home_dir)
+        .ok_or_else(|| "codex login completed but auth.json could not be read".to_string())?;
+    let store = ConfigStore::new().map_err(|error| error.to_string())?;
+    let mut config = store.load().map_err(|error| error.to_string())?;
+    config.codex.auth_json = auth_json;
+    store.save(&config).map_err(|error| error.to_string())?;
     log::info!("codex authentication saved successfully");
     Ok(())
 }
@@ -50,20 +46,47 @@ pub async fn codex_authenticate() -> Result<(), String> {
 #[tauri::command]
 pub async fn codex_configured() -> bool {
     log::trace!("checking whether codex is configured");
+    if std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .as_deref()
+        .and_then(detect_codex_auth_json)
+        .is_some()
+    {
+        return true;
+    }
+
     ConfigStore::new()
         .and_then(|store| store.load())
-        .map(|config| !config.codex.token.trim().is_empty())
+        .map(|config| !config.codex.auth_json.trim().is_empty())
         .unwrap_or(false)
 }
 
-fn codex_auth_token(home_dir: &Path) -> Option<String> {
-    let auth_path = home_dir.join(".codex").join("auth.json");
-    let contents = fs::read_to_string(auth_path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&contents).ok()?;
+pub(crate) fn codex_token_from_auth_json(contents: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(contents).ok()?;
+    codex_auth_credential(&json)
+}
 
+pub(crate) fn normalize_codex_auth_json(contents: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(contents).ok()?;
+    codex_auth_credential(&json)?;
+    Some(json.to_string())
+}
+
+fn codex_auth_file_contents(home_dir: &Path) -> Option<String> {
+    let auth_path = home_dir.join(".codex").join("auth.json");
+    fs::read_to_string(auth_path).ok()
+}
+
+fn codex_auth_credential(json: &serde_json::Value) -> Option<String> {
     json.get("OPENAI_API_KEY")
         .and_then(serde_json::Value::as_str)
         .and_then(normalize_value)
+        .or_else(|| {
+            json.get("tokens")
+                .and_then(|tokens| tokens.get("refresh_token"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(normalize_value)
+        })
         .or_else(|| {
             json.get("tokens")
                 .and_then(|tokens| tokens.get("access_token"))
@@ -83,25 +106,47 @@ fn normalize_value(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::codex_auth_token;
+    use super::{codex_token_from_auth_json, detect_codex_auth_json};
     use std::env;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn codex_token_can_be_read_from_auth_json() {
+    fn codex_token_prefers_refresh_token_when_present() {
+        let token = codex_token_from_auth_json(
+            "{\"tokens\":{\"access_token\":\"codex-access-token\",\"refresh_token\":\"codex-refresh-token\"}}",
+        )
+        .expect("token should be detected");
+
+        assert_eq!(token, "codex-refresh-token");
+    }
+
+    #[test]
+    fn codex_token_falls_back_to_access_token_when_refresh_token_is_missing() {
+        let token =
+            codex_token_from_auth_json("{\"tokens\":{\"access_token\":\"codex-access-token\"}}")
+                .expect("token should be detected");
+
+        assert_eq!(token, "codex-access-token");
+    }
+
+    #[test]
+    fn codex_auth_json_can_be_read_from_auth_json() {
         let temp_dir = TestDir::new();
         let codex_dir = temp_dir.root.join(".codex");
         fs::create_dir_all(&codex_dir).expect("codex dir should be created");
         fs::write(
             codex_dir.join("auth.json"),
-            "{\"tokens\":{\"access_token\":\"codex-access-token\"}}",
+            "{\n  \"tokens\": {\n    \"access_token\": \"codex-access-token\",\n    \"refresh_token\": \"codex-refresh-token\"\n  }\n}",
         )
         .expect("auth file should be written");
 
-        let token = codex_auth_token(&temp_dir.root).expect("token should be detected");
-        assert_eq!(token, "codex-access-token");
+        let auth_json = detect_codex_auth_json(&temp_dir.root).expect("auth json should be read");
+        assert_eq!(
+            auth_json,
+            "{\"tokens\":{\"access_token\":\"codex-access-token\",\"refresh_token\":\"codex-refresh-token\"}}"
+        );
     }
 
     struct TestDir {

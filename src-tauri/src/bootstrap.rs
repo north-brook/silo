@@ -1,3 +1,4 @@
+use crate::codex::{codex_token_from_auth_json, detect_codex_auth_json, normalize_codex_auth_json};
 use crate::config::{ConfigStore, ProjectConfig};
 use crate::remote::{
     remote_command_error, run_remote_command, run_remote_command_with_stdin,
@@ -23,7 +24,7 @@ const REMOTE_BOOTSTRAP_LOG_FILE: &str = "/home/silo/.silo/bootstrap.log";
 const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
 const REMOTE_WORKSPACE_AGENT_PIDFILE: &str = "/home/silo/.silo/workspace-agent/daemon.pid";
 const REMOTE_WORKSPACE_AGENT_SHELL_FILE: &str = "/home/silo/.silo/workspace-agent-shell.sh";
-const WORKSPACE_BOOTSTRAP_VERSION: &str = "15";
+const WORKSPACE_BOOTSTRAP_VERSION: &str = "16";
 const STARTUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 const INSTANCE_RUNNING_POLL_ATTEMPTS: usize = 180;
 const SSH_READY_POLL_ATTEMPTS: usize = 120;
@@ -45,7 +46,8 @@ struct WorkspaceBootstrap {
     workspace_branch: Option<String>,
     gh_username: String,
     gh_token: String,
-    codex_token: String,
+    codex_auth_json: String,
+    codex_auth_fingerprint: String,
     claude_token: String,
     git_user_name: String,
     git_user_email: String,
@@ -510,6 +512,13 @@ fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, S
         }
         Some(branch)
     };
+    let home_dir = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let codex_auth_json = home_dir
+        .as_deref()
+        .and_then(detect_codex_auth_json)
+        .or_else(|| normalize_codex_auth_json(&config.codex.auth_json))
+        .unwrap_or_default();
+    let codex_auth_fingerprint = codex_auth_fingerprint(&codex_auth_json);
 
     Ok(WorkspaceBootstrap {
         remote_url: project.remote_url.clone(),
@@ -517,7 +526,8 @@ fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, S
         workspace_branch,
         gh_username: config.git.gh_username.clone(),
         gh_token: config.git.gh_token.clone(),
-        codex_token: config.codex.token.clone(),
+        codex_auth_json,
+        codex_auth_fingerprint,
         claude_token: config.claude.token.clone(),
         git_user_name: config.git.user_name.clone(),
         git_user_email: config.git.user_email.clone(),
@@ -526,7 +536,7 @@ fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, S
 }
 
 fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBootstrap) -> String {
-    let codex_auth_json = codex_auth_json(&bootstrap.codex_token);
+    let codex_auth_json = bootstrap.codex_auth_json.clone();
     let codex_config_toml = codex_config_toml();
     let claude_settings_json = claude_settings_json();
     let claude_state_json = claude_state_json();
@@ -534,6 +544,14 @@ fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBoo
     let bootstrap_signature = workspace_bootstrap_signature(lookup.workspace.name(), bootstrap);
     let agent_install = workspace_agent_install_script(lookup);
     let cli_update = workspace_cli_update_script();
+    let codex_auth_write = if codex_auth_json.is_empty() {
+        "rm -f \"$HOME/.codex/auth.json\"".to_string()
+    } else {
+        format!(
+            "printf '%s\\n' {} > \"$HOME/.codex/auth.json\"",
+            shell_quote(&codex_auth_json)
+        )
+    };
     let env_file_sync = if lookup.workspace.is_template() {
         workspace_env_file_sync_script(&bootstrap.env_files)
     } else {
@@ -662,12 +680,13 @@ printf '%s\\n' {gh_hosts_yml} > \"$HOME/.config/gh/hosts.yml\"\n\
 chmod 700 \"$HOME/.config\" \"$HOME/.config/gh\"\n\
 chmod 600 \"$HOME/.config/gh/hosts.yml\"\n\
 mkdir -p \"$HOME/.codex\" \"$HOME/.claude\"\n\
-printf '%s\\n' {codex_auth_json} > \"$HOME/.codex/auth.json\"\n\
+{codex_auth_write}\n\
 printf '%s\\n' {codex_config_toml} > \"$HOME/.codex/config.toml\"\n\
 printf '%s\\n' {claude_settings_json} > \"$HOME/.claude/settings.json\"\n\
 printf '%s\\n' {claude_state_json} > \"$HOME/.claude.json\"\n\
 chmod 700 \"$HOME/.codex\" \"$HOME/.claude\"\n\
-chmod 600 \"$HOME/.codex/auth.json\" \"$HOME/.codex/config.toml\" \"$HOME/.claude/settings.json\" \"$HOME/.claude.json\"\n\
+if [ -f \"$HOME/.codex/auth.json\" ]; then chmod 600 \"$HOME/.codex/auth.json\"; fi\n\
+chmod 600 \"$HOME/.codex/config.toml\" \"$HOME/.claude/settings.json\" \"$HOME/.claude.json\"\n\
 rm -f \"$HOME/.gitconfig.lock\"\n\
 bootstrap_log 'step=configure_git'\n\
 if [ -n \"$GIT_USER_NAME\" ] && [ \"$(git config --global --get user.name || true)\" != \"$GIT_USER_NAME\" ]; then\n\
@@ -702,7 +721,7 @@ bootstrap_log 'step=completed'\n",
         credentials_path = shell_quote(REMOTE_CREDENTIALS_FILE),
         credentials_lines = credentials_lines,
         gh_hosts_yml = shell_quote(&gh_hosts_yml),
-        codex_auth_json = shell_quote(&codex_auth_json),
+        codex_auth_write = codex_auth_write,
         codex_config_toml = shell_quote(&codex_config_toml),
         claude_settings_json = shell_quote(&claude_settings_json),
         claude_state_json = shell_quote(&claude_state_json),
@@ -728,7 +747,7 @@ pub(crate) fn bootstrap_git_command(command: &str) -> String {
 
 fn workspace_bootstrap_signature(workspace_name: &str, bootstrap: &WorkspaceBootstrap) -> String {
     format!(
-        "version={}\nworkspace={}\nremote_url={}\ntarget_branch={}\nworkspace_branch={}\ngh_username={}\ngh_token_sha256={}\ncodex_token_sha256={}\nclaude_token_sha256={}\ngit_user_name={}\ngit_user_email={}\nenv_files={}\nagent_sources={}",
+        "version={}\nworkspace={}\nremote_url={}\ntarget_branch={}\nworkspace_branch={}\ngh_username={}\ngh_token_sha256={}\ncodex_auth_sha256={}\nclaude_token_sha256={}\ngit_user_name={}\ngit_user_email={}\nenv_files={}\nagent_sources={}",
         WORKSPACE_BOOTSTRAP_VERSION,
         workspace_name,
         bootstrap.remote_url,
@@ -736,7 +755,7 @@ fn workspace_bootstrap_signature(workspace_name: &str, bootstrap: &WorkspaceBoot
         bootstrap.workspace_branch.as_deref().unwrap_or(""),
         bootstrap.gh_username,
         hex_sha256(bootstrap.gh_token.as_bytes()),
-        hex_sha256(bootstrap.codex_token.as_bytes()),
+        bootstrap.codex_auth_fingerprint,
         hex_sha256(bootstrap.claude_token.as_bytes()),
         bootstrap.git_user_name,
         bootstrap.git_user_email,
@@ -1105,23 +1124,10 @@ fi\n",
     )
 }
 
-pub(crate) fn codex_auth_json(token: &str) -> String {
-    let last_refresh = OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
-
-    json!({
-        "auth_mode": "chatgpt",
-        "OPENAI_API_KEY": serde_json::Value::Null,
-        "tokens": {
-            "id_token": token,
-            "access_token": token,
-            "refresh_token": token,
-            "account_id": ""
-        },
-        "last_refresh": last_refresh
-    })
-    .to_string()
+fn codex_auth_fingerprint(auth_json: &str) -> String {
+    codex_token_from_auth_json(auth_json)
+        .map(|token| hex_sha256(token.as_bytes()))
+        .unwrap_or_default()
 }
 
 fn codex_config_toml() -> String {
@@ -1361,7 +1367,8 @@ mod tests {
                 workspace_branch: None,
                 gh_username: "octocat".to_string(),
                 gh_token: "gh-secret".to_string(),
-                codex_token: "codex-secret".to_string(),
+                codex_auth_json: "{\"tokens\":{\"refresh_token\":\"codex-secret\"}}".to_string(),
+                codex_auth_fingerprint: hex_sha256(b"codex-secret"),
                 claude_token: "claude-secret".to_string(),
                 git_user_name: "Example User".to_string(),
                 git_user_email: "user@example.com".to_string(),
@@ -1370,7 +1377,7 @@ mod tests {
         );
 
         assert!(signature.contains("gh_token_sha256="));
-        assert!(signature.contains("codex_token_sha256="));
+        assert!(signature.contains("codex_auth_sha256="));
         assert!(signature.contains("claude_token_sha256="));
         assert!(!signature.contains("gh-secret"));
         assert!(!signature.contains("codex-secret"));
@@ -1378,10 +1385,12 @@ mod tests {
     }
 
     #[test]
-    fn codex_auth_json_contains_access_token() {
-        let payload = codex_auth_json("codex-token");
-        assert!(payload.contains("\"access_token\":\"codex-token\""));
-        assert!(payload.contains("\"auth_mode\":\"chatgpt\""));
+    fn codex_auth_fingerprint_hashes_refresh_token() {
+        let payload = "{\"tokens\":{\"access_token\":\"codex-access-token\",\"refresh_token\":\"codex-refresh-token\"}}";
+        assert_eq!(
+            codex_auth_fingerprint(payload),
+            hex_sha256(b"codex-refresh-token")
+        );
     }
 
     #[test]

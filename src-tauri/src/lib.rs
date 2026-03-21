@@ -40,6 +40,8 @@ pub(crate) struct WorkspaceStateEvent {
 const MENU_ID_NEW_WORKSPACE: &str = "new_workspace";
 const MENU_ID_OPEN_PROJECT: &str = "open_project";
 const MENU_ID_NEW_TAB: &str = "new_tab";
+const MENU_ID_NEW_TERMINAL_TAB: &str = "new_terminal_tab";
+const MENU_ID_NEW_BROWSER_TAB: &str = "new_browser_tab";
 const MENU_ID_CLOSE_TAB: &str = "close_tab";
 const MENU_ID_GO_BACK_BROWSER: &str = "go_back_browser";
 const MENU_ID_GO_FORWARD_BROWSER: &str = "go_forward_browser";
@@ -61,6 +63,8 @@ const MENU_ID_JUMP_TO_WORKSPACE_PREFIX: &str = "jump_to_workspace_";
 const SHORTCUT_EVENT_NEW_WORKSPACE: &str = "silo://new-workspace";
 const SHORTCUT_EVENT_OPEN_PROJECT: &str = "silo://open-project";
 const SHORTCUT_EVENT_NEW_TAB: &str = "silo://new-tab";
+const SHORTCUT_EVENT_NEW_TERMINAL_TAB: &str = "silo://new-terminal-tab";
+const SHORTCUT_EVENT_NEW_BROWSER_TAB: &str = "silo://new-browser-tab";
 const SHORTCUT_EVENT_CLOSE_TAB: &str = "silo://close-tab";
 const SHORTCUT_EVENT_GO_BACK_BROWSER: &str = "silo://go-back-browser";
 const SHORTCUT_EVENT_GO_FORWARD_BROWSER: &str = "silo://go-forward-browser";
@@ -111,6 +115,8 @@ fn shortcut_targets_main_shell(menu_id: &str) -> bool {
         MENU_ID_NEW_WORKSPACE
             | MENU_ID_OPEN_PROJECT
             | MENU_ID_NEW_TAB
+            | MENU_ID_NEW_TERMINAL_TAB
+            | MENU_ID_NEW_BROWSER_TAB
             | MENU_ID_CLOSE_TAB
             | MENU_ID_PREVIOUS_TAB
             | MENU_ID_NEXT_TAB
@@ -169,6 +175,10 @@ fn handle_shortcut_menu_event(app_handle: &AppHandle<AppRuntime>, menu_id: &str)
         MENU_ID_NEW_WORKSPACE => emit_shortcut_event(app_handle, SHORTCUT_EVENT_NEW_WORKSPACE),
         MENU_ID_OPEN_PROJECT => emit_shortcut_event(app_handle, SHORTCUT_EVENT_OPEN_PROJECT),
         MENU_ID_NEW_TAB => emit_shortcut_event(app_handle, SHORTCUT_EVENT_NEW_TAB),
+        MENU_ID_NEW_TERMINAL_TAB => {
+            emit_shortcut_event(app_handle, SHORTCUT_EVENT_NEW_TERMINAL_TAB)
+        }
+        MENU_ID_NEW_BROWSER_TAB => emit_shortcut_event(app_handle, SHORTCUT_EVENT_NEW_BROWSER_TAB),
         MENU_ID_CLOSE_TAB => emit_shortcut_event(app_handle, SHORTCUT_EVENT_CLOSE_TAB),
         MENU_ID_GO_BACK_BROWSER => emit_shortcut_event(app_handle, SHORTCUT_EVENT_GO_BACK_BROWSER),
         MENU_ID_GO_FORWARD_BROWSER => {
@@ -287,6 +297,20 @@ pub fn run() {
                     "New Tab",
                     true,
                     Some("CmdOrCtrl+T"),
+                )?;
+                let new_terminal_tab = MenuItem::with_id(
+                    handle,
+                    MENU_ID_NEW_TERMINAL_TAB,
+                    "New Terminal Tab",
+                    true,
+                    Some("CmdOrCtrl+Shift+T"),
+                )?;
+                let new_browser_tab = MenuItem::with_id(
+                    handle,
+                    MENU_ID_NEW_BROWSER_TAB,
+                    "New Browser Tab",
+                    true,
+                    Some("CmdOrCtrl+Shift+B"),
                 )?;
                 let close_tab = MenuItem::with_id(
                     handle,
@@ -438,7 +462,14 @@ pub fn run() {
                     .build()?;
 
                 let file_submenu = SubmenuBuilder::new(handle, "File")
-                    .items(&[&new_workspace, &open_project, &new_tab, &close_tab])
+                    .items(&[
+                        &new_workspace,
+                        &open_project,
+                        &new_tab,
+                        &new_terminal_tab,
+                        &new_browser_tab,
+                        &close_tab,
+                    ])
                     .build()?;
 
                 let jump_to_workspace_submenu = SubmenuBuilder::new(handle, "Jump to Workspace")

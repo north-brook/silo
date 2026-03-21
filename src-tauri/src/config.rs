@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::codex::detect_codex_token;
+use crate::codex::detect_codex_auth_json;
 use crate::state_paths;
 use indexmap::IndexMap;
 use log::{info, trace};
@@ -99,7 +99,7 @@ pub(crate) struct GitConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(default)]
 pub(crate) struct CodexConfig {
-    pub(crate) token: String,
+    pub(crate) auth_json: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -435,7 +435,7 @@ fn detect_initial_config(home_dir: &Path) -> SiloConfig {
                 .unwrap_or_default(),
         },
         codex: CodexConfig {
-            token: detect_codex_token(home_dir).unwrap_or_default(),
+            auth_json: detect_codex_auth_json(home_dir).unwrap_or_default(),
         },
         claude: ClaudeConfig::default(),
         projects: IndexMap::new(),
@@ -866,7 +866,7 @@ mod tests {
                     user_email: "octocat@example.com".to_string(),
                 },
                 codex: CodexConfig {
-                    token: "codex-token".to_string(),
+                    auth_json: "{\"tokens\":{\"refresh_token\":\"codex-token\"}}".to_string(),
                 },
                 claude: ClaudeConfig::default(),
                 projects: IndexMap::new(),
@@ -881,7 +881,10 @@ mod tests {
         assert_eq!(config.git.gh_token, "gh-token");
         assert_eq!(config.git.user_name, "Monalisa Octocat");
         assert_eq!(config.git.user_email, "octocat@example.com");
-        assert_eq!(config.codex.token, "codex-token");
+        assert_eq!(
+            config.codex.auth_json,
+            "{\"tokens\":{\"refresh_token\":\"codex-token\"}}"
+        );
         assert_eq!(config.claude.token, "");
     }
 
@@ -903,7 +906,7 @@ mod tests {
                 user_email: "existing@example.com".to_string(),
             },
             codex: CodexConfig {
-                token: "existing-codex-token".to_string(),
+                auth_json: "{\"tokens\":{\"refresh_token\":\"existing-codex-token\"}}".to_string(),
             },
             claude: ClaudeConfig {
                 token: "existing-claude-token".to_string(),
@@ -972,10 +975,14 @@ mod tests {
         }
     }
 
-    fn detect_initial_config_with<C, D>(home_dir: &Path, command: C, detect_codex: D) -> SiloConfig
+    fn detect_initial_config_with<C, A>(
+        home_dir: &Path,
+        command: C,
+        detect_codex_auth_json: A,
+    ) -> SiloConfig
     where
         C: Fn(&str, Vec<&str>) -> Option<String>,
-        D: Fn(&Path) -> Option<String>,
+        A: Fn(&Path) -> Option<String>,
     {
         let mut gcloud = GcloudConfig::default();
         gcloud.account =
@@ -1000,7 +1007,7 @@ mod tests {
                     .unwrap_or_default(),
             },
             codex: CodexConfig {
-                token: detect_codex(home_dir).unwrap_or_default(),
+                auth_json: detect_codex_auth_json(home_dir).unwrap_or_default(),
             },
             claude: ClaudeConfig::default(),
             projects: IndexMap::new(),

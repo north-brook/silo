@@ -30,6 +30,7 @@ const ATTACH_RESERVATION_WAIT_INTERVAL: Duration = Duration::from_millis(50);
 pub struct TerminalAttachResult {
     terminal_id: String,
     session: WorkspaceSession,
+    initial_output: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -318,6 +319,7 @@ pub async fn terminal_attach_terminal(
     Ok(TerminalAttachResult {
         terminal_id: attachment.id.clone(),
         session: resolve_attached_session(&lookup, &attachment_id).await?,
+        initial_output: Vec::new(),
     })
 }
 
@@ -812,25 +814,35 @@ fn current_window_label(attachment: &Attachment) -> Option<String> {
         .map(|value| value.clone())
 }
 
-fn set_attachment_output_target(
+fn handoff_attachment_output(
     attachment: &Attachment,
     output: Channel<Vec<u8>>,
     window_label: &str,
-) -> Result<(), String> {
+) -> Result<Vec<u8>, String> {
+    // Lock recent_output before output_state so the replay snapshot and channel
+    // handoff happen atomically with respect to the reader loop.
+    let recent_output = attachment
+        .recent_output
+        .lock()
+        .map_err(|_| "terminal recent output lock poisoned".to_string())?;
+    let initial_output = recent_output.clone();
+
     let mut output_state = attachment
         .output_state
         .lock()
         .map_err(|_| "terminal output lock poisoned".to_string())?;
     output_state.channel = output;
     output_state.ready = false;
+    output_state.pending.clear();
     drop(output_state);
+    drop(recent_output);
 
     let mut current_window = attachment
         .window_label
         .lock()
         .map_err(|_| "terminal window label lock poisoned".to_string())?;
     *current_window = window_label.to_string();
-    Ok(())
+    Ok(initial_output)
 }
 
 fn push_attachment_output(attachment: &Attachment, chunk: &[u8]) -> Result<(), String> {
@@ -933,7 +945,7 @@ async fn attach_existing_terminal(
     attach_started: Instant,
 ) -> Result<TerminalAttachResult, String> {
     resize_attachment(&existing, cols, rows)?;
-    set_attachment_output_target(&existing, output, window.label().as_ref())?;
+    let initial_output = handoff_attachment_output(&existing, output, window.label().as_ref())?;
     if let Some(command) = command {
         queue_attach_command(existing.clone(), command);
     }
@@ -947,6 +959,7 @@ async fn attach_existing_terminal(
     Ok(TerminalAttachResult {
         terminal_id: existing.id.clone(),
         session: resolve_attached_session(lookup, name).await?,
+        initial_output,
     })
 }
 
@@ -1220,7 +1233,7 @@ mod tests {
     use portable_pty::{native_pty_system, ChildKiller};
     use std::collections::HashSet;
     use std::sync::{Arc, Condvar, Mutex};
-    use tauri::ipc::Channel;
+    use tauri::ipc::{Channel, InvokeResponseBody};
 
     #[test]
     fn terminal_run_remote_command_passes_command_as_argument() {
@@ -1510,6 +1523,71 @@ mod tests {
             "att-1"
         );
         assert!(manager.try_reserve(&key).is_none());
+    }
+
+    #[test]
+    fn handoff_attachment_output_replays_recent_output_and_resets_pending_gap() {
+        let sent = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let sent_clone = Arc::clone(&sent);
+        let attachment = Arc::new(Attachment {
+            app: None,
+            id: "att-1".to_string(),
+            key: AttachmentKey {
+                workspace: "ws".to_string(),
+                name: "dev".to_string(),
+            },
+            master: Mutex::new(
+                native_pty_system()
+                    .openpty(PtySize::default())
+                    .expect("pty")
+                    .master,
+            ),
+            writer: Mutex::new(Box::new(Vec::<u8>::new())),
+            killer: Mutex::new(Box::new(NoopKiller)),
+            output_state: Mutex::new(AttachmentOutputState {
+                channel: Channel::new(|_| Ok(())),
+                ready: true,
+                pending: b"stale-pending".to_vec(),
+            }),
+            window_label: Mutex::new("main".to_string()),
+            connected: Mutex::new(false),
+            connected_cv: Condvar::new(),
+            recent_output: Mutex::new(b"prompt\r\nstale-pending".to_vec()),
+        });
+        let replay_channel = Channel::new(move |payload| {
+            let bytes = match payload {
+                InvokeResponseBody::Raw(bytes) => bytes,
+                InvokeResponseBody::Json(value) => {
+                    serde_json::from_str(&value).expect("json channel payload should decode")
+                }
+            };
+            sent_clone.lock().expect("sent output lock").push(bytes);
+            Ok(())
+        });
+
+        let initial_output =
+            handoff_attachment_output(&attachment, replay_channel, "secondary").expect("handoff");
+        assert_eq!(initial_output, b"prompt\r\nstale-pending".to_vec());
+        assert_eq!(
+            attachment
+                .window_label
+                .lock()
+                .expect("window label lock")
+                .as_str(),
+            "secondary"
+        );
+        {
+            let output_state = attachment.output_state.lock().expect("output state lock");
+            assert!(!output_state.ready);
+            assert!(output_state.pending.is_empty());
+        }
+
+        push_attachment_output(&attachment, b"attach-gap").expect("buffer gap output");
+        finish_attachment_output(&attachment).expect("flush attach gap");
+        assert_eq!(
+            sent.lock().expect("sent output lock").as_slice(),
+            &[b"attach-gap".to_vec()]
+        );
     }
 
     #[test]

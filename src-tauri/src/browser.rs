@@ -81,6 +81,8 @@ struct BrowserUrlTarget {
 struct BrowserStateEvent {
     workspace: String,
     attachment_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    popup_attachment_id: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -671,20 +673,36 @@ impl BrowserManager {
                 let workspace = workspace_for_popup.clone();
                 tauri::async_runtime::spawn(async move {
                     let metadata = app_handle.state::<WorkspaceMetadataManager>();
-                    let _ = create_browser_tab(
+                    match create_browser_tab(
                         &manager,
                         metadata.inner(),
                         workspace.clone(),
                         Some(popup_url),
                     )
-                    .await;
-                    let _ = app_handle.emit(
-                        BROWSER_EVENT_NAME,
-                        BrowserStateEvent {
-                            workspace,
-                            attachment_id: String::new(),
-                        },
-                    );
+                    .await
+                    {
+                        Ok(result) => {
+                            if let Err(error) = emit_browser_popup_created(
+                                &app_handle,
+                                &workspace,
+                                &result.attachment_id,
+                            ) {
+                                log::warn!(
+                                    "failed to emit browser popup created event workspace={} attachment_id={}: {}",
+                                    workspace,
+                                    result.attachment_id,
+                                    error
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "failed to create popup browser tab workspace={}: {}",
+                                workspace,
+                                error
+                            );
+                        }
+                    }
                 });
                 NewWindowResponse::Deny
             });
@@ -1065,12 +1083,37 @@ fn emit_browser_state_changed(
 ) -> Result<(), String> {
     app.emit(
         BROWSER_EVENT_NAME,
-        BrowserStateEvent {
-            workspace: workspace.to_string(),
-            attachment_id: attachment_id.to_string(),
-        },
+        browser_state_event(workspace, attachment_id),
     )
     .map_err(|error| format!("failed to emit browser state event: {error}"))
+}
+
+fn emit_browser_popup_created(
+    app: &AppHandle<AppRuntime>,
+    workspace: &str,
+    attachment_id: &str,
+) -> Result<(), String> {
+    app.emit(
+        BROWSER_EVENT_NAME,
+        browser_popup_created_event(workspace, attachment_id),
+    )
+    .map_err(|error| format!("failed to emit browser state event: {error}"))
+}
+
+fn browser_state_event(workspace: &str, attachment_id: &str) -> BrowserStateEvent {
+    BrowserStateEvent {
+        workspace: workspace.to_string(),
+        attachment_id: attachment_id.to_string(),
+        popup_attachment_id: None,
+    }
+}
+
+fn browser_popup_created_event(workspace: &str, attachment_id: &str) -> BrowserStateEvent {
+    BrowserStateEvent {
+        workspace: workspace.to_string(),
+        attachment_id: attachment_id.to_string(),
+        popup_attachment_id: Some(attachment_id.to_string()),
+    }
 }
 
 fn resolve_browser_session(
@@ -1511,6 +1554,7 @@ fn browser_state_sync_script(workspace: &str, attachment_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn normalize_browser_url_uses_https_for_domains() {
@@ -1558,6 +1602,33 @@ mod tests {
         assert_eq!(
             normalized.resolved_url,
             "https://www.google.com/search?q=notes%2Ftoday"
+        );
+    }
+
+    #[test]
+    fn browser_state_event_omits_popup_attachment_id_by_default() {
+        let event = serde_json::to_value(browser_state_event("demo", "browser-1"))
+            .expect("event should serialize");
+        assert_eq!(
+            event,
+            json!({
+                "workspace": "demo",
+                "attachmentId": "browser-1",
+            })
+        );
+    }
+
+    #[test]
+    fn browser_popup_created_event_includes_popup_attachment_id() {
+        let event = serde_json::to_value(browser_popup_created_event("demo", "browser-2"))
+            .expect("event should serialize");
+        assert_eq!(
+            event,
+            json!({
+                "workspace": "demo",
+                "attachmentId": "browser-2",
+                "popupAttachmentId": "browser-2",
+            })
         );
     }
 }
