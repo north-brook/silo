@@ -10,7 +10,7 @@ export function GitSidebar() {
 	if (!isOpen || !isInBranchWorkspace || !isReady) return null;
 
 	return (
-		<aside className="w-72 shrink-0 border-l border-border-light bg-bg flex flex-col min-h-0">
+		<aside className="w-[420px] shrink-0 border-l border-border-light bg-bg flex flex-col min-h-0">
 			<GitSidebarHeader />
 			<GitSidebarTabs />
 		</aside>

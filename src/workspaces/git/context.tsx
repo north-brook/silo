@@ -89,7 +89,7 @@ export function GitSidebarProvider({ children }: { children: ReactNode }) {
 	});
 
 	const [isOpen, setIsOpen] = useState(false);
-	const [activeTab, setActiveTab] = useState<GitSidebarTab>("files");
+	const [activeTab, setActiveTab] = useState<GitSidebarTab>("diff");
 	const visibleTab = hasPr
 		? activeTab
 		: activeTab === "checks"
