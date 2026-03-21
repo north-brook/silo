@@ -16,10 +16,6 @@
 	--color-accent: #638cff;
 	--color-accent-hover: #7a9fff;
 
-	--color-success: #34d399;
-	--color-warning: #fbbf24;
-	--color-error: #f87171;
-
 	--color-btn: #14151a;
 	--color-btn-hover: #1a1b22;
 	--color-btn-active: #111218;
@@ -113,6 +109,11 @@
 		transform: translateX(100%) scale(0.95);
 		opacity: 0;
 	}
+}
+
+.pierre-diff-container pre {
+	margin: 0;
+	font-family: var(--font-mono);
 }
 
 .toast-enter {
