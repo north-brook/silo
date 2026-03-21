@@ -76,7 +76,7 @@ export function GitChecksTab({
 
 	if (isLoading || !observation) {
 		return (
-			<div className="flex items-center justify-center py-8">
+			<div className="h-full flex items-center justify-center">
 				<Loader />
 			</div>
 		);
