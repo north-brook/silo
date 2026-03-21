@@ -4,6 +4,7 @@ import { SessionHostProvider } from "@/workspaces/hosts/provider";
 import { NewWorkspaceProvider } from "@/projects/sidebar/new-workspace";
 import { OpenProjectProvider } from "@/projects/sidebar/open-project";
 import { ProjectsSidebarProvider } from "@/projects/sidebar";
+import { AppUpdater } from "@/app/updater";
 import { OverlayStateProvider } from "@/shared/ui/overlay-state";
 import { Toaster } from "@/shared/ui/toaster";
 import { TooltipProvider } from "@/shared/ui/tooltip";
@@ -27,6 +28,7 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
 						</ProjectsSidebarProvider>
 					</SessionHostProvider>
 				</OverlayStateProvider>
+				<AppUpdater />
 				<Toaster />
 			</TooltipProvider>
 		</QueryClientProvider>
