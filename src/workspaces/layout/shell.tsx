@@ -80,9 +80,15 @@ function terminalTabPresentation(name: string) {
 			label: "codex",
 		};
 	}
+	if (trimmed && trimmed !== "shell") {
+		return {
+			icon: <Terminal size={12} className="text-purple-400" />,
+			label: trimmed,
+		};
+	}
 	return {
 		icon: <Terminal size={12} />,
-		label: trimmed || "shell",
+		label: "shell",
 	};
 }
 
