@@ -8,7 +8,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 
 use crate::args::required_flag_value;
 use crate::daemon::state::{AssistantProvider, ObserverEvent};
@@ -16,6 +16,7 @@ use crate::runtime::{send_event, RuntimePaths};
 
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
+const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub(crate) const TURN_OUTPUT_IDLE_TIMEOUT: Duration = Duration::from_secs(6);
 pub(crate) const INITIAL_PROMPT_STARTUP_GRACE: Duration = Duration::from_secs(6);
 pub(crate) const SOFT_NEWLINE_SENTINEL: char = '\u{e000}';
@@ -45,12 +46,7 @@ pub(crate) fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
     let pty_system = native_pty_system();
     let (cols, rows) = current_terminal_size();
     let pair = pty_system
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
+        .openpty(pty_size(cols, rows))
         .map_err(|error| format!("failed to open pty: {error}"))?;
 
     let mut builder = CommandBuilder::new(&command[0]);
@@ -68,12 +64,15 @@ pub(crate) fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
         .map_err(|error| format!("failed to spawn assistant command: {error}"))?;
     drop(pair.slave);
 
-    let reader = pair
-        .master
+    let master = Arc::new(Mutex::new(pair.master));
+    let reader = master
+        .lock()
+        .map_err(|_| "assistant pty lock poisoned".to_string())?
         .try_clone_reader()
         .map_err(|error| format!("failed to open pty reader: {error}"))?;
-    let writer = pair
-        .master
+    let writer = master
+        .lock()
+        .map_err(|_| "assistant pty lock poisoned".to_string())?
         .take_writer()
         .map_err(|error| format!("failed to open pty writer: {error}"))?;
 
@@ -100,6 +99,8 @@ pub(crate) fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
         proxy_output(reader, io::stdout(), reader_tracker);
         reader_done_signal.store(true, Ordering::Relaxed);
     });
+    let resize_stop = Arc::new(AtomicBool::new(false));
+    let resize_thread = spawn_resize_forwarder(Arc::clone(&master), Arc::clone(&resize_stop));
 
     let raw_mode = RawModeGuard::new().map_err(|error| error.to_string())?;
     let input_tracker = Arc::clone(&tracker);
@@ -112,11 +113,13 @@ pub(crate) fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
     drop(raw_mode);
     tracker.finish_turn_if_needed();
     tracker.stop();
+    resize_stop.store(true, Ordering::Relaxed);
 
     while !reader_done.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(50));
     }
     let _ = reader_thread.join();
+    let _ = resize_thread.join();
 
     let code = status.exit_code();
     if code == 0 {
@@ -179,6 +182,29 @@ fn proxy_output<R: Read, W: Write>(mut reader: R, mut stdout: W, tracker: Arc<As
         }
         tracker.record_output(count);
     }
+}
+
+fn spawn_resize_forwarder(
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    stop: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut last_size = current_terminal_size();
+        while !stop.load(Ordering::Relaxed) {
+            thread::sleep(RESIZE_POLL_INTERVAL);
+            let next_size = current_terminal_size();
+            if next_size == last_size {
+                continue;
+            }
+
+            if let Ok(master) = master.lock() {
+                let _ = master.resize(pty_size(next_size.0, next_size.1));
+            } else {
+                return;
+            }
+            last_size = next_size;
+        }
+    })
 }
 
 struct AssistantTracker {
@@ -401,6 +427,15 @@ fn current_terminal_size() -> (u16, u16) {
         winsize.ws_row
     };
     (cols, rows)
+}
+
+fn pty_size(cols: u16, rows: u16) -> PtySize {
+    PtySize {
+        cols,
+        rows,
+        pixel_width: 0,
+        pixel_height: 0,
+    }
 }
 
 pub(crate) fn turn_output_timeout(
