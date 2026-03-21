@@ -623,6 +623,7 @@ pub fn run() {
             terminal::terminal_write_terminal,
             terminal::terminal_finish_attach,
             terminal::terminal_resize_terminal,
+            terminal::terminal_probe_terminal,
             files::files_list_tree,
             files::files_read,
             files::files_save,

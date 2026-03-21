@@ -65,6 +65,11 @@ pub struct TerminalFinishAttachResult {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TerminalProbeResult {
+    exists: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct TerminalExitPayload {
     terminal_id: String,
     exit_code: u32,
@@ -575,6 +580,14 @@ pub fn terminal_resize_terminal(
     Ok(())
 }
 
+#[tauri::command]
+pub fn terminal_probe_terminal(
+    state: State<'_, TerminalManager>,
+    terminal: String,
+) -> Result<TerminalProbeResult, String> {
+    Ok(probe_terminal_attachment(state.inner(), &terminal))
+}
+
 fn resize_attachment(attachment: &Attachment, cols: u16, rows: u16) -> Result<(), String> {
     let master = attachment
         .master
@@ -889,6 +902,12 @@ fn record_attachment_output(attachment: &Attachment, chunk: &[u8]) {
             let overflow = recent_output.len() - MAX_ATTACHMENT_RECENT_OUTPUT_BYTES;
             recent_output.drain(..overflow);
         }
+    }
+}
+
+fn probe_terminal_attachment(manager: &TerminalManager, terminal: &str) -> TerminalProbeResult {
+    TerminalProbeResult {
+        exists: manager.get_by_id(terminal).is_some(),
     }
 }
 
@@ -1605,6 +1624,57 @@ mod tests {
             Some("codex -- \"hello\"".to_string())
         );
         assert_eq!(manager.take_startup_command(&key), None);
+    }
+
+    #[test]
+    fn terminal_probe_attachment_reports_presence() {
+        let manager = TerminalManager::default();
+        let key = AttachmentKey {
+            workspace: "ws".to_string(),
+            name: "dev".to_string(),
+        };
+
+        assert_eq!(
+            probe_terminal_attachment(&manager, "att-1"),
+            TerminalProbeResult { exists: false }
+        );
+
+        let attachment = Arc::new(Attachment {
+            app: None,
+            id: "att-1".to_string(),
+            key: key.clone(),
+            master: Mutex::new(
+                native_pty_system()
+                    .openpty(PtySize::default())
+                    .expect("pty")
+                    .master,
+            ),
+            writer: Mutex::new(Box::new(Vec::<u8>::new())),
+            killer: Mutex::new(Box::new(NoopKiller)),
+            output_state: Mutex::new(AttachmentOutputState {
+                channel: Channel::new(|_| Ok(())),
+                ready: false,
+                pending: Vec::new(),
+            }),
+            window_label: Mutex::new("main".to_string()),
+            connected: Mutex::new(false),
+            connected_cv: Condvar::new(),
+            recent_output: Mutex::new(Vec::new()),
+        });
+
+        manager.insert(attachment);
+
+        assert_eq!(
+            probe_terminal_attachment(&manager, "att-1"),
+            TerminalProbeResult { exists: true }
+        );
+
+        manager.remove_by_key(&key);
+
+        assert_eq!(
+            probe_terminal_attachment(&manager, "att-1"),
+            TerminalProbeResult { exists: false }
+        );
     }
 
     #[derive(Debug)]
