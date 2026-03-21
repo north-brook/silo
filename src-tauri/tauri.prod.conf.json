@@ -1,8 +1,8 @@
 {
 	"$schema": "https://schema.tauri.app/config/2",
-	"productName": "Silo Dev",
+	"productName": "Silo",
 	"version": "0.1.0",
-	"identifier": "new.silo.native.dev",
+	"identifier": "new.silo.native",
 	"build": {
 		"beforeDevCommand": "bun run dev",
 		"devUrl": "http://localhost:3000",
@@ -32,7 +32,8 @@
 	},
 	"bundle": {
 		"active": true,
-		"targets": "all",
+		"targets": ["app", "dmg"],
+		"createUpdaterArtifacts": true,
 		"icon": [
 			"icons/32x32.png",
 			"icons/128x128.png",
@@ -40,5 +41,13 @@
 			"icons/icon.icns",
 			"icons/icon.ico"
 		]
+	},
+	"plugins": {
+		"updater": {
+			"endpoints": [
+				"https://github.com/north-brook/silo/releases/latest/download/latest.json"
+			],
+			"pubkey": ""
+		}
 	}
 }

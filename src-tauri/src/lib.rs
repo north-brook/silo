@@ -1,6 +1,7 @@
 mod bootstrap;
 mod browser;
 mod browser_loopback;
+mod build_info;
 mod claude;
 mod codex;
 mod config;
@@ -232,7 +233,7 @@ pub fn run() {
         },
     ));
 
-    tauri::Builder::<AppRuntime>::new()
+    let builder = tauri::Builder::<AppRuntime>::new()
         .command_line_args(cef_command_line_args)
         .manage(browser_manager)
         .manage(browser_loopback_manager)
@@ -241,7 +242,10 @@ pub fn run() {
         .plugin(logging_plugin)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_fs::init());
+    let builder = maybe_enable_updater(builder);
+
+    builder
         .setup(move |app| {
             if let Err(error) = config::initialize_on_start() {
                 log::error!("failed to initialize silo config: {error}");
@@ -276,6 +280,12 @@ pub fn run() {
             {
                 use tauri::menu::*;
                 let handle = app.handle();
+                let app_name = app
+                    .config()
+                    .product_name
+                    .clone()
+                    .unwrap_or_else(|| "Silo".to_string());
+                let quit_app_label = format!("Quit {app_name}");
 
                 let new_workspace = MenuItem::with_id(
                     handle,
@@ -420,7 +430,7 @@ pub fn run() {
                 let quit_app_item = MenuItem::with_id(
                     handle,
                     MENU_ID_QUIT_APP,
-                    "Quit Silo",
+                    &quit_app_label,
                     true,
                     Some("CmdOrCtrl+Q"),
                 )?;
@@ -449,7 +459,7 @@ pub fn run() {
                     .map(|item| item as &dyn IsMenuItem<AppRuntime>)
                     .collect::<Vec<_>>();
 
-                let app_submenu = SubmenuBuilder::new(handle, "Silo")
+                let app_submenu = SubmenuBuilder::new(handle, &app_name)
                     .about(None)
                     .separator()
                     .services()
@@ -636,6 +646,25 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(handle_run_event);
+}
+
+fn maybe_enable_updater(
+    builder: tauri::Builder<AppRuntime>,
+) -> tauri::Builder<AppRuntime> {
+    if !build_info::is_production_build() {
+        log::info!("production updater disabled for development build");
+        return builder;
+    }
+
+    let updater_public_key =
+        build_info::updater_public_key().expect("missing updater public key for production build");
+    log::info!("enabling production updater");
+
+    builder.plugin(
+        tauri_plugin_updater::Builder::new()
+            .pubkey(updater_public_key)
+            .build(),
+    )
 }
 
 fn handle_run_event(app_handle: &tauri::AppHandle<AppRuntime>, event: tauri::RunEvent) {

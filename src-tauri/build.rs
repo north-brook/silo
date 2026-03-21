@@ -6,10 +6,46 @@ use std::process::Command;
 
 const OBSERVER_TARGET: &str = "x86_64-unknown-linux-musl";
 const AGENT_OUTPUT_NAME: &str = "workspace-agent-x86_64-unknown-linux-musl";
+const BUILD_FLAVOR_ENV_VAR: &str = "SILO_BUILD_FLAVOR";
+const GITHUB_REPOSITORY_ENV_VAR: &str = "SILO_GITHUB_REPOSITORY";
+const UPDATER_ENDPOINT_ENV_VAR: &str = "SILO_UPDATER_ENDPOINT";
+const UPDATER_PUBLIC_KEY_ENV_VAR: &str = "SILO_UPDATER_PUBLIC_KEY";
 
 fn main() {
+    emit_build_metadata();
     build_workspace_agent();
     tauri_build::build()
+}
+
+fn emit_build_metadata() {
+    println!("cargo:rerun-if-env-changed={BUILD_FLAVOR_ENV_VAR}");
+    println!("cargo:rerun-if-env-changed={GITHUB_REPOSITORY_ENV_VAR}");
+    println!("cargo:rerun-if-env-changed={UPDATER_ENDPOINT_ENV_VAR}");
+    println!("cargo:rerun-if-env-changed={UPDATER_PUBLIC_KEY_ENV_VAR}");
+
+    let build_flavor = env::var(BUILD_FLAVOR_ENV_VAR).unwrap_or_else(|_| "dev".to_string());
+    println!("cargo:rustc-env={BUILD_FLAVOR_ENV_VAR}={build_flavor}");
+
+    if let Ok(repository) = env::var(GITHUB_REPOSITORY_ENV_VAR) {
+        println!("cargo:rustc-env={GITHUB_REPOSITORY_ENV_VAR}={repository}");
+    }
+
+    if let Ok(endpoint) = env::var(UPDATER_ENDPOINT_ENV_VAR) {
+        println!("cargo:rustc-env={UPDATER_ENDPOINT_ENV_VAR}={endpoint}");
+    }
+
+    let updater_public_key = env::var(UPDATER_PUBLIC_KEY_ENV_VAR)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    if build_flavor == "prod" && updater_public_key.is_none() {
+        panic!("{UPDATER_PUBLIC_KEY_ENV_VAR} must be set when building the production app");
+    }
+
+    if let Some(public_key) = updater_public_key {
+        println!("cargo:rustc-env={UPDATER_PUBLIC_KEY_ENV_VAR}={public_key}");
+    }
 }
 
 fn build_workspace_agent() {

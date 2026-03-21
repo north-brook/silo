@@ -1,8 +1,8 @@
+use crate::build_info;
 use std::env;
 use std::path::{Path, PathBuf};
 
 pub(crate) const SILO_STATE_DIR_ENV_VAR: &str = "SILO_STATE_DIR";
-const SILO_DIR_NAME: &str = ".silo";
 
 pub(crate) fn home_dir() -> Result<PathBuf, String> {
     env::var_os("HOME")
@@ -18,7 +18,7 @@ pub(crate) fn app_state_dir_for_home(home_dir: impl AsRef<Path>) -> PathBuf {
     env::var_os(SILO_STATE_DIR_ENV_VAR)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| home_dir.as_ref().join(SILO_DIR_NAME))
+        .unwrap_or_else(|| home_dir.as_ref().join(build_info::default_state_dir_name()))
 }
 
 #[cfg(test)]
@@ -36,7 +36,10 @@ mod tests {
 
         assert_eq!(
             app_state_dir_for_home("/Users/tester"),
-            PathBuf::from("/Users/tester/.silo")
+            PathBuf::from(format!(
+                "/Users/tester/{}",
+                build_info::default_state_dir_name()
+            ))
         );
 
         if let Some(previous) = previous {
