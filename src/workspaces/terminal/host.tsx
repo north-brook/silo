@@ -5,8 +5,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useCallback, useEffect, useRef, useState } from "react";
 import "@xterm/xterm/css/xterm.css";
-import { invoke } from "@/shared/lib/invoke";
 import { domFocusSnapshot } from "@/shared/lib/focus-debug";
+import { invoke } from "@/shared/lib/invoke";
 import type { WorkspaceSession } from "@/workspaces/api";
 import type { CloudSession } from "@/workspaces/hosts/model";
 import { attachTerminalBindings } from "./bindings";
@@ -59,6 +59,7 @@ interface TerminalAttachResult {
 	terminal_id: string;
 	session: WorkspaceSession;
 	initial_output: number[];
+	attach_mode: "fresh" | "reused";
 }
 
 interface TerminalSize {
@@ -87,6 +88,74 @@ interface TerminalProbeResult {
 }
 
 type HostStatus = "idle" | "attaching" | "ready" | "reconnecting" | "error";
+
+interface TerminalViewportBounds {
+	width: number;
+	height: number;
+	paddingTop: number;
+	paddingBottom: number;
+}
+
+interface TerminalCore {
+	_renderService?: {
+		clear?: () => void;
+		dimensions?: {
+			css?: {
+				cell?: {
+					height?: number;
+				};
+			};
+		};
+	};
+}
+
+function readViewportBounds(element: HTMLElement): TerminalViewportBounds {
+	const bounds = element.getBoundingClientRect();
+	const style = window.getComputedStyle(element);
+	return {
+		width: bounds.width,
+		height: bounds.height,
+		paddingTop: parseFloat(style.paddingTop) || 0,
+		paddingBottom: parseFloat(style.paddingBottom) || 0,
+	};
+}
+
+function hasStableTerminalLayout(
+	bounds: Pick<TerminalViewportBounds, "width" | "height">,
+	size: TerminalSize,
+) {
+	return (
+		bounds.width > MIN_ATTACH_PIXEL_SIZE &&
+		bounds.height > MIN_ATTACH_PIXEL_SIZE &&
+		size.cols >= MIN_ATTACH_COLS &&
+		size.rows >= MIN_ATTACH_ROWS
+	);
+}
+
+function resolveMeasuredTerminalSize(
+	proposed: TerminalSize | null | undefined,
+	bounds: TerminalViewportBounds,
+	cellHeight: number | null | undefined,
+): TerminalSize | null {
+	if (!proposed || !hasStableTerminalLayout(bounds, proposed)) {
+		return null;
+	}
+
+	let rows = proposed.rows;
+	const paddingV = bounds.paddingTop + bounds.paddingBottom;
+	if (paddingV > 0 && cellHeight && cellHeight > 0) {
+		rows = Math.max(
+			MIN_ATTACH_ROWS,
+			Math.floor((bounds.height - paddingV) / cellHeight),
+		);
+	}
+
+	const measured = {
+		cols: proposed.cols,
+		rows,
+	} satisfies TerminalSize;
+	return hasStableTerminalLayout(bounds, measured) ? measured : null;
+}
 
 function usePageIsForeground() {
 	const [isForeground, setIsForeground] = useState(() => {
@@ -189,6 +258,7 @@ export function TerminalSessionHost({
 	const isAssistantSessionRef = useRef(
 		assistantTerminalModel(session.name) != null,
 	);
+	const hostUnmountedRef = useRef(false);
 	const [isMountReady, setIsMountReady] = useState(false);
 	const [attachNonce, setAttachNonce] = useState(0);
 	const isPageForeground = usePageIsForeground();
@@ -221,40 +291,21 @@ export function TerminalSessionHost({
 			return null;
 		}
 
-		fitAddon.fit();
-
-		const bounds = mountElement.getBoundingClientRect();
-		if (
-			bounds.width <= MIN_ATTACH_PIXEL_SIZE ||
-			bounds.height <= MIN_ATTACH_PIXEL_SIZE ||
-			terminal.cols < MIN_ATTACH_COLS ||
-			terminal.rows < MIN_ATTACH_ROWS
-		) {
+		const bounds = readViewportBounds(mountElement);
+		const proposed = fitAddon.proposeDimensions();
+		const core = (terminal as unknown as { _core?: TerminalCore })._core;
+		const cellHeight = core?._renderService?.dimensions?.css?.cell?.height;
+		const measured = resolveMeasuredTerminalSize(proposed, bounds, cellHeight);
+		if (!measured) {
 			return null;
 		}
 
-		const style = window.getComputedStyle(mountElement);
-		const paddingV =
-			(parseFloat(style.paddingTop) || 0) +
-			(parseFloat(style.paddingBottom) || 0);
-		if (paddingV > 0) {
-			const core = (terminal as any)._core;
-			const cellHeight = core?._renderService?.dimensions?.css?.cell?.height;
-			if (cellHeight > 0) {
-				const maxRows = Math.max(
-					MIN_ATTACH_ROWS,
-					Math.floor((bounds.height - paddingV) / cellHeight),
-				);
-				if (terminal.rows > maxRows) {
-					terminal.resize(terminal.cols, maxRows);
-				}
-			}
+		if (terminal.cols !== measured.cols || terminal.rows !== measured.rows) {
+			core?._renderService?.clear?.();
+			terminal.resize(measured.cols, measured.rows);
 		}
 
-		return {
-			cols: terminal.cols,
-			rows: terminal.rows,
-		} satisfies TerminalSize;
+		return measured;
 	}, []);
 
 	const scheduleFitAndResize = useCallback(() => {
@@ -269,11 +320,17 @@ export function TerminalSessionHost({
 	const sendResize = useCallback(
 		(cols: number, rows: number) => {
 			const terminalId = terminalIdRef.current;
-			if (!terminalId) {
+			const mountElement = mountElementRef.current;
+			if (!terminalId || !mountElement || !visibleRef.current) {
 				return;
 			}
 
-			const next = { cols, rows };
+			const next = { cols, rows } satisfies TerminalSize;
+			const bounds = readViewportBounds(mountElement);
+			if (!hasStableTerminalLayout(bounds, next)) {
+				return;
+			}
+
 			const lastResize = lastResizeRef.current;
 			if (
 				lastResize &&
@@ -319,11 +376,13 @@ export function TerminalSessionHost({
 		) {
 			return;
 		}
+		attachQueuedRef.current = true;
 		const size = fitAndResizeTerminal();
 		if (!size) {
+			attachQueuedRef.current = false;
+			attachSizeRef.current = null;
 			return;
 		}
-		attachQueuedRef.current = true;
 		attachSizeRef.current = size;
 		setAttachNonce((previous) => previous + 1);
 	}, [fitAndResizeTerminal, isMountReady]);
@@ -466,6 +525,24 @@ export function TerminalSessionHost({
 	useEffect(() => {
 		onHostStateChangeRef.current = onHostStateChange;
 	}, [onHostStateChange]);
+
+	useEffect(() => {
+		hostUnmountedRef.current = false;
+		return () => {
+			hostUnmountedRef.current = true;
+			terminalIdRef.current = null;
+			void invoke("terminal_detach_terminal", {
+				workspace: session.workspace,
+				attachmentId: session.attachmentId,
+			}).catch((error) => {
+				console.warn("cloud terminal detach during host teardown failed", {
+					workspace: session.workspace,
+					attachmentId: session.attachmentId,
+					error: String(error),
+				});
+			});
+		};
+	}, [session.attachmentId, session.workspace]);
 
 	useEffect(() => {
 		staleAttachmentRecoveryRef.current = recoverFromStaleAttachment;
@@ -663,6 +740,8 @@ export function TerminalSessionHost({
 		recoverFromStaleAttachment,
 		requestReconnect,
 		scheduleFitAndResize,
+		session.attachmentId,
+		session.workspace,
 		sendResize,
 		triggerAttach,
 	]);
@@ -719,6 +798,21 @@ export function TerminalSessionHost({
 					},
 				);
 				if (disposed) {
+					if (hostUnmountedRef.current) {
+						void invoke("terminal_detach_terminal", {
+							workspace: session.workspace,
+							attachmentId: session.attachmentId,
+						}).catch((detachError) => {
+							console.warn(
+								"cloud terminal detach after unmounted attach failed",
+								{
+									workspace: session.workspace,
+									attachmentId: session.attachmentId,
+									error: String(detachError),
+								},
+							);
+						});
+					}
 					return;
 				}
 
@@ -738,14 +832,20 @@ export function TerminalSessionHost({
 					workspace: session.workspace,
 					attachmentId: session.attachmentId,
 					terminalId: result.terminal_id,
+					attachMode: result.attach_mode,
 				});
 
 				term.reset();
 				lastResizeRef.current = null;
-				await writeTerminalOutput(
-					term,
-					normalizeTerminalOutput(Uint8Array.from(result.initial_output)),
-				);
+				if (
+					result.attach_mode === "reused" &&
+					result.initial_output.length > 0
+				) {
+					await writeTerminalOutput(
+						term,
+						normalizeTerminalOutput(Uint8Array.from(result.initial_output)),
+					);
+				}
 				await invoke("terminal_finish_attach", {
 					terminal: result.terminal_id,
 				});
@@ -798,10 +898,6 @@ export function TerminalSessionHost({
 			attachQueuedRef.current = false;
 			attachInFlightRef.current = false;
 			if (attachedTerminalId && terminalIdRef.current === attachedTerminalId) {
-				void invoke("terminal_detach_terminal", {
-					workspace: session.workspace,
-					attachmentId: session.attachmentId,
-				});
 				terminalIdRef.current = null;
 			}
 		};
@@ -845,7 +941,15 @@ export function TerminalSessionHost({
 		if (pendingReconnectRef.current && !terminalIdRef.current) {
 			scheduleReconnectAttempt();
 		}
-	}, [scheduleFitAndResize, scheduleReconnectAttempt, triggerAttach, visible]);
+	}, [
+		isPageForeground,
+		scheduleFitAndResize,
+		scheduleReconnectAttempt,
+		session.attachmentId,
+		session.workspace,
+		triggerAttach,
+		visible,
+	]);
 
 	useEffect(() => {
 		if (!visible || !isPageForeground) {
