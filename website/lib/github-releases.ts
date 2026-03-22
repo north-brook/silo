@@ -1,5 +1,5 @@
 const DEFAULT_GITHUB_REPOSITORY = "north-brook/silo";
-const DEFAULT_INSTALLER_ASSET_NAME = "Silo-macos-arm64-dmg.dmg";
+const DEFAULT_INSTALLER_ASSET_NAME = "Silo-macos-arm64.dmg";
 const USER_AGENT = "silo.new";
 
 type ReleasePlatform = {

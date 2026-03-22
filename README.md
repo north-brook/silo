@@ -194,7 +194,7 @@ Production clients do not talk to GitHub directly:
 The website supports these optional server-side environment variables so the backing GitHub repository or installer asset can change without shipping a new desktop build:
 
 - `SILO_RELEASE_GITHUB_REPOSITORY` defaults to `north-brook/silo`
-- `SILO_RELEASE_INSTALLER_ASSET_NAME` defaults to `Silo-macos-arm64-dmg.dmg`
+- `SILO_RELEASE_INSTALLER_ASSET_NAME` defaults to `Silo-macos-arm64.dmg`
 
 Update those environment variables on the `silo.new` deployment and redeploy the website when the backing release repository or installer asset name changes.
 

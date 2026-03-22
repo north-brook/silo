@@ -52,7 +52,7 @@ jobs:
           echo "path=${path}" >> "$GITHUB_OUTPUT"
 
       - name: Build and publish macOS release
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SILO_BUILD_FLAVOR: prod
@@ -77,6 +77,5 @@ jobs:
             Production release built from `${{ github.sha }}`.
           releaseDraft: false
           prerelease: false
-          uploadUpdaterJson: true
-          uploadUpdaterSignatures: true
-          releaseAssetNamePattern: Silo-macos-arm64-[bundle].[ext]
+          includeUpdaterJson: true
+          assetNamePattern: Silo-macos-arm64[ext]
