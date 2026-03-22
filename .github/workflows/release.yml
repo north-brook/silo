@@ -47,6 +47,7 @@ jobs:
         id: tauri-config
         env:
           SILO_RELEASE_VERSION: ${{ steps.version.outputs.value }}
+          SILO_UPDATER_PUBLIC_KEY: ${{ secrets.SILO_UPDATER_PUBLIC_KEY }}
         run: |
           path="$(bun run tauri:prepare-release-config)"
           echo "path=${path}" >> "$GITHUB_OUTPUT"
