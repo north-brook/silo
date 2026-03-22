@@ -1,124 +1,104 @@
-const MAC_DOWNLOAD_URL =
-	"https://github.com/north-brook/silo/releases/latest/download/Silo-macos-arm64-dmg.dmg";
+import Image from "next/image";
+import { GitHubStars } from "./github-stars";
+import { githubRepository } from "../lib/github-releases";
+
+const DOWNLOAD_PATH = "/download";
+
+function SiloLogo({ height, className }: { height: number; className?: string }) {
+	const width = height * (2250 / 600);
+	return (
+		<svg
+			width={width}
+			height={height}
+			viewBox="0 0 2250 600"
+			xmlns="http://www.w3.org/2000/svg"
+			className={className}
+		>
+			<title>Silo</title>
+			<path
+				fill="currentColor"
+				d="M600 600H0V450H450V300H600V600ZM900 600H750V0H900V600ZM1500 600H1200V450H1500V600ZM1800 450H2100V600H1650V150H1800V450ZM1200 450H1050V0H1200V450ZM2250 450H2100V150H1800V0H2250V450ZM600 150H150V300H0V0H600V150Z"
+			/>
+		</svg>
+	);
+}
 
 export default function Home() {
+	const repo = githubRepository();
+
 	return (
-		<main className="min-h-screen overflow-hidden bg-canvas text-ink">
-			<div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(255,186,94,0.32),_transparent_38%),linear-gradient(160deg,_rgba(255,255,255,0.9),_rgba(255,247,235,0.78)_52%,_rgba(255,233,205,0.55))]" />
-			<div className="pointer-events-none absolute inset-x-0 top-0 h-72 bg-[linear-gradient(180deg,_rgba(20,18,15,0.1),_transparent)]" />
+		<main className="relative min-h-screen bg-bg text-text">
+			{/* Header */}
+			<header className="relative flex items-center justify-between px-6 py-5">
+				<SiloLogo height={18} className="text-text-bright" />
+				<GitHubStars repo={repo} />
+			</header>
 
-			<section className="relative mx-auto flex min-h-screen max-w-6xl flex-col justify-center gap-12 px-6 py-16 md:px-10 lg:px-12">
-				<div className="max-w-2xl space-y-6">
-					<p className="inline-flex items-center rounded-full border border-ink/10 bg-white/70 px-3 py-1 font-mono text-[11px] uppercase tracking-[0.28em] text-ink/70 shadow-sm backdrop-blur">
-						Cloud workspaces, local control
-					</p>
-					<div className="space-y-4">
-						<h1 className="max-w-xl text-5xl font-semibold tracking-[-0.06em] text-ink sm:text-6xl">
-							Silo keeps your remote dev environment feeling local.
-						</h1>
-						<p className="max-w-xl text-lg leading-8 text-ink/68 sm:text-xl">
-							Launch cloud-hosted workspaces, open terminals and browser tabs, and
-							manage the full session from one desktop app.
-						</p>
-					</div>
-
-					<div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center">
-						<a
-							className="inline-flex items-center justify-center rounded-full bg-ink px-6 py-3 text-sm font-medium text-white shadow-[0_16px_40px_rgba(17,14,11,0.22)] transition hover:-translate-y-0.5 hover:bg-ink/92"
-							href={MAC_DOWNLOAD_URL}
-						>
-							Download for Mac
-						</a>
-						<p className="font-mono text-xs uppercase tracking-[0.22em] text-ink/48">
-							Apple Silicon build
-						</p>
-					</div>
+			<div className="relative mx-auto flex max-w-3xl flex-col items-center px-6 pt-20 pb-16 sm:pt-28">
+				{/* Service icons */}
+				<div className="animate-fade-in flex items-center gap-4">
+					{/* Google Cloud */}
+					<svg width="22" height="22" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+						<title>Google Cloud</title>
+						<path d="M40.728 20.488l2.05.035 5.57-5.57.27-2.36C44.2 8.657 38.367 6.26 31.993 6.26c-11.54 0-21.28 7.852-24.163 18.488.608-.424 1.908-.106 1.908-.106l11.13-1.83s.572-.947.862-.9A13.88 13.88 0 0 1 32 17.375c3.3.007 6.34 1.173 8.728 3.102z" fill="#EA4335"/>
+						<path d="M56.17 24.77c-1.293-4.77-3.958-8.982-7.555-12.177l-7.887 7.887c3.16 2.55 5.187 6.452 5.187 10.82v1.392c3.837 0 6.954 3.124 6.954 6.954 0 3.837-3.124 6.954-6.954 6.954H32.007L30.615 48v8.346l1.392 1.385h13.908A18.11 18.11 0 0 0 64 39.647c-.007-6.155-3.1-11.6-7.83-14.876z" fill="#4285F4"/>
+						<path d="M18.085 57.74h13.9V46.6h-13.9a6.89 6.89 0 0 1-2.862-.622l-2.007.615-5.57 5.57-.488 1.88a18 18 0 0 0 10.926 3.689z" fill="#34A853"/>
+						<path d="M18.085 21.57A18.11 18.11 0 0 0 0 39.654c0 5.873 2.813 11.095 7.166 14.403l8.064-8.064a6.96 6.96 0 0 1-4.099-6.339c0-3.837 3.124-6.954 6.954-6.954 2.82 0 5.244 1.7 6.34 4.1l8.064-8.064c-3.307-4.353-8.53-7.166-14.403-7.166z" fill="#FBBC05"/>
+					</svg>
+					{/* GitHub */}
+					<svg width="22" height="22" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+						<title>GitHub</title>
+						<path fill="#FFFFFF" d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/>
+					</svg>
+					{/* Codex */}
+					<svg width="22" height="22" viewBox="118.557 119.958 484.139 479.818" xmlns="http://www.w3.org/2000/svg">
+						<title>Codex</title>
+						<path fill="#FFFFFF" d="M304.246 294.611V249.028C304.246 245.189 305.687 242.309 309.044 240.392L400.692 187.612C413.167 180.415 428.042 177.058 443.394 177.058C500.971 177.058 537.44 221.682 537.44 269.182C537.44 272.54 537.44 276.379 536.959 280.218L441.954 224.558C436.197 221.201 430.437 221.201 424.68 224.558L304.246 294.611ZM518.245 472.145V363.224C518.245 356.505 515.364 351.707 509.608 348.349L389.174 278.296L428.519 255.743C431.877 253.826 434.757 253.826 438.115 255.743L529.762 308.523C556.154 323.879 573.905 356.505 573.905 388.171C573.905 424.636 552.315 458.225 518.245 472.141V472.145ZM275.937 376.182L236.592 353.152C233.235 351.235 231.794 348.354 231.794 344.515V238.956C231.794 187.617 271.139 148.749 324.4 148.749C344.555 148.749 363.264 155.468 379.102 167.463L284.578 222.164C278.822 225.521 275.942 230.319 275.942 237.039V376.186L275.937 376.182ZM360.626 425.122L304.246 393.455V326.283L360.626 294.616L417.002 326.283V393.455L360.626 425.122ZM396.852 570.989C376.698 570.989 357.989 564.27 342.151 552.276L436.674 497.574C442.431 494.217 445.311 489.419 445.311 482.699V343.552L485.138 366.582C488.495 368.499 489.936 371.379 489.936 375.219V480.778C489.936 532.117 450.109 570.985 396.852 570.985V570.989ZM283.134 463.99L191.486 411.211C165.094 395.854 147.343 363.229 147.343 331.562C147.343 294.616 169.415 261.509 203.48 247.593V356.991C203.48 363.71 206.361 368.508 212.117 371.866L332.074 441.437L292.729 463.99C289.372 465.907 286.491 465.907 283.134 463.99ZM277.859 542.68C223.639 542.68 183.813 501.895 183.813 451.514C183.813 447.675 184.294 443.836 184.771 439.997L279.295 494.698C285.051 498.056 290.812 498.056 296.568 494.698L417.002 425.127V470.71C417.002 474.549 415.562 477.429 412.204 479.346L320.557 532.126C308.081 539.323 293.206 542.68 277.854 542.68H277.859ZM396.852 599.776C454.911 599.776 503.37 558.513 514.41 503.812C568.149 489.896 602.696 439.515 602.696 388.176C602.696 354.587 588.303 321.962 562.392 298.45C564.791 288.373 566.231 278.296 566.231 268.224C566.231 199.611 510.571 148.267 446.274 148.267C433.322 148.267 420.846 150.184 408.37 154.505C386.775 133.392 357.026 119.958 324.4 119.958C266.342 119.958 217.883 161.22 206.843 215.921C153.104 229.837 118.557 280.218 118.557 331.557C118.557 365.146 132.95 397.771 158.861 421.283C156.462 431.36 155.022 441.437 155.022 451.51C155.022 520.123 210.682 571.466 274.978 571.466C287.931 571.466 300.407 569.549 312.883 565.228C334.473 586.341 364.222 599.776 396.852 599.776Z"/>
+					</svg>
+					{/* Claude */}
+					<svg width="22" height="22" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+						<title>Claude</title>
+						<path fill="#D97757" d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z"/>
+					</svg>
 				</div>
 
-				<div className="relative">
-					<div className="absolute inset-x-10 top-6 h-full rounded-[2rem] bg-amber-300/20 blur-3xl" />
-					<div className="relative overflow-hidden rounded-[2rem] border border-ink/10 bg-white/75 p-4 shadow-[0_30px_120px_rgba(44,28,12,0.18)] backdrop-blur xl:p-5">
-						<div className="rounded-[1.4rem] border border-ink/8 bg-[linear-gradient(180deg,_rgba(255,255,255,0.98),_rgba(250,243,234,0.96))] p-4">
-							<div className="flex items-center justify-between rounded-2xl border border-ink/8 bg-white/90 px-4 py-3">
-								<div>
-									<p className="font-mono text-[11px] uppercase tracking-[0.24em] text-ink/45">
-										Placeholder product shot
-									</p>
-									<p className="mt-1 text-sm font-medium text-ink/75">
-										Project switcher, live terminals, and cloud workspace controls
-									</p>
-								</div>
-								<div className="flex gap-2">
-									<span className="h-3 w-3 rounded-full bg-[#ff6d5f]" />
-									<span className="h-3 w-3 rounded-full bg-[#fdbc43]" />
-									<span className="h-3 w-3 rounded-full bg-[#34c84a]" />
-								</div>
-							</div>
+				<h1 className="animate-fade-in-up delay-100 mt-6 max-w-sm text-center font-mono text-2xl font-medium leading-tight tracking-tight text-text-bright sm:max-w-xl sm:text-3xl lg:max-w-2xl lg:text-4xl">
+					Orchestrate parallel AI agents on cloud VMs from your Mac
+				</h1>
 
-							<div className="mt-4 grid gap-4 lg:grid-cols-[1.1fr_1.7fr]">
-								<div className="space-y-3 rounded-[1.4rem] border border-ink/8 bg-[#171716] p-4 text-white">
-									<div className="flex items-center justify-between">
-										<p className="font-mono text-[11px] uppercase tracking-[0.24em] text-white/45">
-											Terminal
-										</p>
-										<span className="rounded-full bg-emerald-400/18 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-emerald-300">
-											Connected
-										</span>
-									</div>
-									<div className="space-y-2 font-mono text-sm text-white/78">
-										<p>$ gcloud compute ssh silo-dev-01</p>
-										<p className="text-white/52">Attaching remote workspace...</p>
-										<p>$ bun run test</p>
-										<p className="text-amber-200">watching logs, files, and browser tabs</p>
-									</div>
-								</div>
+				<p className="animate-fade-in-up delay-200 mt-5 max-w-lg text-center font-mono text-sm leading-relaxed text-text-muted">
+					Each task gets its own VM with dedicated ports, docker images, and
+					isolated services. Agents keep working when your laptop sleeps or
+					disconnects. Parallelize development without compromise.
+				</p>
 
-								<div className="space-y-4 rounded-[1.4rem] border border-ink/8 bg-[#fcfbf7] p-4">
-									<div className="flex items-center justify-between">
-										<div>
-											<p className="font-mono text-[11px] uppercase tracking-[0.24em] text-ink/45">
-												Workspace overview
-											</p>
-											<p className="mt-1 text-sm text-ink/68">
-												One local shell for project state, browser sessions, and lifecycle.
-											</p>
-										</div>
-										<div className="rounded-full border border-ink/10 bg-white px-3 py-1 font-mono text-[11px] uppercase tracking-[0.18em] text-ink/48">
-										+2 tabs
-										</div>
-									</div>
-
-									<div className="grid gap-3 md:grid-cols-3">
-										{[
-											["Workspace", "Ready"],
-											["Browser", "Attached"],
-											["Sync", "Live"],
-										].map(([label, value]) => (
-											<div
-												key={label}
-												className="rounded-2xl border border-ink/8 bg-white px-4 py-3 shadow-sm"
-											>
-												<p className="font-mono text-[11px] uppercase tracking-[0.2em] text-ink/40">
-													{label}
-												</p>
-												<p className="mt-3 text-xl font-semibold tracking-[-0.04em] text-ink">
-													{value}
-												</p>
-											</div>
-										))}
-									</div>
-
-									<div className="rounded-[1.4rem] border border-dashed border-ink/12 bg-[linear-gradient(135deg,_rgba(255,194,102,0.18),_rgba(255,255,255,0.9)_55%,_rgba(255,222,173,0.28))] p-6">
-										<p className="max-w-lg text-lg leading-8 text-ink/70">
-											This placeholder panel will be replaced with a real product screenshot once the production app visuals are ready.
-										</p>
-									</div>
-								</div>
-							</div>
-						</div>
-					</div>
+				<div className="animate-fade-in-up delay-300 mt-8 flex flex-col items-center gap-2.5">
+					<a
+						href={DOWNLOAD_PATH}
+						className="inline-flex items-center justify-center gap-3 rounded-md bg-text-bright px-5 py-2 font-mono text-sm font-medium text-bg transition-colors hover:bg-white"
+					>
+						<svg width="14" height="17" viewBox="0 0 814 1000" className="text-bg">
+							<title>Apple</title>
+							<path fill="currentColor" d="M788.1 340.9c-5.8 4.5-108.2 62.2-108.2 190.5 0 148.4 130.3 200.9 134.2 202.2-.6 3.2-20.7 71.9-68.7 141.9-42.8 61.6-87.5 123.1-155.5 123.1s-85.5-39.5-164-39.5c-76.5 0-103.7 40.8-165.9 40.8-62.2 0-106.9-56.3-155.5-124.7C46.7 813.8 0 630.6 0 457.2c0-167.2 108.8-255.2 215.7-255.2 67.6 0 123.8 44.3 166.2 44.3 40.4 0 103.2-47.1 178.4-47.1 28.8 0 132.3 1.7 200.6 130.2zM554.1 159.4c31.1-36.9 53.1-88.1 53.1-139.4 0-7.1-.6-14.3-1.9-20-50.6 1.9-110.8 33.7-147.1 75.8-28.5 32.4-55.1 83.6-55.1 135.5 0 7.8 1.3 15.6 1.9 18.1 3.2.6 8.4 1.3 13.6 1.3 45.4 0 102.5-30.4 135.5-71.3z" />
+						</svg>
+						Download for Apple Silicon
+					</a>
+					<span className="font-mono text-[11px] text-text-placeholder">
+						Open source. Bring your own cloud & keys.
+					</span>
 				</div>
-			</section>
+			</div>
+
+			<div className="animate-fade-in-up delay-500 px-4 pb-8 sm:px-8">
+				<Image
+					src="/screenshot.png"
+					alt="Silo — cloud workspace with file editor, terminal tabs, git sidebar with PR checks and diffs"
+					width={2532}
+					height={1668}
+					priority
+					className="w-full"
+				/>
+			</div>
 		</main>
 	);
 }
