@@ -1,21 +1,23 @@
 import type { Metadata } from "next";
-import { IBM_Plex_Mono, Space_Grotesk } from "next/font/google";
+import { JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
-const display = Space_Grotesk({
-	subsets: ["latin"],
-	variable: "--font-display",
-});
-
-const mono = IBM_Plex_Mono({
+const mono = JetBrains_Mono({
 	subsets: ["latin"],
 	weight: ["400", "500"],
-	variable: "--font-mono",
+	variable: "--font-mono-face",
 });
 
 export const metadata: Metadata = {
-	title: "Silo",
-	description: "A desktop app for cloud-hosted development workspaces.",
+	title: "Silo - Orchestrate Parallel AI Agents on Cloud VMs",
+	description:
+		"Orchestrate parallel AI agents on cloud VMs from your Mac. Each task gets its own VM with dedicated ports, docker images, and isolated services. Open source — bring your own cloud & keys.",
+	openGraph: {
+		title: "Silo - Orchestrate Parallel AI Agents on Cloud VMs",
+		description:
+			"Orchestrate parallel AI agents on cloud VMs from your Mac. Each task gets its own VM with dedicated ports, docker images, and isolated services.",
+		type: "website",
+	},
 };
 
 export default function RootLayout({
@@ -25,7 +27,7 @@ export default function RootLayout({
 }>) {
 	return (
 		<html lang="en">
-			<body className={`${display.variable} ${mono.variable}`}>{children}</body>
+			<body className={mono.variable}>{children}</body>
 		</html>
 	);
 }
