@@ -1,5 +1,4 @@
 import Image from "next/image";
-import { GitHubStars } from "./github-stars";
 import { githubRepository } from "../lib/github-releases";
 
 const DOWNLOAD_PATH = "/download";
@@ -31,7 +30,18 @@ export default function Home() {
 			{/* Header */}
 			<header className="relative flex items-center justify-between px-6 py-5">
 				<SiloLogo height={18} className="text-text-bright" />
-				<GitHubStars repo={repo} />
+				<a
+					href={`https://github.com/${repo}`}
+					target="_blank"
+					rel="noopener noreferrer"
+					className="inline-flex items-center gap-1.5 font-mono text-[12px] text-text-muted transition-colors hover:text-text-bright"
+				>
+					GitHub
+					<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+						<path d="M7 17L17 7" />
+						<path d="M7 7h10v10" />
+					</svg>
+				</a>
 			</header>
 
 			<div className="relative mx-auto flex max-w-3xl flex-col items-center px-6 pt-20 pb-16 sm:pt-28">
