@@ -1,12 +1,18 @@
 import { useQuery } from "@tanstack/react-query";
+import { getVersion } from "@tauri-apps/api/app";
+import { isTauri } from "@tauri-apps/api/core";
 import type { LucideIcon } from "lucide-react";
 import { FolderOpen, Plus } from "lucide-react";
+import { useEffect, useState } from "react";
+import packageJson from "../../package.json";
 import { StatusIcons } from "@/dashboard/setup-status";
 import type { ListedProject } from "@/projects/api";
 import { useNewWorkspace } from "@/projects/sidebar/new-workspace";
 import { useOpenProject } from "@/projects/sidebar/open-project";
 import { invoke } from "@/shared/lib/invoke";
 import { SiloIcon } from "@/shared/ui/icons/silo";
+
+const FALLBACK_VERSION = packageJson.version;
 
 function Kbd({ children }: { children: React.ReactNode }) {
 	return (
@@ -50,6 +56,7 @@ function ActionRow({
 }
 
 export default function HomePage() {
+	const [appVersion, setAppVersion] = useState(FALLBACK_VERSION);
 	const newWorkspace = useNewWorkspace();
 	const openProject = useOpenProject();
 	const projects = useQuery({
@@ -57,6 +64,29 @@ export default function HomePage() {
 		queryFn: () => invoke<ListedProject[]>("projects_list_projects"),
 	});
 	const hasProjects = (projects.data ?? []).length > 0;
+
+	useEffect(() => {
+		let cancelled = false;
+
+		void (async () => {
+			if (!isTauri()) {
+				return;
+			}
+
+			try {
+				const version = await getVersion();
+				if (!cancelled) {
+					setAppVersion(version);
+				}
+			} catch (error) {
+				console.error("failed to resolve app version", error);
+			}
+		})();
+
+		return () => {
+			cancelled = true;
+		};
+	}, []);
 
 	return (
 		<>
@@ -82,7 +112,7 @@ export default function HomePage() {
 				</div>
 			</div>
 			<div className="shrink-0 flex items-center justify-between px-3 py-2">
-				<span className="text-[11px] text-text-muted">v0.1.0</span>
+				<span className="text-[11px] text-text-muted">v{appVersion}</span>
 				<StatusIcons />
 			</div>
 		</>
