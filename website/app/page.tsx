@@ -1,4 +1,5 @@
 import Image from "next/image";
+import { ArrowUpRight } from "lucide-react";
 import { githubRepository } from "../lib/github-releases";
 
 const DOWNLOAD_PATH = "/download";
@@ -37,10 +38,7 @@ export default function Home() {
 					className="inline-flex items-center gap-1.5 font-mono text-[12px] text-text-muted transition-colors hover:text-text-bright"
 				>
 					GitHub
-					<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-						<path d="M7 17L17 7" />
-						<path d="M7 7h10v10" />
-					</svg>
+					<ArrowUpRight size={12} />
 				</a>
 			</header>
 
