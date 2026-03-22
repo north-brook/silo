@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
+	extractAssetName,
+	fetchLatestReleaseManifest,
 	isSafeAssetName,
 	isSafeVersion,
-	latestInstallerDownloadUrl,
+	normalizeVersion,
+	preferredInstallerAssetName,
+	releasePlatformKey,
 	versionedAssetDownloadUrl,
 } from "../../lib/github-releases";
 
@@ -35,10 +39,44 @@ export async function GET(request: NextRequest) {
 		});
 	}
 
-	return NextResponse.redirect(latestInstallerDownloadUrl(), {
-		status: 307,
-		headers: {
-			"Cache-Control": "public, max-age=300, s-maxage=300, stale-while-revalidate=60",
-		},
-	});
+	try {
+		const manifest = await fetchLatestReleaseManifest();
+		const latestVersion = normalizeVersion(manifest.version);
+		const preferredAssetName = preferredInstallerAssetName();
+
+		if (preferredAssetName) {
+			return NextResponse.redirect(
+				versionedAssetDownloadUrl(latestVersion, preferredAssetName),
+				{
+					status: 307,
+					headers: {
+						"Cache-Control":
+							"public, max-age=300, s-maxage=300, stale-while-revalidate=60",
+					},
+				},
+			);
+		}
+
+		const defaultMacPlatform = manifest.platforms?.[releasePlatformKey("darwin", "aarch64")];
+		if (!defaultMacPlatform?.url) {
+			return NextResponse.json(
+				{ error: "no default macOS download artifact is available" },
+				{ status: 502 },
+			);
+		}
+
+		return NextResponse.redirect(
+			versionedAssetDownloadUrl(latestVersion, extractAssetName(defaultMacPlatform.url)),
+			{
+				status: 307,
+				headers: {
+					"Cache-Control": "public, max-age=300, s-maxage=300, stale-while-revalidate=60",
+				},
+			},
+		);
+	} catch (error) {
+		const message =
+			error instanceof Error ? error.message : "failed to resolve latest release metadata";
+		return NextResponse.json({ error: message }, { status: 502 });
+	}
 }

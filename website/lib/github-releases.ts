@@ -1,5 +1,4 @@
 const DEFAULT_GITHUB_REPOSITORY = "north-brook/silo";
-const DEFAULT_INSTALLER_ASSET_NAME = "Silo-macos-arm64.dmg";
 const USER_AGENT = "silo.new";
 
 type ReleasePlatform = {
@@ -27,8 +26,8 @@ export function githubRepositoryUrl(): string {
 	return `https://github.com/${githubRepository()}`;
 }
 
-export function latestInstallerAssetName(): string {
-	return envValue("SILO_RELEASE_INSTALLER_ASSET_NAME") ?? DEFAULT_INSTALLER_ASSET_NAME;
+export function preferredInstallerAssetName(): string | undefined {
+	return envValue("SILO_RELEASE_INSTALLER_ASSET_NAME");
 }
 
 function latestReleaseManifestUrl(): string {
@@ -36,7 +35,12 @@ function latestReleaseManifestUrl(): string {
 }
 
 export function latestInstallerDownloadUrl(): string {
-	return `${githubRepositoryUrl()}/releases/latest/download/${encodeURIComponent(latestInstallerAssetName())}`;
+	const assetName = preferredInstallerAssetName();
+	if (!assetName) {
+		throw new Error("no preferred installer asset name is configured");
+	}
+
+	return `${githubRepositoryUrl()}/releases/latest/download/${encodeURIComponent(assetName)}`;
 }
 
 export async function fetchLatestReleaseManifest(): Promise<LatestReleaseManifest> {
