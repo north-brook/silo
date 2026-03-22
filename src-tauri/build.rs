@@ -70,7 +70,27 @@ fn build_workspace_agent() {
     fs::write(
         &linker_path,
         format!(
-            "#!/bin/sh\nexec {zig} cc -target x86_64-linux-musl \"$@\"\n",
+            "#!/usr/bin/env bash\n\
+args=()\n\
+while (($#)); do\n\
+  case \"$1\" in\n\
+    --target=*)\n\
+      shift\n\
+      ;;\n\
+    --target)\n\
+      if (($# >= 2)); then\n\
+        shift 2\n\
+      else\n\
+        shift\n\
+      fi\n\
+      ;;\n\
+    *)\n\
+      args+=(\"$1\")\n\
+      shift\n\
+      ;;\n\
+  esac\n\
+done\n\
+exec {zig} cc -target x86_64-linux-musl \"${{args[@]}}\"\n",
             zig = shell_quote(&zig)
         ),
     )
@@ -107,6 +127,8 @@ fn build_workspace_agent() {
             "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER",
             &linker_path,
         )
+        .env("CC_x86_64_unknown_linux_musl", &linker_path)
+        .env("CC_x86_64-unknown-linux-musl", &linker_path)
         .env("CARGO_ENCODED_RUSTFLAGS", encoded_rustflags)
         .status()
         .expect("failed to invoke cargo for workspace agent");
