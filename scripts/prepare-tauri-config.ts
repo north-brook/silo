@@ -3,7 +3,9 @@ import path from "node:path";
 
 const workspaceRoot = path.resolve(import.meta.dir, "..");
 const version = process.env.SILO_RELEASE_VERSION?.trim();
-const updaterPublicKey = normalizeUpdaterPublicKey(process.env.SILO_UPDATER_PUBLIC_KEY);
+const updaterPublicKey = normalizeUpdaterPublicKeyForConfig(
+	process.env.SILO_UPDATER_PUBLIC_KEY,
+);
 
 if (!version) {
 	throw new Error("SILO_RELEASE_VERSION must be set");
@@ -33,24 +35,28 @@ await writeFile(outputPath, `${JSON.stringify(config, null, "\t")}\n`);
 
 process.stdout.write(`${path.relative(workspaceRoot, outputPath)}\n`);
 
-function normalizeUpdaterPublicKey(value: string | undefined): string | null {
+function normalizeUpdaterPublicKeyForConfig(value: string | undefined): string | null {
 	const trimmed = value?.trim();
 	if (!trimmed) {
 		return null;
 	}
 
 	if (trimmed.includes("untrusted comment:")) {
-		return trimmed;
+		return encodeCanonicalUpdaterPublicKey(trimmed);
 	}
 
 	const decoded = Buffer.from(trimmed, "base64").toString("utf8").trim();
 	if (decoded.includes("untrusted comment:")) {
-		return decoded;
+		return encodeCanonicalUpdaterPublicKey(decoded);
 	}
 
 	throw new Error(
 		"SILO_UPDATER_PUBLIC_KEY must be minisign public key text or a base64-wrapped key file",
 	);
+}
+
+function encodeCanonicalUpdaterPublicKey(value: string): string {
+	return Buffer.from(`${value}\n`, "utf8").toString("base64");
 }
 
 function ensureRecord(parent: Record<string, unknown>, key: string): Record<string, unknown> {
