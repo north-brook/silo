@@ -14,6 +14,7 @@ mod prompts;
 mod remote;
 mod river_names;
 mod router;
+mod startup_env;
 mod state;
 mod state_paths;
 mod system;
@@ -222,6 +223,7 @@ fn handle_shortcut_menu_event(app_handle: &AppHandle<AppRuntime>, menu_id: &str)
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let (logging_plugin, session_log) = logging::build_plugin();
+    let startup_environment = startup_env::initialize_process_environment();
     let cef_command_line_args = cef_command_line_args();
     let loopback_router = router::RouterManager::default();
     let browser_manager = browser::BrowserManager::new(loopback_router.clone());
@@ -247,6 +249,8 @@ pub fn run() {
 
     builder
         .setup(move |app| {
+            startup_environment.log();
+
             if let Err(error) = config::initialize_on_start() {
                 log::error!("failed to initialize silo config: {error}");
             }
@@ -648,9 +652,7 @@ pub fn run() {
         .run(handle_run_event);
 }
 
-fn maybe_enable_updater(
-    builder: tauri::Builder<AppRuntime>,
-) -> tauri::Builder<AppRuntime> {
+fn maybe_enable_updater(builder: tauri::Builder<AppRuntime>) -> tauri::Builder<AppRuntime> {
     if !build_info::is_production_build() {
         log::info!("production updater disabled for development build");
         return builder;
@@ -683,7 +685,8 @@ fn handle_run_event(app_handle: &tauri::AppHandle<AppRuntime>, event: tauri::Run
 fn cef_command_line_args() -> Vec<(String, Option<String>)> {
     let mut args = Vec::new();
 
-    if cfg!(debug_assertions) && std::env::var("SILO_CEF_USE_MOCK_KEYCHAIN").as_deref() != Ok("0") {
+    #[cfg(target_os = "macos")]
+    if std::env::var("SILO_CEF_USE_MOCK_KEYCHAIN").as_deref() != Ok("0") {
         // CEF workaround - reevaluate when CEF is stable.
         args.push(("--use-mock-keychain".to_string(), None));
     }

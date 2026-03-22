@@ -46,18 +46,9 @@ pub async fn codex_authenticate() -> Result<(), String> {
 #[tauri::command]
 pub async fn codex_configured() -> bool {
     log::trace!("checking whether codex is configured");
-    if std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .as_deref()
-        .and_then(detect_codex_auth_json)
-        .is_some()
-    {
-        return true;
-    }
-
     ConfigStore::new()
         .and_then(|store| store.load())
-        .map(|config| !config.codex.auth_json.trim().is_empty())
+        .map(|config| has_configured_auth_json(&config.codex.auth_json))
         .unwrap_or(false)
 }
 
@@ -70,6 +61,10 @@ pub(crate) fn normalize_codex_auth_json(contents: &str) -> Option<String> {
     let json: serde_json::Value = serde_json::from_str(contents).ok()?;
     codex_auth_credential(&json)?;
     Some(json.to_string())
+}
+
+fn has_configured_auth_json(contents: &str) -> bool {
+    normalize_codex_auth_json(contents).is_some()
 }
 
 fn codex_auth_file_contents(home_dir: &Path) -> Option<String> {
@@ -106,7 +101,7 @@ fn normalize_value(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{codex_token_from_auth_json, detect_codex_auth_json};
+    use super::{codex_token_from_auth_json, detect_codex_auth_json, has_configured_auth_json};
     use std::env;
     use std::fs;
     use std::path::PathBuf;
@@ -147,6 +142,16 @@ mod tests {
             auth_json,
             "{\"tokens\":{\"access_token\":\"codex-access-token\",\"refresh_token\":\"codex-refresh-token\"}}"
         );
+    }
+
+    #[test]
+    fn configured_auth_json_requires_a_valid_credential_payload() {
+        assert!(has_configured_auth_json(
+            "{\"tokens\":{\"refresh_token\":\"codex-refresh-token\"}}"
+        ));
+        assert!(!has_configured_auth_json(""));
+        assert!(!has_configured_auth_json("{\"tokens\":{}}"));
+        assert!(!has_configured_auth_json("not json"));
     }
 
     struct TestDir {

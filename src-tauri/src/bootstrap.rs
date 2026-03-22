@@ -1,4 +1,4 @@
-use crate::codex::{codex_token_from_auth_json, detect_codex_auth_json, normalize_codex_auth_json};
+use crate::codex::{codex_token_from_auth_json, normalize_codex_auth_json};
 use crate::config::{ConfigStore, ProjectConfig};
 use crate::remote::{
     remote_command_error, run_remote_command, run_remote_command_with_stdin,
@@ -512,12 +512,7 @@ fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, S
         }
         Some(branch)
     };
-    let home_dir = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let codex_auth_json = home_dir
-        .as_deref()
-        .and_then(detect_codex_auth_json)
-        .or_else(|| normalize_codex_auth_json(&config.codex.auth_json))
-        .unwrap_or_default();
+    let codex_auth_json = normalize_codex_auth_json(&config.codex.auth_json).unwrap_or_default();
     let codex_auth_fingerprint = codex_auth_fingerprint(&codex_auth_json);
 
     Ok(WorkspaceBootstrap {
