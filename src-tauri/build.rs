@@ -1,3 +1,4 @@
+use base64::Engine as _;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -36,16 +37,44 @@ fn emit_build_metadata() {
 
     let updater_public_key = env::var(UPDATER_PUBLIC_KEY_ENV_VAR)
         .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
+        .and_then(|value| normalize_updater_public_key(&value));
 
     if build_flavor == "prod" && updater_public_key.is_none() {
         panic!("{UPDATER_PUBLIC_KEY_ENV_VAR} must be set when building the production app");
     }
 
     if let Some(public_key) = updater_public_key {
-        println!("cargo:rustc-env={UPDATER_PUBLIC_KEY_ENV_VAR}={public_key}");
+        println!(
+            "cargo:rustc-env={UPDATER_PUBLIC_KEY_ENV_VAR}={}",
+            encode_rustc_env_value(&public_key)
+        );
     }
+}
+
+fn normalize_updater_public_key(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.contains("untrusted comment:") {
+        return Some(trimmed.to_string());
+    }
+
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    let decoded = decoded.trim();
+    if decoded.contains("untrusted comment:") {
+        return Some(decoded.to_string());
+    }
+
+    None
+}
+
+fn encode_rustc_env_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\n', "\\n")
 }
 
 fn build_workspace_agent() {

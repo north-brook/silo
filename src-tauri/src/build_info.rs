@@ -15,8 +15,10 @@ pub(crate) fn default_state_dir_name() -> &'static str {
     }
 }
 
-pub(crate) fn updater_public_key() -> Option<&'static str> {
-    option_env!("SILO_UPDATER_PUBLIC_KEY").filter(|value| !value.trim().is_empty())
+pub(crate) fn updater_public_key() -> Option<String> {
+    option_env!("SILO_UPDATER_PUBLIC_KEY")
+        .map(|value| value.replace("\\n", "\n").replace("\\\\", "\\"))
+        .filter(|value| !value.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -26,5 +28,12 @@ mod tests {
     #[test]
     fn build_flavor_is_known() {
         assert!(matches!(BUILD_FLAVOR, "dev" | PROD_FLAVOR));
+    }
+
+    #[test]
+    fn updater_key_restores_newlines() {
+        if let Some(value) = updater_public_key() {
+            assert!(!value.contains("\\n"));
+        }
     }
 }

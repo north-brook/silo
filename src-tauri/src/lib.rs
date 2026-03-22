@@ -662,7 +662,7 @@ fn maybe_enable_updater(
 
     builder.plugin(
         tauri_plugin_updater::Builder::new()
-            .pubkey(updater_public_key)
+            .pubkey(&updater_public_key)
             .build(),
     )
 }

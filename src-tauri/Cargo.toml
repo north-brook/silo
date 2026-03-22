@@ -15,6 +15,7 @@ name = "silo_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
+base64 = "0.22"
 tauri-build = { git = "https://github.com/tauri-apps/tauri", branch = "feat/cef", features = [] }
 
 [dependencies]
