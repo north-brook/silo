@@ -183,7 +183,20 @@ The e2e suite lives in [`tests/e2e`](./tests/e2e) and currently targets the live
 
 ## Production Releases
 
-Pushes to `main` trigger [`.github/workflows/release.yml`](./.github/workflows/release.yml), which builds the production macOS app, publishes a GitHub Release, and updates the Tauri updater feed.
+Pushes to `main` trigger [`.github/workflows/release.yml`](./.github/workflows/release.yml), which builds the production macOS app, publishes a GitHub Release, and uploads the updater artifacts and `latest.json`.
+
+Production clients do not talk to GitHub directly:
+
+- the app checks `https://silo.new/update`
+- fresh installs use `https://silo.new/download`
+- the `silo.new` website routes resolve the current GitHub Release assets and redirect to the exact installer or updater bundle
+
+The website supports these optional server-side environment variables so the backing GitHub repository or installer asset can change without shipping a new desktop build:
+
+- `SILO_RELEASE_GITHUB_REPOSITORY` defaults to `north-brook/silo`
+- `SILO_RELEASE_INSTALLER_ASSET_NAME` defaults to `Silo-macos-arm64-dmg.dmg`
+
+Update those environment variables on the `silo.new` deployment and redeploy the website when the backing release repository or installer asset name changes.
 
 Required GitHub secrets:
 
