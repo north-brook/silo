@@ -1,13 +1,29 @@
 @import "tailwindcss";
 
 @theme {
-	--color-canvas: #f6ede3;
-	--color-ink: #17120f;
+	--color-bg: #0a0a0c;
+	--color-surface: #131419;
+	--color-surface-light: #1a1b22;
+	--color-border: #16181e;
+	--color-border-light: #1e2028;
+	--color-border-hover: #2a2d38;
+
+	--color-text: #b0b8c8;
+	--color-text-bright: #e2e6ee;
+	--color-text-muted: #4a5068;
+	--color-text-placeholder: #3e4352;
+
+	--color-accent: #638cff;
+	--color-accent-hover: #7a9fff;
+
+	--font-mono:
+		"SF Mono", "Fira Code", "JetBrains Mono",
+		"Cascadia Code", ui-monospace, monospace;
 }
 
 @layer base {
 	:root {
-		color-scheme: light;
+		color-scheme: dark;
 	}
 
 	html {
@@ -16,11 +32,11 @@
 
 	body {
 		min-height: 100vh;
-		background:
-			radial-gradient(circle at top, rgba(255, 186, 94, 0.18), transparent 32%),
-			linear-gradient(180deg, #fffaf4 0%, #f6ede3 100%);
-		color: var(--color-ink);
-		font-family: var(--font-display), sans-serif;
+		background: var(--color-bg);
+		color: var(--color-text);
+		font-family: var(--font-mono-face), var(--font-mono);
+		-webkit-font-smoothing: antialiased;
+		-moz-osx-font-smoothing: grayscale;
 	}
 
 	* {
@@ -33,6 +49,72 @@
 	}
 
 	::selection {
-		background: rgba(235, 126, 38, 0.18);
+		background: rgba(99, 140, 255, 0.24);
+	}
+
+	::-webkit-scrollbar {
+		width: 6px;
+		height: 6px;
+	}
+
+	::-webkit-scrollbar-track {
+		background: transparent;
+	}
+
+	::-webkit-scrollbar-thumb {
+		background: var(--color-border-light);
+		border-radius: 2px;
+	}
+
+	::-webkit-scrollbar-thumb:hover {
+		background: var(--color-border-hover);
 	}
 }
+
+@keyframes fade-in-up {
+	from {
+		opacity: 0;
+		transform: translateY(20px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+
+@keyframes fade-in {
+	from { opacity: 0; }
+	to { opacity: 1; }
+}
+
+@keyframes pulse-glow {
+	0%, 100% { opacity: 0.4; }
+	50% { opacity: 1; }
+}
+
+@keyframes typing {
+	from { width: 0; }
+	to { width: 100%; }
+}
+
+@keyframes blink {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0; }
+}
+
+.animate-fade-in-up {
+	animation: fade-in-up 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-fade-in {
+	animation: fade-in 0.6s ease both;
+}
+
+.delay-100 { animation-delay: 100ms; }
+.delay-200 { animation-delay: 200ms; }
+.delay-300 { animation-delay: 300ms; }
+.delay-400 { animation-delay: 400ms; }
+.delay-500 { animation-delay: 500ms; }
+.delay-600 { animation-delay: 600ms; }
+.delay-700 { animation-delay: 700ms; }
+.delay-800 { animation-delay: 800ms; }
