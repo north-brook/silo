@@ -118,7 +118,7 @@ export function GitChecksTab() {
 	if (!detailsQuery.data) {
 		return (
 			<div className="h-full flex items-center justify-center px-4 text-center text-[11px] text-text-muted">
-				Pull request no longer available.
+				Pull request no longer available
 			</div>
 		);
 	}

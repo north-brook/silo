@@ -160,7 +160,7 @@ export function GitFilesTab() {
 	if (!rootQuery.data?.entries.length) {
 		return (
 			<div className="h-full flex items-center justify-center px-4 text-center text-[11px] text-text-muted">
-				No files found.
+				No files found
 			</div>
 		);
 	}
