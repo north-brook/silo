@@ -84,7 +84,11 @@ function isClassNameContext(node: ts.Node): boolean {
 		current;
 		current = current.parent
 	) {
-		if (ts.isJsxAttribute(current) && current.name.text === "className") {
+		if (
+			ts.isJsxAttribute(current) &&
+			ts.isIdentifier(current.name) &&
+			current.name.text === "className"
+		) {
 			return true;
 		}
 
