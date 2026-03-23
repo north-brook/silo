@@ -83,6 +83,14 @@ const SHORTCUT_EVENT_GIT_CREATE_OR_PUSH_PR: &str = "silo://git-create-or-push-pr
 const SHORTCUT_EVENT_GIT_MERGE_PR: &str = "silo://git-merge-pr";
 const SHORTCUT_EVENT_JUMP_TO_WORKSPACE: &str = "silo://jump-to-workspace";
 
+fn initialize_rustls_crypto_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_some() {
+        return;
+    }
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 fn emit_shortcut_event(app_handle: &AppHandle<AppRuntime>, event: &str) {
     let _ = app_handle.emit(event, ());
 }
@@ -222,6 +230,8 @@ fn handle_shortcut_menu_event(app_handle: &AppHandle<AppRuntime>, menu_id: &str)
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    initialize_rustls_crypto_provider();
+
     let (logging_plugin, session_log) = logging::build_plugin();
     let startup_environment = startup_env::initialize_process_environment();
     let cef_command_line_args = cef_command_line_args();

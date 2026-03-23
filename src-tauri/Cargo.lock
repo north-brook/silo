@@ -11,6 +11,7 @@ dependencies = [
  "indexmap 2.13.0",
  "log",
  "portable-pty",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

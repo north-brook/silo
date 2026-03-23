@@ -6,7 +6,13 @@ const DEV_CONFIG_PATH = "src-tauri/tauri.conf.json";
 const PROD_CONFIG_PATH = "src-tauri/tauri.prod.conf.json";
 
 const args = process.argv.slice(2);
-const requestedFlavor = args[0] === "prod" || args[0] === "dev" ? args.shift() : null;
+let requestedFlavor: BuildFlavor | null = null;
+
+if (args[0] === "prod") {
+	requestedFlavor = args.shift() as BuildFlavor;
+} else if (args[0] === "dev" && args.length > 1) {
+	requestedFlavor = args.shift() as BuildFlavor;
+}
 const flavor = (requestedFlavor ?? process.env.SILO_BUILD_FLAVOR ?? "dev") as BuildFlavor;
 const configPath =
 	process.env.SILO_TAURI_CONFIG_PATH ??

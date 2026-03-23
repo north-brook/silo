@@ -40,6 +40,7 @@ base64 = "0.22"
 sha2 = "0.10"
 urlencoding = "2"
 url = "2"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 
 [patch.crates-io]
 tauri = { git = "https://github.com/tauri-apps/tauri", branch = "feat/cef" }
