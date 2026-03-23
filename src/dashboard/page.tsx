@@ -111,7 +111,7 @@ export default function HomePage() {
 				</div>
 			</div>
 			<div className="shrink-0 flex items-center justify-between px-3 py-2">
-				<span className="text-sm text-text-placeholder">v{appVersion}</span>
+				<span className="text-xs text-text-placeholder">v{appVersion}</span>
 				<StatusIcons />
 			</div>
 		</>

@@ -22,10 +22,10 @@
 
 	--font-size-xs: 9px;
 	--font-size-xs--line-height: 12px;
-	--font-size-sm: 11px;
-	--font-size-sm--line-height: 16px;
-	--font-size-base: 13px;
-	--font-size-base--line-height: 20px;
+	--font-size-sm: 10px;
+	--font-size-sm--line-height: 14px;
+	--font-size-base: 12px;
+	--font-size-base--line-height: 16px;
 
 	--font-mono:
 		"SF Mono", "Fira Code", "JetBrains Mono", "Cascadia Code", ui-monospace,

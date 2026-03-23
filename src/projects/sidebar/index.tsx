@@ -789,7 +789,7 @@ function BarFooter() {
 			</button>
 			<div className="px-3 py-2">
 				{memory.data !== undefined && (
-					<span className="flex items-center gap-1 text-sm text-text-muted">
+					<span className="flex items-center gap-1 text-xs text-text-muted">
 						<Cpu size={10} />
 						{memory.data.toFixed(1)} MB
 					</span>
