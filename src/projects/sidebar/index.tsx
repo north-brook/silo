@@ -124,10 +124,10 @@ export function ProjectsSidebarToggle() {
 				<span className="flex items-center gap-1.5">
 					Toggle Projects Sidebar
 					<span className="flex items-center gap-0.5">
-						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-xs text-text">
 							⌘
 						</kbd>
-						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-xs text-text">
 							B
 						</kbd>
 					</span>
@@ -266,7 +266,7 @@ function ProjectRow({
 					onToggle();
 				}
 			}}
-			className="group flex items-center w-full px-3 py-2 text-xs text-text hover:bg-btn-hover hover:text-text-bright transition-colors cursor-pointer"
+			className="group flex items-center w-full px-3 py-2 text-sm text-text hover:bg-btn-hover hover:text-text-bright transition-colors cursor-pointer"
 		>
 			<span className="flex items-center gap-1.5 min-w-0 flex-1">
 				{project.image ? (
@@ -575,7 +575,7 @@ function WorkspaceRow({
 					}
 				}
 			}}
-			className={`group flex items-center w-full pl-5 pr-3 py-2 text-xs transition-colors cursor-pointer ${
+			className={`group flex items-center w-full pl-5 pr-3 py-2 text-sm transition-colors cursor-pointer ${
 				isDisabled
 					? "pointer-events-none"
 					: isActive
@@ -600,7 +600,7 @@ function WorkspaceRow({
 				</span>
 			</span>
 			{hotkeyNumber !== undefined ? (
-				<span className="shrink-0 ml-auto -mr-1 w-5 h-5 flex items-center justify-center text-[10px] font-medium text-text-muted">
+				<span className="shrink-0 ml-auto -mr-1 w-5 h-5 flex items-center justify-center text-sm font-medium text-text-muted">
 					{hotkeyNumber}
 				</span>
 			) : (
@@ -653,7 +653,7 @@ function WorkspaceRow({
 											setMenuOpen(false);
 											saveTemplateMut.mutate();
 										}}
-										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+										className="flex items-center gap-2 w-full px-2 py-1.5 text-sm text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
 									>
 										{saveTemplateMut.isPending ? (
 											<Loader className="text-text-bright" />
@@ -670,7 +670,7 @@ function WorkspaceRow({
 										setMenuOpen(false);
 										deleteTemplateMut.mutate();
 									}}
-									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
+									className="flex items-center gap-2 w-full px-2 py-1.5 text-sm text-error hover:bg-error/10 rounded transition-colors"
 								>
 									<Trash2 size={12} />
 									Delete
@@ -686,7 +686,7 @@ function WorkspaceRow({
 											start.mutate();
 											setMenuOpen(false);
 										}}
-										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+										className="flex items-center gap-2 w-full px-2 py-1.5 text-sm text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
 									>
 										<Play size={12} />
 										Start
@@ -700,7 +700,7 @@ function WorkspaceRow({
 											setMenuOpen(false);
 											resume.mutate();
 										}}
-										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+										className="flex items-center gap-2 w-full px-2 py-1.5 text-sm text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
 									>
 										<Play size={12} />
 										Resume
@@ -714,7 +714,7 @@ function WorkspaceRow({
 											setMenuOpen(false);
 											suspend.mutate();
 										}}
-										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+										className="flex items-center gap-2 w-full px-2 py-1.5 text-sm text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
 									>
 										<Pause size={12} />
 										Suspend
@@ -729,7 +729,7 @@ function WorkspaceRow({
 											if (isActive) navigate("/");
 											stop.mutate();
 										}}
-										className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
+										className="flex items-center gap-2 w-full px-2 py-1.5 text-sm text-text hover:bg-btn-hover hover:text-text-bright rounded transition-colors"
 									>
 										<Square size={12} />
 										Stop
@@ -743,7 +743,7 @@ function WorkspaceRow({
 										if (isActive) navigate("/");
 										remove.mutate();
 									}}
-									className="flex items-center gap-2 w-full px-2 py-1.5 text-xs text-error hover:bg-error/10 rounded transition-colors"
+									className="flex items-center gap-2 w-full px-2 py-1.5 text-sm text-error hover:bg-error/10 rounded transition-colors"
 								>
 									<Trash2 size={12} />
 									Delete
@@ -778,7 +778,7 @@ function BarFooter() {
 				type="button"
 				onClick={() => openProject.open()}
 				disabled={openProject.isPending}
-				className="flex items-center gap-1.5 w-full px-3 py-2.5 text-xs text-text-muted hover:bg-btn-hover hover:text-text-bright transition-colors disabled:opacity-50"
+				className="flex items-center gap-1.5 w-full px-3 py-2.5 text-sm text-text-muted hover:bg-btn-hover hover:text-text-bright transition-colors disabled:opacity-50"
 			>
 				{openProject.isPending ? (
 					<Loader className="text-text-muted" />
@@ -789,7 +789,7 @@ function BarFooter() {
 			</button>
 			<div className="px-3 py-2">
 				{memory.data !== undefined && (
-					<span className="flex items-center gap-1 text-[11px] text-text-muted">
+					<span className="flex items-center gap-1 text-sm text-text-muted">
 						<Cpu size={10} />
 						{memory.data.toFixed(1)} MB
 					</span>
@@ -1001,7 +1001,7 @@ export function ProjectsSidebar() {
 						navigate("/");
 					}
 				}}
-				className={`group flex items-center w-full px-3 py-2.5 text-xs transition-colors cursor-pointer ${isHome ? "bg-btn-hover text-text-bright" : "text-text hover:bg-btn-hover hover:text-text-bright"}`}
+				className={`group flex items-center w-full px-3 py-2.5 text-sm transition-colors cursor-pointer ${isHome ? "bg-btn-hover text-text-bright" : "text-text hover:bg-btn-hover hover:text-text-bright"}`}
 			>
 				<span className="flex items-center gap-1.5 min-w-0 flex-1">
 					<div className="w-4 h-4 flex items-center justify-center p-[2.5px]">
@@ -1010,7 +1010,7 @@ export function ProjectsSidebar() {
 					Dashboard
 				</span>
 				{metaKeyHeld ? (
-					<span className="shrink-0 ml-auto -mr-1 w-5 h-5 flex items-center justify-center text-[10px] font-medium text-text-muted">
+					<span className="shrink-0 ml-auto -mr-1 w-5 h-5 flex items-center justify-center text-sm font-medium text-text-muted">
 						0
 					</span>
 				) : (

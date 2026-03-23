@@ -175,12 +175,12 @@ export function Toaster() {
 					>
 						<div className="flex flex-col gap-1">
 							{title && (
-								<ToastPrimitive.Title className="text-xs font-medium text-text-bright">
+								<ToastPrimitive.Title className="text-sm font-medium text-text-bright">
 									{title}
 								</ToastPrimitive.Title>
 							)}
 							{description && (
-								<ToastPrimitive.Description className="text-xs text-text-muted">
+								<ToastPrimitive.Description className="text-sm text-text-muted">
 									{description}
 								</ToastPrimitive.Description>
 							)}

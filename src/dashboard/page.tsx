@@ -14,7 +14,7 @@ import { SiloIcon } from "@/shared/ui/icons/silo";
 
 function Kbd({ children }: { children: React.ReactNode }) {
 	return (
-		<kbd className="inline-flex items-center justify-center w-5 h-5 rounded border border-border-light bg-btn text-[11px] text-text-muted">
+		<kbd className="inline-flex items-center justify-center w-5 h-5 rounded border border-border-light bg-btn text-sm text-text-muted">
 			{children}
 		</kbd>
 	);
@@ -39,7 +39,7 @@ function ActionRow({
 			onClick={onClick}
 			disabled={disabled}
 			data-testid={`dashboard-action-${label.toLowerCase().replace(/\s+/g, "-")}`}
-			className="flex items-center gap-3 w-full px-1 py-2.5 text-sm text-text-muted hover:text-text-bright transition-colors disabled:opacity-50 cursor-pointer"
+			className="flex items-center gap-3 w-full px-1 py-2.5 text-base text-text-muted hover:text-text-bright transition-colors disabled:opacity-50 cursor-pointer"
 		>
 			<Icon size={16} className="shrink-0" />
 			<span className="flex-1 text-left">{label}</span>
@@ -111,7 +111,7 @@ export default function HomePage() {
 				</div>
 			</div>
 			<div className="shrink-0 flex items-center justify-between px-3 py-2">
-				<span className="text-[11px] text-text-placeholder">v{appVersion}</span>
+				<span className="text-sm text-text-placeholder">v{appVersion}</span>
 				<StatusIcons />
 			</div>
 		</>

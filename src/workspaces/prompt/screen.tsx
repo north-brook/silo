@@ -226,7 +226,7 @@ export function PromptWorkspace({
 						spellCheck={false}
 						autoCorrect="off"
 						autoCapitalize="off"
-						className="w-full resize-none bg-transparent border-0 px-4 pt-4 pb-2 text-sm text-text-bright placeholder:text-text-placeholder outline-none focus:border-0 focus:ring-0 min-h-[6rem] max-h-64 overflow-y-auto"
+						className="w-full resize-none bg-transparent border-0 px-4 pt-4 pb-2 text-base text-text-bright placeholder:text-text-placeholder outline-none focus:border-0 focus:ring-0 min-h-[6rem] max-h-64 overflow-y-auto"
 					/>
 					<div className="flex items-center justify-between px-3 pb-3">
 						<Tooltip>
@@ -236,7 +236,7 @@ export function PromptWorkspace({
 										<PopoverTrigger asChild>
 											<button
 												type="button"
-												className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-text hover:bg-btn-hover rounded transition-colors"
+												className="flex items-center gap-1.5 px-2 py-1 text-sm text-text hover:bg-btn-hover rounded transition-colors"
 											>
 												{provider.icon}
 												{provider.label}
@@ -259,7 +259,7 @@ export function PromptWorkspace({
 														setProviderId(p.id);
 														setProviderOpen(false);
 													}}
-													className={`flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded transition-colors ${
+													className={`flex items-center gap-2 w-full px-2 py-1.5 text-sm rounded transition-colors ${
 														p.id === provider.id
 															? "text-text-bright bg-btn-hover"
 															: "text-text hover:bg-btn-hover hover:text-text-bright"
@@ -277,10 +277,10 @@ export function PromptWorkspace({
 								<span className="flex items-center gap-1.5">
 									Toggle model
 									<span className="flex items-center gap-0.5">
-										<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+										<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-xs text-text">
 											⇧
 										</kbd>
-										<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+										<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-xs text-text">
 											⇥
 										</kbd>
 									</span>
@@ -307,7 +307,7 @@ export function PromptWorkspace({
 							type="button"
 							disabled={createTerminal.isPending}
 							onClick={() => createTerminal.mutate()}
-							className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-text-muted hover:text-text transition-colors"
+							className="flex items-center gap-1.5 px-2 py-1 text-sm text-text-muted hover:text-text transition-colors"
 						>
 							{createTerminal.isPending ? <Loader /> : <Terminal size={12} />}
 							Open Terminal
@@ -316,14 +316,14 @@ export function PromptWorkspace({
 							type="button"
 							disabled={createBrowser.isPending}
 							onClick={() => createBrowser.mutate()}
-							className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-text-muted hover:text-text transition-colors"
+							className="flex items-center gap-1.5 px-2 py-1 text-sm text-text-muted hover:text-text transition-colors"
 						>
 							{createBrowser.isPending ? <Loader /> : <Globe size={12} />}
 							Open Browser
 						</button>
 					</div>
 				) : (
-					<div className="flex items-center gap-2 mt-3 px-2 py-1 text-[11px] text-text-muted">
+					<div className="flex items-center gap-2 mt-3 px-2 py-1 text-sm text-text-muted">
 						<Loader className="text-text-muted" />
 						<span>
 							{statusMessage(status, lifecycle)}

@@ -746,7 +746,7 @@ function WorkspaceShellInner() {
 								type="button"
 								disabled={isPending}
 								onClick={option.action}
-								className="flex items-center gap-2.5 w-full px-4 py-2 text-xs text-text hover:bg-btn-hover hover:text-text-bright transition-colors disabled:opacity-50"
+								className="flex items-center gap-2.5 w-full px-4 py-2 text-sm text-text hover:bg-btn-hover hover:text-text-bright transition-colors disabled:opacity-50"
 							>
 								{option.icon}
 								<span className="truncate flex-1 text-left">
@@ -756,7 +756,7 @@ function WorkspaceShellInner() {
 									{option.pending ? (
 										<Loader className="text-text-muted" />
 									) : (
-										<kbd className="text-[10px] text-text-placeholder border border-border-light rounded px-1.5 py-0.5">
+										<kbd className="text-sm text-text-placeholder border border-border-light rounded px-1.5 py-0.5">
 											{index + 1}
 										</kbd>
 									)}
@@ -809,10 +809,10 @@ function WorkspaceShellInner() {
 									<span className="flex items-center gap-1.5">
 										New tab
 										<span className="flex items-center gap-0.5">
-											<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+											<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-xs text-text">
 												⌘
 											</kbd>
-											<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+											<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-xs text-text">
 												T
 											</kbd>
 										</span>
@@ -893,7 +893,7 @@ function WorkspaceTab({
 					}),
 				);
 			}}
-			className={`group/tab h-9 flex items-center gap-1.5 pl-3.5 pr-2.5 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
+			className={`group/tab h-9 flex items-center gap-1.5 pl-3.5 pr-2.5 text-sm shrink-0 transition-colors border-r border-b cursor-pointer ${
 				isActive
 					? "bg-surface text-text-bright border-r-border-light border-b-surface"
 					: "text-text border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text-bright"

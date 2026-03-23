@@ -143,7 +143,7 @@ function NewWorkspaceDialog({
 							type="button"
 							disabled={createWorkspace.isPending}
 							onClick={() => createWorkspace.mutate(project.name)}
-							className="flex items-center gap-2.5 w-full px-4 py-2 text-xs text-text hover:bg-btn-hover hover:text-text-bright transition-colors disabled:opacity-50"
+							className="flex items-center gap-2.5 w-full px-4 py-2 text-sm text-text hover:bg-btn-hover hover:text-text-bright transition-colors disabled:opacity-50"
 						>
 							{project.image ? (
 								<Image
@@ -161,14 +161,14 @@ function NewWorkspaceDialog({
 							createWorkspace.variables === project.name ? (
 								<Loader className="text-text-muted" />
 							) : (
-								<kbd className="shrink-0 text-[10px] text-text-placeholder border border-border-light rounded px-1.5 py-0.5">
+								<kbd className="shrink-0 text-sm text-text-placeholder border border-border-light rounded px-1.5 py-0.5">
 									{index + 1}
 								</kbd>
 							)}
 						</button>
 					))}
 					{projectsWithTemplates.length === 0 && (
-						<p className="px-4 py-3 text-xs text-text-muted">
+						<p className="px-4 py-3 text-sm text-text-muted">
 							No projects with templates yet.
 						</p>
 					)}

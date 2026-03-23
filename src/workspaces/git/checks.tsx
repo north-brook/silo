@@ -109,7 +109,7 @@ export function GitChecksTab() {
 
 	if (detailsQuery.isError) {
 		return (
-			<div className="h-full flex items-center justify-center px-4 text-center text-[11px] text-text-muted">
+			<div className="h-full flex items-center justify-center px-4 text-center text-sm text-text-muted">
 				Failed to load checks. {queryErrorMessage(detailsQuery.error)}
 			</div>
 		);
@@ -117,7 +117,7 @@ export function GitChecksTab() {
 
 	if (!detailsQuery.data) {
 		return (
-			<div className="h-full flex items-center justify-center px-4 text-center text-[11px] text-text-muted">
+			<div className="h-full flex items-center justify-center px-4 text-center text-sm text-text-muted">
 				Pull request no longer available
 			</div>
 		);
@@ -137,11 +137,11 @@ export function GitChecksTab() {
 		<div className="flex flex-col gap-3 p-3">
 			{details.title && (
 				<div>
-					<p className="text-[11px] font-medium text-text-bright">
+					<p className="text-sm font-medium text-text-bright">
 						{details.title}
 					</p>
 					{details.body && (
-						<p className="text-[11px] text-text-muted mt-1 line-clamp-3">
+						<p className="text-sm text-text-muted mt-1 line-clamp-3">
 							{details.body}
 						</p>
 					)}
@@ -152,7 +152,7 @@ export function GitChecksTab() {
 				deploymentsQuery.isError ||
 				deployments.length > 0) && (
 				<div className="flex flex-col gap-1">
-					<span className="text-[10px] text-text-muted font-medium uppercase tracking-wide">
+					<span className="text-sm text-text-muted font-medium uppercase tracking-wide">
 						Deployments
 					</span>
 					{deploymentsQuery.isLoading ? (
@@ -160,7 +160,7 @@ export function GitChecksTab() {
 							<Loader />
 						</div>
 					) : deploymentsQuery.isError ? (
-						<p className="py-2 text-[11px] text-text-muted">
+						<p className="py-2 text-sm text-text-muted">
 							Failed to load deployments.{" "}
 							{queryErrorMessage(deploymentsQuery.error)}
 						</p>
@@ -174,7 +174,7 @@ export function GitChecksTab() {
 									const { openUrl } = await import("@tauri-apps/plugin-opener");
 									openUrl(deployment.url);
 								}}
-								className="flex items-center gap-2 px-3 py-1 -mx-3 text-[11px] hover:bg-btn-hover transition-colors text-left"
+								className="flex items-center gap-2 px-3 py-1 -mx-3 text-sm hover:bg-btn-hover transition-colors text-left"
 							>
 								{deployment.icon_url ? (
 									<Image
@@ -202,7 +202,7 @@ export function GitChecksTab() {
 			{details.checks.length > 0 && (
 				<div className="flex flex-col gap-1">
 					<div className="flex items-center justify-between">
-						<span className="text-[10px] text-text-muted font-medium uppercase tracking-wide">
+						<span className="text-sm text-text-muted font-medium uppercase tracking-wide">
 							Checks
 						</span>
 						{allResolved && hasFailed && (
@@ -232,7 +232,7 @@ export function GitChecksTab() {
 									const { openUrl } = await import("@tauri-apps/plugin-opener");
 									openUrl(check.link);
 								}}
-								className="flex items-center gap-2 px-3 py-1 -mx-3 text-[11px] hover:bg-btn-hover transition-colors text-left"
+								className="flex items-center gap-2 px-3 py-1 -mx-3 text-sm hover:bg-btn-hover transition-colors text-left"
 							>
 								<CheckStateIcon state={check.state} />
 								<span className="text-text truncate">{check.name}</span>
@@ -245,7 +245,7 @@ export function GitChecksTab() {
 				!deploymentsQuery.isLoading &&
 				!deploymentsQuery.isError &&
 				details.checks.length === 0 && (
-					<p className="text-[11px] text-text-muted py-4 text-center">
+					<p className="text-sm text-text-muted py-4 text-center">
 						No checks or deployments
 					</p>
 				)}

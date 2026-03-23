@@ -55,10 +55,10 @@ function ProjectsSidebarReopenButton() {
 				<span className="flex items-center gap-1.5">
 					Toggle Projects Sidebar
 					<span className="flex items-center gap-0.5">
-						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-xs text-text">
 							⌘
 						</kbd>
-						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text">
+						<kbd className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-xs text-text">
 							B
 						</kbd>
 					</span>
@@ -112,7 +112,7 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 			<div
 				className={`relative flex items-center justify-between w-full px-3 h-full z-10 ${!projectsBarOpen ? "pl-20" : ""}`}
 			>
-				<div className="flex items-center gap-2 text-[11px] text-text-muted">
+				<div className="flex items-center gap-2 text-sm text-text-muted">
 					<ProjectsSidebarReopenButton />
 					{projectImage ? (
 						<Image
@@ -135,7 +135,7 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 						type="button"
 						disabled={save.isPending || templateBusy}
 						onClick={() => save.mutate()}
-						className="flex items-center gap-1.5 justify-center px-2.5 py-1 rounded text-[11px] font-medium bg-green-600 text-white transition-colors hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
+						className="flex items-center gap-1.5 justify-center px-2.5 py-1 rounded text-sm font-medium bg-green-600 text-white transition-colors hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
 					>
 						{save.isPending || templateBusy ? (
 							<Loader className="text-white" />
@@ -265,7 +265,7 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 			<div
 				className={`relative flex items-center justify-between w-full pr-2 h-full z-10 ${!projectsBarOpen ? "pl-20" : "pl-3"}`}
 			>
-				<div className="flex items-center gap-2 text-[11px] text-text-muted">
+				<div className="flex items-center gap-2 text-sm text-text-muted">
 					<ProjectsSidebarReopenButton />
 					{projectImage ? (
 						<Image
@@ -293,7 +293,7 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 									setEditingBranch(false);
 								}
 							}}
-							className="bg-transparent border-0 outline-none text-[11px] text-text-bright p-0 m-0 w-24 rounded-none"
+							className="bg-transparent border-0 outline-none text-sm text-text-bright p-0 m-0 w-24 rounded-none"
 						/>
 					) : (
 						<button
@@ -331,7 +331,7 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 							className="w-52 p-1 max-h-64 overflow-y-auto"
 						>
 							{branches.isLoading && (
-								<span className="block px-2 py-1.5 text-xs text-text-muted">
+								<span className="block px-2 py-1.5 text-sm text-text-muted">
 									Loading...
 								</span>
 							)}
@@ -343,7 +343,7 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 										updateTargetBranch.mutate(b);
 										setTargetOpen(false);
 									}}
-									className={`block w-full text-left px-2 py-1.5 text-xs rounded transition-colors truncate ${
+									className={`block w-full text-left px-2 py-1.5 text-sm rounded transition-colors truncate ${
 										b === targetBranch
 											? "text-text-bright bg-btn-hover"
 											: "text-text hover:bg-btn-hover hover:text-text-bright"
@@ -353,7 +353,7 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 								</button>
 							))}
 							{branches.data?.length === 0 && (
-								<span className="block px-2 py-1.5 text-xs text-text-muted">
+								<span className="block px-2 py-1.5 text-sm text-text-muted">
 									No branches found
 								</span>
 							)}

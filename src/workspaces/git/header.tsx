@@ -254,7 +254,7 @@ export function GitSidebarHeader() {
 							const { openUrl } = await import("@tauri-apps/plugin-opener");
 							openUrl(prSummary.url);
 						}}
-						className="flex items-center gap-1 text-[11px] text-text hover:text-text-bright transition-colors"
+						className="flex items-center gap-1 text-sm text-text hover:text-text-bright transition-colors"
 					>
 						PR #{prSummary.number}
 						<ExternalLink size={10} />
@@ -271,7 +271,7 @@ export function GitSidebarHeader() {
 								type="button"
 								disabled={createPr.isPending}
 								onClick={() => createPr.mutate()}
-								className="flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium bg-green-600 text-white hover:bg-green-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+								className="flex items-center gap-1.5 px-2.5 py-1 rounded text-sm font-medium bg-green-600 text-white hover:bg-green-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
 							>
 								{createPr.isPending ? (
 									<Loader className="text-white" />
@@ -293,7 +293,7 @@ export function GitSidebarHeader() {
 								type="button"
 								disabled={merge.isPending}
 								onClick={handleMerge}
-								className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium ${mergeColor} transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
+								className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-sm font-medium ${mergeColor} transition-colors disabled:opacity-50 disabled:cursor-not-allowed`}
 							>
 								{merge.isPending ? (
 									<Loader className={checksRunning ? "" : "text-white"} />
@@ -315,7 +315,7 @@ export function GitSidebarHeader() {
 								type="button"
 								disabled={push.isPending}
 								onClick={() => push.mutate()}
-								className="flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium bg-btn text-text hover:bg-btn-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+								className="flex items-center gap-1.5 px-2.5 py-1 rounded text-sm font-medium bg-btn text-text hover:bg-btn-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
 							>
 								{push.isPending ? <Loader /> : <ArrowUpFromLine size={10} />}
 								Push
@@ -358,7 +358,7 @@ export function GitSidebarHeader() {
 								<Loader />
 							</div>
 						) : mergeDetailsQuery.isError ? (
-							<p className="py-2 text-[11px] text-text-muted">
+							<p className="py-2 text-sm text-text-muted">
 								Failed to load checks.{" "}
 								{queryErrorMessage(mergeDetailsQuery.error)}
 							</p>
@@ -368,7 +368,7 @@ export function GitSidebarHeader() {
 								.map((check) => (
 									<div
 										key={check.id}
-										className="flex items-center gap-2 px-1 py-1 text-[11px]"
+										className="flex items-center gap-2 px-1 py-1 text-sm"
 									>
 										<CheckStateIcon state={check.state} />
 										<span className="text-text truncate">{check.name}</span>
@@ -383,7 +383,7 @@ export function GitSidebarHeader() {
 							merge.mutate();
 							setMergeConfirmOpen(false);
 						}}
-						className="mt-4 w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded text-[11px] font-medium bg-yellow-600 text-white hover:bg-yellow-500 transition-colors"
+						className="mt-4 w-full flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded text-sm font-medium bg-yellow-600 text-white hover:bg-yellow-500 transition-colors"
 					>
 						<GitMerge size={10} />
 						Merge
@@ -408,7 +408,7 @@ function HotkeyHint({
 				{keys.map((key) => (
 					<kbd
 						key={key}
-						className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text"
+						className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-xs text-text"
 					>
 						{key}
 					</kbd>

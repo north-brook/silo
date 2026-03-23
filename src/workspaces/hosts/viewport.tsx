@@ -60,14 +60,14 @@ export function SessionViewport({
 				<div
 					className={`absolute inset-0 flex items-center justify-center z-10 ${bgClassName}`}
 				>
-					<div className="flex items-center gap-2 text-[11px] text-text-muted">
+					<div className="flex items-center gap-2 text-sm text-text-muted">
 						{activeHost?.status === "error" ? (
 							<>
 								<span>
 									{activeHost.errorMessage ?? "Session failed to attach"}
 								</span>
 								<button
-									className="rounded border border-line bg-surface-elevated px-2 py-1 text-[11px] text-text hover:bg-surface"
+									className="rounded border border-line bg-surface-elevated px-2 py-1 text-sm text-text hover:bg-surface"
 									onClick={() => retrySession(activeSessionKey)}
 									type="button"
 								>

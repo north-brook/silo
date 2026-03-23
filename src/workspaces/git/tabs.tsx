@@ -23,7 +23,7 @@ export function GitSidebarTabs() {
 						<button
 							type="button"
 							onClick={() => openTab("files")}
-							className={`h-9 flex items-center gap-1.5 px-3 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
+							className={`h-9 flex items-center gap-1.5 px-3 text-sm shrink-0 transition-colors border-r border-b cursor-pointer ${
 								activeTab === "files"
 									? "bg-surface text-text-bright border-r-border-light border-b-surface"
 									: "text-text-muted border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text"
@@ -41,7 +41,7 @@ export function GitSidebarTabs() {
 						<button
 							type="button"
 							onClick={() => openTab("diff")}
-							className={`h-9 flex items-center gap-1.5 px-3 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
+							className={`h-9 flex items-center gap-1.5 px-3 text-sm shrink-0 transition-colors border-r border-b cursor-pointer ${
 								activeTab === "diff"
 									? "bg-surface text-text-bright border-r-border-light border-b-surface"
 									: "text-text-muted border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text"
@@ -66,7 +66,7 @@ export function GitSidebarTabs() {
 							<button
 								type="button"
 								onClick={() => openTab("checks")}
-								className={`h-9 flex items-center gap-1.5 px-3 text-[11px] shrink-0 transition-colors border-r border-b cursor-pointer ${
+								className={`h-9 flex items-center gap-1.5 px-3 text-sm shrink-0 transition-colors border-r border-b cursor-pointer ${
 									activeTab === "checks"
 										? "bg-surface text-text-bright border-r-border-light border-b-surface"
 										: "text-text-muted border-r-border-light border-b-border-light hover:bg-btn-hover hover:text-text"
@@ -111,7 +111,7 @@ function HotkeyHint({ keys }: { keys: string[] }) {
 			{keys.map((key) => (
 				<kbd
 					key={key}
-					className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-[9px] text-text"
+					className="inline-flex items-center justify-center w-4 h-4 rounded border border-border-light text-xs text-text"
 				>
 					{key}
 				</kbd>

@@ -151,7 +151,7 @@ export function GitFilesTab() {
 
 	if (rootQuery.isError && !rootQuery.data) {
 		return (
-			<div className="h-full flex items-center justify-center px-4 text-center text-[11px] text-text-muted">
+			<div className="h-full flex items-center justify-center px-4 text-center text-sm text-text-muted">
 				Failed to load files.
 			</div>
 		);
@@ -159,7 +159,7 @@ export function GitFilesTab() {
 
 	if (!rootQuery.data?.entries.length) {
 		return (
-			<div className="h-full flex items-center justify-center px-4 text-center text-[11px] text-text-muted">
+			<div className="h-full flex items-center justify-center px-4 text-center text-sm text-text-muted">
 				No files found
 			</div>
 		);
@@ -255,7 +255,7 @@ function TreeStatusRow({
 }) {
 	return (
 		<div
-			className="relative px-3 py-[3px] text-[11px] text-text-muted"
+			className="relative px-3 py-[3px] text-sm text-text-muted"
 			style={{ paddingLeft: `${depth * 12 + 24}px` }}
 		>
 			<TreeGuideLines depth={depth} />
@@ -330,7 +330,7 @@ function TreeRow({
 							onToggleFolder(node.path);
 						}
 					}}
-					className={`relative w-full flex items-center gap-1 px-3 py-[3px] text-[11px] ${textClass} hover:bg-btn-hover transition-colors`}
+					className={`relative w-full flex items-center gap-1 px-3 py-[3px] text-sm ${textClass} hover:bg-btn-hover transition-colors`}
 					style={{
 						paddingLeft: `${depth * 12 + 8}px`,
 						...gitRowStyle(folderDiff ? dirStatusType(folderDiff) : null),
@@ -351,7 +351,7 @@ function TreeRow({
 					</span>
 					<span className="truncate">{node.name}</span>
 					{folderDiff && (
-						<span className="shrink-0 ml-auto text-[10px] tabular-nums text-text-muted">
+						<span className="shrink-0 ml-auto text-sm tabular-nums text-text-muted">
 							{folderDiff.fileCount}
 						</span>
 					)}
@@ -391,7 +391,7 @@ function TreeRow({
 			onDoubleClick={() => {
 				void onFileOpen(node.path, true);
 			}}
-			className={`relative w-full flex items-center justify-between gap-2 px-3 py-[3px] text-[11px] ${textClass} hover:bg-btn-hover transition-colors`}
+			className={`relative w-full flex items-center justify-between gap-2 px-3 py-[3px] text-sm ${textClass} hover:bg-btn-hover transition-colors`}
 			style={{
 				paddingLeft: `${depth * 12 + 8}px`,
 				...gitRowStyle(
@@ -413,7 +413,7 @@ function TreeRow({
 				<span className="truncate">{node.name}</span>
 			</span>
 			{diff && (
-				<span className="shrink-0 flex items-center gap-1 text-[10px]">
+				<span className="shrink-0 flex items-center gap-1 text-sm">
 					{diff.additions > 0 && (
 						<span className="text-emerald-400/80">+{diff.additions}</span>
 					)}

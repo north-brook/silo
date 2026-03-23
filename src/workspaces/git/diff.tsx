@@ -22,13 +22,13 @@ const baseDiffOptions = {
 	unsafeCSS: `
 		:host {
 			--diffs-header-font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', ui-monospace, monospace;
-			--diffs-font-size: 11px;
+			--diffs-font-size: var(--font-size-sm);
 			--diffs-line-height: 16px;
 			--diffs-addition-color-override: #16a34a;
 			--diffs-deletion-color-override: #f87171;
 		}
 		[data-diffs-header] {
-			font-size: 11px;
+			font-size: var(--font-size-sm);
 			min-height: unset;
 			padding-block: 6px;
 			cursor: pointer;
@@ -45,7 +45,7 @@ const baseDiffOptions = {
 		}
 		[data-diffs-header] [data-additions-count],
 		[data-diffs-header] [data-deletions-count] {
-			font-size: 10px;
+			font-size: var(--font-size-sm);
 		}
 	`,
 };
@@ -66,7 +66,7 @@ export function GitDiffTab() {
 	if (!diff || !hasDiffFiles) {
 		return (
 			<div className="flex h-full items-center justify-center px-6 text-center">
-				<p className="text-[11px] text-text-muted">No changes yet</p>
+				<p className="text-sm text-text-muted">No changes yet</p>
 			</div>
 		);
 	}
@@ -93,8 +93,8 @@ function DiffSectionView({
 
 	return (
 		<div>
-			<div className="sticky top-0 z-10 bg-surface flex items-center justify-between px-3 py-1.5 text-[11px]">
-				<span className="text-[10px] text-text-muted font-medium uppercase tracking-wide">
+			<div className="sticky top-0 z-10 bg-surface flex items-center justify-between px-3 py-1.5 text-sm">
+				<span className="text-sm text-text-muted font-medium uppercase tracking-wide">
 					{label}
 				</span>
 				<button
@@ -194,7 +194,7 @@ function DiffFileView({
 
 	if (file.binary || file.patch == null) {
 		return (
-			<div className="flex items-center px-1 py-1 text-[11px] text-text-muted">
+			<div className="flex items-center px-1 py-1 text-sm text-text-muted">
 				<span className="truncate min-w-0">{file.path}</span>
 				<span className="shrink-0 ml-auto text-text-placeholder italic">
 					binary

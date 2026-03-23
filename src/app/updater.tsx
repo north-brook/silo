@@ -60,7 +60,7 @@ export function AppUpdater() {
 				action: (
 					<button
 						type="button"
-						className="ml-auto shrink-0 rounded-md bg-btn px-2.5 py-1 text-[11px] font-medium text-text-bright transition-colors hover:bg-btn-hover"
+						className="ml-auto shrink-0 rounded-md bg-btn px-2.5 py-1 text-sm font-medium text-text-bright transition-colors hover:bg-btn-hover"
 						onClick={() => invoke("system_restart_app")}
 					>
 						Restart

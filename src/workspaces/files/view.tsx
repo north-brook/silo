@@ -58,7 +58,7 @@ const editorTheme = EditorView.theme(
 			height: "100%",
 			backgroundColor: "var(--color-surface)",
 			color: "var(--color-text)",
-			fontSize: "12px",
+			fontSize: "var(--font-size-base)",
 		},
 		".cm-scroller": {
 			fontFamily: "var(--font-mono)",
@@ -548,7 +548,7 @@ export function WorkspaceFileSessionView() {
 	return (
 		<div className="flex-1 min-h-0 bg-surface flex flex-col overflow-hidden">
 			{conflict && (
-				<div className="shrink-0 border-b border-red-500/20 bg-red-500/6 px-4 py-2.5 flex items-center justify-between gap-4 text-[11px]">
+				<div className="shrink-0 border-b border-red-500/20 bg-red-500/6 px-4 py-2.5 flex items-center justify-between gap-4 text-sm">
 					<div className="min-w-0 flex items-center gap-2 text-red-200">
 						<AlertTriangle size={12} className="shrink-0" />
 						<span className="truncate">
@@ -664,8 +664,8 @@ function PlaceholderState({
 				{icon}
 			</div>
 			<div className="space-y-1">
-				<div className="text-[12px] text-text-bright">{title}</div>
-				<div className="text-[11px] text-text-muted max-w-sm">
+				<div className="text-base text-text-bright">{title}</div>
+				<div className="text-sm text-text-muted max-w-sm">
 					{description}
 				</div>
 			</div>

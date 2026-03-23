@@ -17,7 +17,7 @@ const ICON_SIZE = 12;
 
 function StepRow({ step }: { step: Step }) {
 	return (
-		<div className="flex items-center gap-2.5 text-[11px]">
+		<div className="flex items-center gap-2.5 text-sm">
 			<span
 				className={`w-3 flex items-center justify-center shrink-0 ${step.state === "pending" ? "opacity-30" : ""}`}
 			>
@@ -75,7 +75,7 @@ export function TemplateOperationScreen({
 		<div className="flex-1 flex flex-col items-center justify-center p-6 gap-4">
 			<ScreenFrame steps={steps} />
 			{operation.status === "failed" && operation.last_error ? (
-				<p className="max-w-md text-center text-[11px] text-error">
+				<p className="max-w-md text-center text-sm text-error">
 					{operation.last_error}
 				</p>
 			) : null}
