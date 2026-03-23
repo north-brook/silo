@@ -6,6 +6,7 @@ use crate::remote::{
     REMOTE_WORKSPACE_AGENT_BIN, TERMINAL_WORKSPACE_DIR,
 };
 use crate::state::WorkspaceMetadataManager;
+use crate::terminal;
 use crate::workspaces::{self, Workspace, WorkspaceLookup};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
@@ -264,6 +265,27 @@ async fn reconcile_workspace_startup(workspace: &str) -> Result<(), String> {
         .await?;
     ensure_workspace_agent_running(&lookup).await?;
     wait_for_workspace_agent(workspace).await?;
+
+    if lookup.workspace.is_template() {
+        reporter
+            .publish(
+                &lookup,
+                "starting_terminal",
+                Some("Opening the default terminal session"),
+                None,
+            )
+            .await?;
+        let manager = workspace_metadata_manager().ok_or_else(|| {
+            "workspace metadata manager unavailable while opening template terminal".to_string()
+        })?;
+        let attachment_id =
+            terminal::ensure_template_startup_terminal_session(manager, workspace).await?;
+        log::info!(
+            "template workspace {} prepared default terminal session {}",
+            workspace,
+            attachment_id
+        );
+    }
 
     reporter.publish(&lookup, "ready", None, None).await?;
     log::info!(

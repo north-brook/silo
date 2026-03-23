@@ -655,6 +655,7 @@ pub fn run() {
             files::files_get_watched_state,
             files::files_open_session,
             files::files_close_session,
+            system::system_restart_app,
             system::system_memory_usage
         ])
         .build(tauri::generate_context!())

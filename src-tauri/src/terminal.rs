@@ -5,7 +5,7 @@ use crate::remote::{
     shell_quote, terminal_shell_command, wrap_remote_shell_command, REMOTE_WORKSPACE_AGENT_BIN,
 };
 use crate::state::{active_session_metadata_entries, WorkspaceMetadataManager};
-use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
+use crate::workspaces::{self, WorkspaceActiveSession, WorkspaceLookup, WorkspaceSession};
 use crate::{emit_workspace_state_changed, AppRuntime};
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
@@ -221,12 +221,39 @@ pub async fn terminal_create_terminal(
     workspace_state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
 ) -> Result<TerminalCreateResult, String> {
-    log::trace!("creating terminal attachment id for workspace {workspace}");
-    let attachment_id = create_terminal_attachment_id(&workspace).await?;
-    workspace_state
-        .inner()
-        .upsert_workspace_session(&workspace, pending_terminal_session(&attachment_id));
+    let attachment_id = create_pending_terminal_session(workspace_state.inner(), &workspace).await?;
     Ok(TerminalCreateResult { attachment_id })
+}
+
+pub(crate) async fn ensure_template_startup_terminal_session(
+    workspace_state: &WorkspaceMetadataManager,
+    workspace: &str,
+) -> Result<String, String> {
+    let workspace_with_state =
+        workspace_state.apply_workspace_state(workspaces::find_workspace(workspace).await?.workspace);
+    let existing_attachment_id = workspace_with_state
+        .active_session()
+        .filter(|active| {
+            active.kind == "terminal"
+                && workspace_with_state.has_session("terminal", &active.attachment_id)
+        })
+        .map(|active| active.attachment_id.clone())
+        .or_else(|| {
+            workspace_with_state
+                .sessions()
+                .into_iter()
+                .rev()
+                .find(|session| session.kind == "terminal")
+                .map(|session| session.attachment_id)
+        });
+    let attachment_id = match existing_attachment_id {
+        Some(attachment_id) => attachment_id,
+        None => create_pending_terminal_session(workspace_state, workspace).await?,
+    };
+
+    let active_session = WorkspaceActiveSession::new("terminal".to_string(), attachment_id.clone());
+    workspace_state.set_active_workspace_session(workspace, active_session);
+    Ok(attachment_id)
 }
 
 #[tauri::command]
@@ -1098,6 +1125,16 @@ async fn resolve_attached_session(
     }
 
     Ok(pending_terminal_session(attachment_id))
+}
+
+async fn create_pending_terminal_session(
+    workspace_state: &WorkspaceMetadataManager,
+    workspace: &str,
+) -> Result<String, String> {
+    log::trace!("creating terminal attachment id for workspace {workspace}");
+    let attachment_id = create_terminal_attachment_id(workspace).await?;
+    workspace_state.upsert_workspace_session(workspace, pending_terminal_session(&attachment_id));
+    Ok(attachment_id)
 }
 
 async fn create_terminal_attachment_id(workspace: &str) -> Result<String, String> {

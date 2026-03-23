@@ -1,4 +1,11 @@
+use crate::AppRuntime;
 use sysinfo::{Pid, System};
+
+#[tauri::command]
+pub fn system_restart_app(app_handle: tauri::AppHandle<AppRuntime>) {
+    log::info!("restarting app via updater toast");
+    app_handle.restart();
+}
 
 #[tauri::command]
 pub fn system_memory_usage() -> f64 {
