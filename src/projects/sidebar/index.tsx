@@ -1004,7 +1004,9 @@ export function ProjectsSidebar() {
 				className={`group flex items-center w-full px-3 py-2.5 text-xs transition-colors cursor-pointer ${isHome ? "bg-btn-hover text-text-bright" : "text-text hover:bg-btn-hover hover:text-text-bright"}`}
 			>
 				<span className="flex items-center gap-1.5 min-w-0 flex-1">
-					<LogoIcon height={16} />
+					<div className="w-4 h-4 flex items-center justify-center p-[2.5px]">
+						<LogoIcon height={11} />
+					</div>
 					Dashboard
 				</span>
 				{metaKeyHeld ? (
