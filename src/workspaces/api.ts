@@ -5,6 +5,7 @@ export type WorkspaceLifecyclePhase =
 	| "waiting_for_ssh"
 	| "bootstrapping"
 	| "waiting_for_agent"
+	| "starting_terminal"
 	| "ready"
 	| "stopping"
 	| "suspending"
@@ -90,7 +91,9 @@ export function workspaceLabel(workspace: Workspace): string {
 }
 
 export function workspaceIsReady(workspace: Workspace): boolean {
-	return workspace.status === "RUNNING" && workspace.lifecycle.phase === "ready";
+	return (
+		workspace.status === "RUNNING" && workspace.lifecycle.phase === "ready"
+	);
 }
 
 export function workspaceLifecycleLabel(workspace: Workspace): string {
@@ -102,8 +105,10 @@ export function workspaceLifecycleLabel(workspace: Workspace): string {
 			return "Waiting for SSH...";
 		case "bootstrapping":
 			return "Preparing workspace...";
-			case "waiting_for_agent":
-				return "Starting workspace services...";
+		case "waiting_for_agent":
+			return "Starting workspace services...";
+		case "starting_terminal":
+			return "Opening terminal session...";
 		case "failed":
 			return "Workspace startup failed";
 		case "stopping":
@@ -115,7 +120,9 @@ export function workspaceLifecycleLabel(workspace: Workspace): string {
 		case "stopped":
 			return "Stopped";
 		case "ready":
-			return "working" in workspace && workspace.working ? "Working" : "Running";
+			return "working" in workspace && workspace.working
+				? "Working"
+				: "Running";
 		default:
 			return phase.charAt(0).toUpperCase() + phase.slice(1).replace(/_/g, " ");
 	}

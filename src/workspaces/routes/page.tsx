@@ -2,25 +2,25 @@ import { useEffect, useMemo, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Loader } from "@/shared/ui/loader";
 import {
-	useTemplateState,
-	useWorkspaceProject,
-	useWorkspaceState,
-} from "@/workspaces/state";
-import {
-	type WorkspaceRouteState,
-	workspaceSessionHref,
-} from "@/workspaces/routes/paths";
-import {
 	isTemplateWorkspace,
 	workspaceIsReady,
 	workspaceSessions,
 } from "@/workspaces/api";
 import { PromptWorkspace } from "@/workspaces/prompt/screen";
-import { TemplatingWorkspace } from "@/workspaces/template/screen";
 import {
-	WorkspaceResumingScreen,
+	type WorkspaceRouteState,
+	workspaceSessionHref,
+} from "@/workspaces/routes/paths";
+import {
 	TemplateOperationScreen,
+	WorkspaceResumingScreen,
 } from "@/workspaces/routes/transition-screens";
+import {
+	useTemplateState,
+	useWorkspaceProject,
+	useWorkspaceState,
+} from "@/workspaces/state";
+import { TemplatingWorkspace } from "@/workspaces/template/screen";
 
 export default function WorkspacePage() {
 	return <WorkspaceView />;
@@ -82,7 +82,7 @@ function WorkspaceView() {
 
 		navigate(location.pathname, {
 			replace: true,
-			state: transition ? { transition } satisfies WorkspaceRouteState : null,
+			state: transition ? ({ transition } satisfies WorkspaceRouteState) : null,
 		});
 	}, [location.pathname, navigate, transition]);
 
@@ -105,16 +105,22 @@ function WorkspaceView() {
 		}
 
 		savingRoutedRef.current = true;
-		const timer = window.setTimeout(() => navigate("/", { replace: true }), 1500);
+		const timer = window.setTimeout(
+			() => navigate("/", { replace: true }),
+			1500,
+		);
 		return () => {
 			window.clearTimeout(timer);
 		};
-	}, [isMissing, navigate, templateLifecycleOperation, templateState.data?.workspace_present]);
+	}, [
+		isMissing,
+		navigate,
+		templateLifecycleOperation,
+		templateState.data?.workspace_present,
+	]);
 
 	if (templateLifecycleOperation) {
-		return (
-			<TemplateOperationScreen operation={templateLifecycleOperation} />
-		);
+		return <TemplateOperationScreen operation={templateLifecycleOperation} />;
 	}
 
 	if (transition === "resuming" && workspace) {
@@ -149,11 +155,8 @@ function WorkspaceView() {
 	if (isTemplateWorkspace(workspace)) {
 		return (
 			<TemplatingWorkspace
-				isRunning={isRunning}
 				lifecycle={workspace.lifecycle}
 				status={workspace.status}
-				workspace={workspace.name}
-				project={workspace.project}
 			/>
 		);
 	}
