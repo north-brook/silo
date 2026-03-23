@@ -20,12 +20,12 @@
 	--color-btn-hover: #1a1b22;
 	--color-btn-active: #111218;
 
-	--font-size-xs: 9px;
-	--font-size-xs--line-height: 12px;
-	--font-size-sm: 10px;
-	--font-size-sm--line-height: 14px;
-	--font-size-base: 12px;
-	--font-size-base--line-height: 16px;
+	--text-xs: 9px;
+	--text-xs--line-height: 12px;
+	--text-sm: 10px;
+	--text-sm--line-height: 14px;
+	--text-base: 12px;
+	--text-base--line-height: 16px;
 
 	--font-mono:
 		"SF Mono", "Fira Code", "JetBrains Mono", "Cascadia Code", ui-monospace,

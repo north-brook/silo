@@ -22,13 +22,13 @@ const baseDiffOptions = {
 	unsafeCSS: `
 		:host {
 			--diffs-header-font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', ui-monospace, monospace;
-			--diffs-font-size: var(--font-size-sm);
+			--diffs-font-size: var(--text-sm);
 			--diffs-line-height: 16px;
 			--diffs-addition-color-override: #16a34a;
 			--diffs-deletion-color-override: #f87171;
 		}
 		[data-diffs-header] {
-			font-size: var(--font-size-sm);
+			font-size: var(--text-sm);
 			min-height: unset;
 			padding-block: 6px;
 			cursor: pointer;
@@ -45,7 +45,7 @@ const baseDiffOptions = {
 		}
 		[data-diffs-header] [data-additions-count],
 		[data-diffs-header] [data-deletions-count] {
-			font-size: var(--font-size-sm);
+			font-size: var(--text-sm);
 		}
 	`,
 };
