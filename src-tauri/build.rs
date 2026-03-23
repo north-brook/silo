@@ -37,7 +37,7 @@ fn emit_build_metadata() {
 
     let updater_public_key = env::var(UPDATER_PUBLIC_KEY_ENV_VAR)
         .ok()
-        .and_then(|value| normalize_updater_public_key(&value));
+        .and_then(|value| normalize_updater_public_key_for_runtime(&value));
 
     if build_flavor == "prod" && updater_public_key.is_none() {
         panic!("{UPDATER_PUBLIC_KEY_ENV_VAR} must be set when building the production app");
@@ -51,14 +51,14 @@ fn emit_build_metadata() {
     }
 }
 
-fn normalize_updater_public_key(value: &str) -> Option<String> {
+fn normalize_updater_public_key_for_runtime(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
     }
 
     if trimmed.contains("untrusted comment:") {
-        return Some(trimmed.to_string());
+        return Some(encode_canonical_updater_public_key(trimmed));
     }
 
     let decoded = base64::engine::general_purpose::STANDARD
@@ -67,10 +67,14 @@ fn normalize_updater_public_key(value: &str) -> Option<String> {
     let decoded = String::from_utf8(decoded).ok()?;
     let decoded = decoded.trim();
     if decoded.contains("untrusted comment:") {
-        return Some(decoded.to_string());
+        return Some(encode_canonical_updater_public_key(decoded));
     }
 
     None
+}
+
+fn encode_canonical_updater_public_key(value: &str) -> String {
+    base64::engine::general_purpose::STANDARD.encode(format!("{value}\n"))
 }
 
 fn encode_rustc_env_value(value: &str) -> String {
