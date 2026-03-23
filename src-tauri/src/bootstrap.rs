@@ -1,5 +1,5 @@
 use crate::codex::{codex_token_from_auth_json, normalize_codex_auth_json};
-use crate::config::{ConfigStore, ProjectConfig};
+use crate::config::{ConfigStore, ProjectConfig, SiloConfig};
 use crate::remote::{
     remote_command_error, run_remote_command, run_remote_command_with_stdin,
     run_terminal_user_command, shell_quote, workspace_shell_command_with_credentials,
@@ -12,7 +12,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path};
 use std::sync::{LazyLock, Mutex, OnceLock};
@@ -25,7 +25,7 @@ const REMOTE_BOOTSTRAP_LOG_FILE: &str = "/home/silo/.silo/bootstrap.log";
 const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
 const REMOTE_WORKSPACE_AGENT_PIDFILE: &str = "/home/silo/.silo/workspace-agent/daemon.pid";
 const REMOTE_WORKSPACE_AGENT_SHELL_FILE: &str = "/home/silo/.silo/workspace-agent-shell.sh";
-const WORKSPACE_BOOTSTRAP_VERSION: &str = "16";
+const WORKSPACE_BOOTSTRAP_VERSION: &str = "17";
 const STARTUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 const INSTANCE_RUNNING_POLL_ATTEMPTS: usize = 180;
 const SSH_READY_POLL_ATTEMPTS: usize = 120;
@@ -36,8 +36,8 @@ const WORKSPACE_AGENT_BIN_BYTES: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
     "/workspace-agent-x86_64-unknown-linux-musl"
 ));
-static WORKSPACE_STARTUP_RECONCILE_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
-    LazyLock::new(|| Mutex::new(HashSet::new()));
+static WORKSPACE_STARTUP_RECONCILE_STATE: LazyLock<Mutex<HashMap<String, WorkspaceStartupState>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static WORKSPACE_METADATA_MANAGER: OnceLock<WorkspaceMetadataManager> = OnceLock::new();
 
 #[derive(Debug, Clone)]
@@ -62,11 +62,107 @@ pub(crate) struct BootstrapEnvFile {
     pub(crate) contents_sha256: String,
 }
 
+#[derive(Debug, Clone, Default)]
+struct WorkspaceStartupState {
+    in_flight: bool,
+    next_attempt_id: u64,
+    bootstrap: Option<WorkspaceBootstrap>,
+}
+
 #[derive(Default)]
 struct LifecycleReporter {
+    attempt_id: u64,
     phase: Option<String>,
     detail: Option<String>,
     last_error: Option<String>,
+}
+
+fn begin_workspace_startup_reconcile(workspace: &str) -> Option<u64> {
+    let Ok(mut states) = WORKSPACE_STARTUP_RECONCILE_STATE.lock() else {
+        return None;
+    };
+    let state = states.entry(workspace.to_string()).or_default();
+    if state.in_flight {
+        return None;
+    }
+    state.in_flight = true;
+    state.next_attempt_id = state.next_attempt_id.saturating_add(1).max(1);
+    Some(state.next_attempt_id)
+}
+
+fn finish_workspace_startup_reconcile(workspace: &str, attempt_id: u64) {
+    let Ok(mut states) = WORKSPACE_STARTUP_RECONCILE_STATE.lock() else {
+        return;
+    };
+    let Some(state) = states.get_mut(workspace) else {
+        return;
+    };
+    if state.next_attempt_id == attempt_id {
+        state.in_flight = false;
+        state.bootstrap = None;
+    }
+}
+
+fn cached_workspace_bootstrap(workspace: &str) -> Option<WorkspaceBootstrap> {
+    let Ok(states) = WORKSPACE_STARTUP_RECONCILE_STATE.lock() else {
+        return None;
+    };
+    states
+        .get(workspace)
+        .and_then(|state| state.bootstrap.clone())
+}
+
+pub(crate) fn workspace_startup_attempt_in_flight(workspace: &str, attempt_id: u64) -> bool {
+    let Ok(states) = WORKSPACE_STARTUP_RECONCILE_STATE.lock() else {
+        return false;
+    };
+    states
+        .get(workspace)
+        .is_some_and(|state| state.in_flight && state.next_attempt_id == attempt_id)
+}
+
+fn build_workspace_bootstrap(
+    config: &SiloConfig,
+    project_name: &str,
+    project: &ProjectConfig,
+    target_branch: &str,
+    workspace_branch: Option<&str>,
+) -> Result<WorkspaceBootstrap, String> {
+    if project.remote_url.trim().is_empty() {
+        return Err(format!("project {project_name} is missing remote_url"));
+    }
+
+    let target_branch = target_branch.trim().to_string();
+    if target_branch.is_empty() {
+        return Err(format!("project {project_name} is missing a target branch"));
+    }
+
+    let workspace_branch = match workspace_branch.map(str::trim) {
+        Some(branch) if branch.is_empty() => {
+            return Err(format!(
+                "workspace bootstrap for project {project_name} is missing branch metadata"
+            ));
+        }
+        Some(branch) => Some(branch.to_string()),
+        None => None,
+    };
+
+    let codex_auth_json = normalize_codex_auth_json(&config.codex.auth_json).unwrap_or_default();
+    let codex_auth_fingerprint = codex_auth_fingerprint(&codex_auth_json);
+
+    Ok(WorkspaceBootstrap {
+        remote_url: project.remote_url.clone(),
+        target_branch,
+        workspace_branch,
+        gh_username: config.git.gh_username.clone(),
+        gh_token: config.git.gh_token.clone(),
+        codex_auth_json,
+        codex_auth_fingerprint,
+        claude_token: config.claude.token.clone(),
+        git_user_name: config.git.user_name.clone(),
+        git_user_email: config.git.user_email.clone(),
+        env_files: load_bootstrap_env_files(project_name, project),
+    })
 }
 
 async fn bootstrap_workspace(lookup: &WorkspaceLookup) -> Result<(), String> {
@@ -103,32 +199,73 @@ pub(crate) fn initialize_workspace_metadata_manager(manager: WorkspaceMetadataMa
     let _ = WORKSPACE_METADATA_MANAGER.set(manager);
 }
 
+pub(crate) fn cache_workspace_bootstrap(
+    workspace: &str,
+    config: &SiloConfig,
+    project_name: &str,
+    project: &ProjectConfig,
+    target_branch: &str,
+    workspace_branch: Option<&str>,
+) -> Result<(), String> {
+    let bootstrap = build_workspace_bootstrap(
+        config,
+        project_name,
+        project,
+        target_branch,
+        workspace_branch,
+    )?;
+    let Ok(mut states) = WORKSPACE_STARTUP_RECONCILE_STATE.lock() else {
+        return Ok(());
+    };
+    states.entry(workspace.to_string()).or_default().bootstrap = Some(bootstrap);
+    Ok(())
+}
+
 fn workspace_metadata_manager() -> Option<&'static WorkspaceMetadataManager> {
     WORKSPACE_METADATA_MANAGER.get()
 }
 
 pub(crate) fn start_workspace_startup_reconcile_if_needed(workspace: Workspace) {
     if workspace.should_reconcile_startup() {
+        if !workspace_has_local_bootstrap_context(&workspace) {
+            log::debug!(
+                "skipping startup reconcile for workspace {} because the project is not configured locally",
+                workspace.name()
+            );
+            return;
+        }
         start_workspace_startup_reconcile(workspace.name().to_string());
     }
 }
 
-pub(crate) fn start_workspace_startup_reconcile(workspace: String) {
-    let inserted = WORKSPACE_STARTUP_RECONCILE_IN_FLIGHT
-        .lock()
-        .map(|mut in_flight| in_flight.insert(workspace.clone()))
-        .unwrap_or(false);
-    if !inserted {
-        return;
+fn workspace_has_local_bootstrap_context(workspace: &Workspace) -> bool {
+    if cached_workspace_bootstrap(workspace.name()).is_some() {
+        return true;
     }
 
+    let Some(project_name) = workspace.project() else {
+        return false;
+    };
+    let Ok(config) = ConfigStore::new().and_then(|store| store.load()) else {
+        return false;
+    };
+
+    config.projects.contains_key(project_name)
+}
+
+pub(crate) fn start_workspace_startup_reconcile(workspace: String) {
+    let Some(attempt_id) = begin_workspace_startup_reconcile(&workspace) else {
+        return;
+    };
+
     tauri::async_runtime::spawn(async move {
-        let result = reconcile_workspace_startup(&workspace).await;
+        let result = reconcile_workspace_startup(&workspace, attempt_id).await;
         if let Err(error) = result {
             if let Some(manager) = workspace_metadata_manager() {
                 manager.enqueue_workspace_lifecycle(
                     &workspace,
                     None,
+                    attempt_id,
                     "failed",
                     Some("Workspace startup failed"),
                     Some(&error),
@@ -151,9 +288,7 @@ pub(crate) fn start_workspace_startup_reconcile(workspace: String) {
             );
         }
 
-        if let Ok(mut in_flight) = WORKSPACE_STARTUP_RECONCILE_IN_FLIGHT.lock() {
-            in_flight.remove(&workspace);
-        }
+        finish_workspace_startup_reconcile(&workspace, attempt_id);
     });
 }
 
@@ -230,9 +365,12 @@ pub(crate) fn is_retryable_terminal_transport_error(error: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
-async fn reconcile_workspace_startup(workspace: &str) -> Result<(), String> {
+async fn reconcile_workspace_startup(workspace: &str, attempt_id: u64) -> Result<(), String> {
     let started = Instant::now();
-    let mut reporter = LifecycleReporter::default();
+    let mut reporter = LifecycleReporter {
+        attempt_id,
+        ..LifecycleReporter::default()
+    };
     let lookup = wait_for_workspace_running(workspace).await?;
 
     reporter
@@ -464,6 +602,7 @@ impl LifecycleReporter {
             manager.enqueue_workspace_lifecycle(
                 lookup.workspace.name(),
                 Some(lookup.clone()),
+                self.attempt_id,
                 phase,
                 detail,
                 last_error,
@@ -482,6 +621,10 @@ impl LifecycleReporter {
 }
 
 fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, String> {
+    if let Some(bootstrap) = cached_workspace_bootstrap(lookup.workspace.name()) {
+        return Ok(bootstrap);
+    }
+
     let project_name = lookup.workspace.project().ok_or_else(|| {
         format!(
             "workspace {} is missing a project label",
@@ -497,10 +640,6 @@ fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, S
             lookup.workspace.name()
         )
     })?;
-
-    if project.remote_url.trim().is_empty() {
-        return Err(format!("project {project_name} is missing remote_url"));
-    }
 
     let target_branch = if lookup.workspace.is_template() {
         project.target_branch.trim().to_string()
@@ -534,22 +673,14 @@ fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, S
         }
         Some(branch)
     };
-    let codex_auth_json = normalize_codex_auth_json(&config.codex.auth_json).unwrap_or_default();
-    let codex_auth_fingerprint = codex_auth_fingerprint(&codex_auth_json);
 
-    Ok(WorkspaceBootstrap {
-        remote_url: project.remote_url.clone(),
-        target_branch,
-        workspace_branch,
-        gh_username: config.git.gh_username.clone(),
-        gh_token: config.git.gh_token.clone(),
-        codex_auth_json,
-        codex_auth_fingerprint,
-        claude_token: config.claude.token.clone(),
-        git_user_name: config.git.user_name.clone(),
-        git_user_email: config.git.user_email.clone(),
-        env_files: load_bootstrap_env_files(project_name, project),
-    })
+    build_workspace_bootstrap(
+        &config,
+        project_name,
+        project,
+        &target_branch,
+        workspace_branch.as_deref(),
+    )
 }
 
 fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBootstrap) -> String {
@@ -605,6 +736,8 @@ fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBoo
         bootstrap_git_command("-C \"$WORKSPACE_DIR\" fetch origin \"$TARGET_BRANCH\"");
     let git_pull_target_branch =
         bootstrap_git_command("-C \"$WORKSPACE_DIR\" pull --ff-only origin \"$TARGET_BRANCH\"");
+    let git_lfs_setup = workspace_git_lfs_setup_script();
+    let git_lfs_sync = workspace_git_lfs_sync_script();
     let branch_setup = if lookup.workspace.is_template() {
         format!(
             "if [ ! -d \"$WORKSPACE_DIR/.git\" ]; then\n  rm -rf \"$WORKSPACE_DIR\"\n  {git_clone_target_branch}\nelse\n  git -C \"$WORKSPACE_DIR\" remote set-url origin \"$REMOTE_URL\"\n  {git_fetch_target_branch}\n  git -C \"$WORKSPACE_DIR\" checkout \"$TARGET_BRANCH\"\n  git -C \"$WORKSPACE_DIR\" reset --hard \"origin/$TARGET_BRANCH\"\n  git -C \"$WORKSPACE_DIR\" clean -fd\nfi",
@@ -715,8 +848,10 @@ fi\n\
 if ! git config --global --get-all safe.directory 2>/dev/null | grep -Fxq \"$WORKSPACE_DIR\"; then\n\
   git config --global --add safe.directory \"$WORKSPACE_DIR\"\n\
 fi\n\
+{git_lfs_setup}\
 bootstrap_log 'step=sync_repository'\n\
 {branch_setup}\n\
+{git_lfs_sync}\
 bootstrap_log 'step=sync_env_files'\n\
 {env_file_sync}\n\
 {cli_update}\
@@ -743,6 +878,8 @@ bootstrap_log 'step=completed'\n",
         claude_settings_json = shell_quote(&claude_settings_json),
         claude_state_json = shell_quote(&claude_state_json),
         branch_setup = branch_setup,
+        git_lfs_setup = git_lfs_setup,
+        git_lfs_sync = git_lfs_sync,
         env_file_sync = env_file_sync,
         cli_update = cli_update,
         agent_install = agent_install,
@@ -759,6 +896,29 @@ chmod 600 \"$STATE_PATH\"\n\
 pub(crate) fn bootstrap_git_command(command: &str) -> String {
     format!(
         "env GH_TOKEN=\"$GH_TOKEN\" GITHUB_TOKEN=\"$GITHUB_TOKEN\" GIT_ASKPASS=\"$ASKPASS_PATH\" GIT_TERMINAL_PROMPT=0 git {command}"
+    )
+}
+
+fn workspace_git_lfs_setup_script() -> String {
+    String::from(
+        "if git lfs version >/dev/null 2>&1; then\n\
+  bootstrap_log 'step=configure_git_lfs'\n\
+  git lfs install --skip-repo\n\
+else\n\
+  bootstrap_log 'step=configure_git_lfs_skipped reason=git_lfs_unavailable'\n\
+fi\n",
+    )
+}
+
+fn workspace_git_lfs_sync_script() -> String {
+    let git_lfs_pull = bootstrap_git_command("-C \"$WORKSPACE_DIR\" lfs pull");
+    format!(
+        "if git lfs version >/dev/null 2>&1; then\n\
+  bootstrap_log 'step=sync_git_lfs'\n\
+  {git_lfs_pull}\n\
+else\n\
+  bootstrap_log 'step=sync_git_lfs_skipped reason=git_lfs_unavailable'\n\
+fi\n"
     )
 }
 
@@ -1211,6 +1371,7 @@ pub(crate) fn clear_template_runtime_state_command() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use indexmap::IndexMap;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1230,6 +1391,25 @@ mod tests {
             bootstrap_git_command("-C \"$WORKSPACE_DIR\" fetch origin \"$TARGET_BRANCH\""),
             "env GH_TOKEN=\"$GH_TOKEN\" GITHUB_TOKEN=\"$GITHUB_TOKEN\" GIT_ASKPASS=\"$ASKPASS_PATH\" GIT_TERMINAL_PROMPT=0 git -C \"$WORKSPACE_DIR\" fetch origin \"$TARGET_BRANCH\""
         );
+    }
+
+    #[test]
+    fn workspace_git_lfs_setup_script_configures_lfs_when_available() {
+        let script = workspace_git_lfs_setup_script();
+
+        assert!(script.contains("bootstrap_log 'step=configure_git_lfs'"));
+        assert!(script.contains("git lfs install --skip-repo"));
+        assert!(script.contains("git_lfs_unavailable"));
+    }
+
+    #[test]
+    fn workspace_git_lfs_sync_script_pulls_lfs_objects_when_available() {
+        let script = workspace_git_lfs_sync_script();
+
+        assert!(script.contains("bootstrap_log 'step=sync_git_lfs'"));
+        assert!(script.contains("git -C \"$WORKSPACE_DIR\" lfs pull"));
+        assert!(script.contains("GIT_ASKPASS=\"$ASKPASS_PATH\""));
+        assert!(script.contains("git_lfs_unavailable"));
     }
 
     #[test]
@@ -1416,6 +1596,56 @@ mod tests {
         assert!(payload.contains(TERMINAL_WORKSPACE_DIR));
         assert!(payload.contains("\"hasTrustDialogAccepted\":true"));
         assert!(payload.contains("\"hasCompletedOnboarding\":true"));
+    }
+
+    #[test]
+    fn cache_workspace_bootstrap_stores_seeded_bootstrap() {
+        let config = SiloConfig {
+            git: crate::config::GitConfig {
+                gh_username: "octocat".to_string(),
+                gh_token: "gh-secret".to_string(),
+                user_name: "Example User".to_string(),
+                user_email: "user@example.com".to_string(),
+            },
+            codex: crate::config::CodexConfig {
+                auth_json: "{\"tokens\":{\"refresh_token\":\"codex-refresh-token\"}}".to_string(),
+            },
+            claude: crate::config::ClaudeConfig {
+                token: "claude-secret".to_string(),
+            },
+            projects: IndexMap::new(),
+            ..SiloConfig::default()
+        };
+        let project = ProjectConfig {
+            name: "demo".to_string(),
+            path: "/tmp/demo".to_string(),
+            image: None,
+            remote_url: "git@github.com:example/demo.git".to_string(),
+            target_branch: "main".to_string(),
+            env_files: Vec::new(),
+            gcloud: crate::config::ProjectGcloudConfig::default(),
+        };
+
+        cache_workspace_bootstrap(
+            "demo-silo-branch",
+            &config,
+            "demo",
+            &project,
+            "main",
+            Some("feature/demo"),
+        )
+        .expect("bootstrap cache should seed");
+
+        let bootstrap = cached_workspace_bootstrap("demo-silo-branch")
+            .expect("bootstrap seed should be cached");
+        assert_eq!(bootstrap.remote_url, "git@github.com:example/demo.git");
+        assert_eq!(bootstrap.target_branch, "main");
+        assert_eq!(bootstrap.workspace_branch.as_deref(), Some("feature/demo"));
+        assert_eq!(bootstrap.gh_username, "octocat");
+        assert_eq!(
+            bootstrap.codex_auth_fingerprint,
+            hex_sha256(b"codex-refresh-token")
+        );
     }
 
     struct TempDir {

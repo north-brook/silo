@@ -1,5 +1,6 @@
 use crate::bootstrap;
 use crate::config::ConfigStore;
+use crate::emit_workspace_state_changed;
 use crate::state::WorkspaceMetadataManager;
 use crate::workspaces::{
     self, ResolvedGcloudConfig, Snapshot, SnapshotTemplate, TemplateWorkspace, WorkspaceLookup,
@@ -117,44 +118,44 @@ pub async fn templates_edit_template(
 
 #[tauri::command]
 pub async fn templates_save_template(
+    app: tauri::AppHandle<crate::AppRuntime>,
     project: String,
     manager: State<'_, WorkspaceMetadataManager>,
 ) -> Result<TemplateOperation, String> {
     manager.clear_transient_template_state(&project);
 
-    let lookup = find_template_workspace_lookup(&project)
-        .await?
-        .ok_or_else(|| format!("template workspace not found for project {project}"))?;
-    let snapshot_name = lookup
-        .workspace
-        .template_operation()
-        .and_then(|operation| {
-            (operation.kind == TemplateOperationKind::Save.as_str())
-                .then(|| operation.snapshot_name.clone())
-                .flatten()
-        })
-        .unwrap_or_else(|| workspaces::generate_template_snapshot_name(&project));
-
-    enqueue_template_operation(
-        manager.inner(),
-        &lookup,
+    let workspace_name = workspaces::generate_template_workspace_name(&project);
+    let snapshot_name = workspaces::generate_template_snapshot_name(&project);
+    let workspace_operation = manager.enqueue_template_operation(
+        &workspace_name,
+        None,
         TemplateOperationKind::Save.as_str(),
         "waiting_for_template_ready",
         Some("Waiting for template workspace bootstrap"),
         None,
         Some(&snapshot_name),
     );
+    emit_workspace_state_changed(
+        &app,
+        &workspace_name,
+        None,
+        false,
+        Some(workspace_operation.clone()),
+    );
 
     let operation = TemplateOperation {
         project: project.clone(),
-        workspace_name: workspaces::generate_template_workspace_name(&project),
+        workspace_name: workspace_name.clone(),
         kind: TemplateOperationKind::Save,
         status: TemplateOperationStatus::Running,
-        phase: "waiting_for_template_ready".to_string(),
-        detail: Some("Waiting for template workspace bootstrap".to_string()),
-        last_error: None,
-        snapshot_name: Some(snapshot_name),
-        updated_at: workspaces::current_rfc3339_timestamp(),
+        phase: workspace_operation.phase.clone(),
+        detail: workspace_operation.detail.clone(),
+        last_error: workspace_operation.last_error.clone(),
+        snapshot_name: workspace_operation.snapshot_name.clone(),
+        updated_at: workspace_operation
+            .updated_at
+            .clone()
+            .unwrap_or_else(workspaces::current_rfc3339_timestamp),
     };
 
     start_template_operation_reconcile_if_needed(project, manager.inner().clone());
@@ -326,7 +327,16 @@ async fn derive_template_state(
 ) -> Result<TemplateState, String> {
     let gcloud = resolve_project_gcloud_config(project)?;
     let workspace_name = workspaces::generate_template_workspace_name(project);
-    let workspace = find_template_workspace(&workspace_name, &gcloud).await?;
+    let workspace = find_template_workspace(&workspace_name, &gcloud)
+        .await?
+        .map(|workspace| {
+            match manager.apply_workspace_state(crate::workspaces::Workspace::Template(workspace)) {
+                crate::workspaces::Workspace::Template(workspace) => workspace,
+                crate::workspaces::Workspace::Branch(_) => unreachable!(
+                    "template workspace overlay unexpectedly produced a branch workspace"
+                ),
+            }
+        });
     let snapshots =
         workspaces::list_template_snapshots_in_project(&gcloud.account, &gcloud.project, project)
             .await?;
@@ -602,7 +612,7 @@ async fn reconcile_template_save_operation(
 
     manager.cache_transient_template_state(TemplateState {
         project: project.to_string(),
-        workspace_name,
+        workspace_name: workspace_name.clone(),
         workspace_present: false,
         snapshot_name: Some(snapshot_name.clone()),
         operation: Some(TemplateOperation {
@@ -617,6 +627,7 @@ async fn reconcile_template_save_operation(
             updated_at: workspaces::current_rfc3339_timestamp(),
         }),
     });
+    manager.clear_template_operation(&workspace_name);
 
     Ok(())
 }
@@ -697,7 +708,7 @@ async fn reconcile_template_delete_operation(
 
     manager.cache_transient_template_state(TemplateState {
         project: project.to_string(),
-        workspace_name,
+        workspace_name: workspace_name.clone(),
         workspace_present: false,
         snapshot_name: None,
         operation: Some(TemplateOperation {
@@ -712,6 +723,7 @@ async fn reconcile_template_delete_operation(
             updated_at: workspaces::current_rfc3339_timestamp(),
         }),
     });
+    manager.clear_template_operation(&workspace_name);
 
     Ok(())
 }
@@ -762,7 +774,7 @@ async fn record_template_operation_failure(
         tag_snapshots_for_delete(&gcloud, &delete_snapshots, &operation_id, "failed").await?;
         manager.cache_transient_template_state(TemplateState {
             project: project.to_string(),
-            workspace_name,
+            workspace_name: workspace_name.clone(),
             workspace_present: false,
             snapshot_name: None,
             operation: Some(TemplateOperation {
@@ -777,6 +789,7 @@ async fn record_template_operation_failure(
                 updated_at: workspaces::current_rfc3339_timestamp(),
             }),
         });
+        manager.clear_template_operation(&workspace_name);
     }
 
     Ok(())

@@ -1,10 +1,15 @@
+use crate::bootstrap;
+use crate::emit_workspace_lifecycle_changed;
 use crate::templates::{TemplateOperationStatus, TemplateState};
 use crate::workspaces::{
-    self, Workspace, WorkspaceActiveSession, WorkspaceLookup, WorkspaceSession,
+    self, TemplateOperationState, Workspace, WorkspaceActiveSession, WorkspaceLifecycle,
+    WorkspaceLookup, WorkspaceSession,
 };
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+static WORKSPACE_METADATA_MANAGER: OnceLock<WorkspaceMetadataManager> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WorkspaceMetadataEntry {
@@ -25,13 +30,22 @@ struct TransientTemplateState {
     cached_at: Instant,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingWorkspaceLifecycle {
+    attempt_id: u64,
+    lifecycle: WorkspaceLifecycle,
+}
+
 #[derive(Clone, Default)]
 pub struct WorkspaceMetadataManager {
     metadata: Arc<Mutex<HashMap<String, PendingWorkspaceMetadata>>>,
     sessions: Arc<Mutex<HashMap<String, HashMap<String, Option<WorkspaceSession>>>>>,
     active_sessions: Arc<Mutex<HashMap<String, Option<WorkspaceActiveSession>>>>,
+    lifecycles: Arc<Mutex<HashMap<String, PendingWorkspaceLifecycle>>>,
+    template_operations: Arc<Mutex<HashMap<String, Option<TemplateOperationState>>>>,
     template_states: Arc<Mutex<HashMap<String, TransientTemplateState>>>,
     template_reconciles: Arc<Mutex<HashMap<String, bool>>>,
+    app_handle: Arc<Mutex<Option<tauri::AppHandle<crate::AppRuntime>>>>,
 }
 
 const WORKSPACE_METADATA_FLUSH_DELAY: Duration = Duration::from_millis(40);
@@ -166,6 +180,14 @@ fn should_drop_pending_session(
 }
 
 impl WorkspaceMetadataManager {
+    pub(crate) fn set_app_handle(&self, app_handle: tauri::AppHandle<crate::AppRuntime>) {
+        let _ = WORKSPACE_METADATA_MANAGER.set(self.clone());
+        let Ok(mut handle) = self.app_handle.lock() else {
+            return;
+        };
+        *handle = Some(app_handle);
+    }
+
     pub(crate) fn enqueue(
         &self,
         workspace: &str,
@@ -275,6 +297,19 @@ impl WorkspaceMetadataManager {
                 .collect::<Vec<_>>()
                 .join(", ");
             if let Err(error) = update_result {
+                if should_drop_workspace_metadata_retry(&error) {
+                    log::info!(
+                        "dropping background metadata update for missing workspace {} keys=[{}]: {}",
+                        workspace,
+                        entry_keys,
+                        error
+                    );
+                    self.clear_workspace_state_overlays(&workspace);
+                    if let Ok(mut pending) = self.metadata.lock() {
+                        pending.remove(&workspace);
+                    }
+                    return;
+                }
                 log::warn!(
                     "background metadata update failed for workspace {} keys=[{}]: {}",
                     workspace,
@@ -342,14 +377,31 @@ impl WorkspaceMetadataManager {
         &self,
         workspace: &str,
         lookup: Option<WorkspaceLookup>,
+        attempt_id: u64,
         phase: &str,
         detail: Option<&str>,
         last_error: Option<&str>,
     ) {
+        let updated_at = workspaces::current_rfc3339_timestamp();
+        let lifecycle = workspaces::workspace_lifecycle_state_with_updated_at(
+            phase,
+            detail,
+            last_error,
+            &updated_at,
+        );
+        if !self.set_workspace_lifecycle(workspace, attempt_id, lifecycle.clone()) {
+            return;
+        }
+        self.emit_workspace_lifecycle_changed(workspace, lifecycle);
         self.enqueue(
             workspace,
             lookup,
-            workspaces::workspace_lifecycle_metadata_entries(phase, detail, last_error),
+            workspaces::workspace_lifecycle_metadata_entries_with_updated_at(
+                phase,
+                detail,
+                last_error,
+                &updated_at,
+            ),
         );
     }
 
@@ -362,18 +414,30 @@ impl WorkspaceMetadataManager {
         detail: Option<&str>,
         last_error: Option<&str>,
         snapshot_name: Option<&str>,
-    ) {
+    ) -> TemplateOperationState {
+        let updated_at = workspaces::current_rfc3339_timestamp();
+        let operation = TemplateOperationState {
+            kind: kind.to_string(),
+            phase: phase.to_string(),
+            detail: detail.map(str::to_string),
+            last_error: last_error.map(str::to_string),
+            updated_at: Some(updated_at.clone()),
+            snapshot_name: snapshot_name.map(str::to_string),
+        };
+        self.set_template_operation(workspace, Some(operation.clone()));
         self.enqueue(
             workspace,
             lookup,
-            workspaces::template_operation_metadata_entries(
+            workspaces::template_operation_metadata_entries_with_updated_at(
                 kind,
                 phase,
                 detail,
                 last_error,
                 snapshot_name,
+                &updated_at,
             ),
         );
+        operation
     }
 
     pub(crate) fn upsert_workspace_session(&self, workspace: &str, session: WorkspaceSession) {
@@ -429,6 +493,8 @@ impl WorkspaceMetadataManager {
         let workspace_name = workspace.name().to_string();
         let workspace = self.apply_workspace_session_state(&workspace_name, workspace);
         let workspace = self.apply_active_workspace_state(&workspace_name, workspace);
+        let workspace = self.apply_workspace_lifecycle_state(&workspace_name, workspace);
+        let workspace = self.apply_template_operation_state(&workspace_name, workspace);
         workspaces::clear_invalid_workspace_active_session(workspace)
     }
 
@@ -491,6 +557,54 @@ impl WorkspaceMetadataManager {
         workspaces::overlay_workspace_active_session(workspace, overlay)
     }
 
+    fn apply_workspace_lifecycle_state(
+        &self,
+        workspace_name: &str,
+        workspace: Workspace,
+    ) -> Workspace {
+        let overlay = {
+            let Ok(mut lifecycles) = self.lifecycles.lock() else {
+                return workspace;
+            };
+            let Some(pending) = lifecycles.get(workspace_name).cloned() else {
+                return workspace;
+            };
+            if should_drop_pending_lifecycle(
+                &pending,
+                workspace.lifecycle(),
+                bootstrap::workspace_startup_attempt_in_flight(workspace_name, pending.attempt_id),
+            ) {
+                lifecycles.remove(workspace_name);
+                return workspace;
+            }
+            pending.lifecycle
+        };
+
+        workspaces::overlay_workspace_lifecycle(workspace, overlay)
+    }
+
+    fn apply_template_operation_state(
+        &self,
+        workspace_name: &str,
+        workspace: Workspace,
+    ) -> Workspace {
+        let overlay = {
+            let Ok(mut template_operations) = self.template_operations.lock() else {
+                return workspace;
+            };
+            let Some(pending) = template_operations.get(workspace_name).cloned() else {
+                return workspace;
+            };
+            if pending == workspace.template_operation().cloned() {
+                template_operations.remove(workspace_name);
+                return workspace;
+            }
+            pending
+        };
+
+        workspaces::overlay_workspace_template_operation(workspace, overlay)
+    }
+
     pub(crate) fn set_active_workspace_session(
         &self,
         workspace: &str,
@@ -500,6 +614,79 @@ impl WorkspaceMetadataManager {
             return;
         };
         active_sessions.insert(workspace.to_string(), Some(active_session));
+    }
+
+    pub(crate) fn set_template_operation(
+        &self,
+        workspace: &str,
+        template_operation: Option<TemplateOperationState>,
+    ) {
+        let Ok(mut template_operations) = self.template_operations.lock() else {
+            return;
+        };
+        template_operations.insert(workspace.to_string(), template_operation);
+    }
+
+    pub(crate) fn clear_template_operation(&self, workspace: &str) {
+        let Ok(mut template_operations) = self.template_operations.lock() else {
+            return;
+        };
+        template_operations.remove(workspace);
+    }
+
+    fn set_workspace_lifecycle(
+        &self,
+        workspace: &str,
+        attempt_id: u64,
+        lifecycle: WorkspaceLifecycle,
+    ) -> bool {
+        let Ok(mut lifecycles) = self.lifecycles.lock() else {
+            return false;
+        };
+        match lifecycles.get(workspace) {
+            Some(pending) if pending.attempt_id > attempt_id => false,
+            Some(pending) if pending.attempt_id == attempt_id && pending.lifecycle == lifecycle => {
+                false
+            }
+            _ => {
+                lifecycles.insert(
+                    workspace.to_string(),
+                    PendingWorkspaceLifecycle {
+                        attempt_id,
+                        lifecycle,
+                    },
+                );
+                true
+            }
+        }
+    }
+
+    fn emit_workspace_lifecycle_changed(&self, workspace: &str, lifecycle: WorkspaceLifecycle) {
+        let app_handle = self
+            .app_handle
+            .lock()
+            .ok()
+            .and_then(|handle| handle.clone());
+        let Some(app_handle) = app_handle else {
+            return;
+        };
+
+        emit_workspace_lifecycle_changed(&app_handle, workspace, lifecycle);
+    }
+
+    fn clear_workspace_state_overlays(&self, workspace: &str) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.remove(workspace);
+        }
+        if let Ok(mut active_sessions) = self.active_sessions.lock() {
+            active_sessions.remove(workspace);
+        }
+        if let Ok(mut lifecycles) = self.lifecycles.lock() {
+            lifecycles.remove(workspace);
+        }
+        if let Ok(mut template_operations) = self.template_operations.lock() {
+            template_operations.remove(workspace);
+        }
     }
 
     pub(crate) fn clear_active_workspace_session_if_matches(
@@ -590,6 +777,10 @@ impl WorkspaceMetadataManager {
     }
 }
 
+pub(crate) fn current_workspace_metadata_manager() -> Option<&'static WorkspaceMetadataManager> {
+    WORKSPACE_METADATA_MANAGER.get()
+}
+
 async fn sleep_for(duration: Duration) {
     let _ = tauri::async_runtime::spawn_blocking(move || std::thread::sleep(duration)).await;
 }
@@ -601,6 +792,18 @@ fn requeue_workspace_metadata_entries(
     for entry in entries {
         state.entries.entry(entry.key).or_insert(entry.value);
     }
+}
+
+fn should_drop_workspace_metadata_retry(error: &str) -> bool {
+    workspaces::gcloud_resource_was_not_found(error)
+}
+
+fn should_drop_pending_lifecycle(
+    pending: &PendingWorkspaceLifecycle,
+    metadata_lifecycle: &WorkspaceLifecycle,
+    startup_attempt_in_flight: bool,
+) -> bool {
+    pending.lifecycle == *metadata_lifecycle && !startup_attempt_in_flight
 }
 
 #[cfg(test)]
@@ -711,5 +914,76 @@ mod tests {
         };
 
         assert!(should_drop_pending_session(&pending, Some(&metadata)));
+    }
+
+    #[test]
+    fn set_workspace_lifecycle_ignores_older_attempts() {
+        let manager = WorkspaceMetadataManager::default();
+
+        assert!(manager.set_workspace_lifecycle(
+            "ws-demo",
+            2,
+            workspaces::workspace_lifecycle_state_with_updated_at(
+                "bootstrapping",
+                Some("Preparing repository, credentials, and tools"),
+                None,
+                "2026-03-23T00:00:02Z",
+            ),
+        ));
+        assert!(!manager.set_workspace_lifecycle(
+            "ws-demo",
+            1,
+            workspaces::workspace_lifecycle_state_with_updated_at(
+                "failed",
+                Some("Workspace startup failed"),
+                Some("stale error"),
+                "2026-03-23T00:00:01Z",
+            ),
+        ));
+
+        let pending = manager
+            .lifecycles
+            .lock()
+            .expect("lifecycle mutex should lock")
+            .get("ws-demo")
+            .cloned()
+            .expect("pending lifecycle should exist");
+        assert_eq!(pending.attempt_id, 2);
+        assert_eq!(pending.lifecycle.phase(), "bootstrapping");
+        assert_eq!(pending.lifecycle.last_error(), None);
+    }
+
+    #[test]
+    fn should_drop_pending_lifecycle_only_after_attempt_finishes() {
+        let pending = PendingWorkspaceLifecycle {
+            attempt_id: 2,
+            lifecycle: workspaces::workspace_lifecycle_state_with_updated_at(
+                "bootstrapping",
+                Some("Preparing repository, credentials, and tools"),
+                None,
+                "2026-03-23T00:00:02Z",
+            ),
+        };
+
+        assert!(!should_drop_pending_lifecycle(
+            &pending,
+            &pending.lifecycle,
+            true,
+        ));
+        assert!(should_drop_pending_lifecycle(
+            &pending,
+            &pending.lifecycle,
+            false,
+        ));
+    }
+
+    #[test]
+    fn should_drop_workspace_metadata_retry_for_missing_instance_errors() {
+        assert!(should_drop_workspace_metadata_retry(
+            "failed to remove metadata for workspace demo-silo-template: The resource 'projects/demo/zones/us-east4-c/instances/demo-silo-template' was not found"
+        ));
+        assert!(!should_drop_workspace_metadata_retry(
+            "failed to update metadata for workspace demo-silo: permission denied"
+        ));
     }
 }

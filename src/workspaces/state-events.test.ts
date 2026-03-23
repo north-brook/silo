@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { BranchWorkspace, WorkspaceSession } from "@/workspaces/api";
+import type {
+	BranchWorkspace,
+	TemplateWorkspace,
+	WorkspaceSession,
+} from "@/workspaces/api";
 import {
+	applyWorkspaceStateEventToWorkspace,
 	removeWorkspaceSessionFromWorkspace,
 } from "@/workspaces/state-events";
 
@@ -27,9 +32,7 @@ function session(
 	};
 }
 
-function workspace(
-	overrides: Partial<BranchWorkspace> = {},
-): BranchWorkspace {
+function workspace(overrides: Partial<BranchWorkspace> = {}): BranchWorkspace {
 	return {
 		name: "demo-silo",
 		project: "demo",
@@ -51,6 +54,90 @@ function workspace(
 		...overrides,
 	};
 }
+
+function templateWorkspace(
+	overrides: Partial<TemplateWorkspace> = {},
+): TemplateWorkspace {
+	return {
+		name: "demo-silo-template",
+		project: "demo",
+		last_active: null,
+		active_session: {
+			type: "terminal",
+			attachment_id: "terminal-1",
+		},
+		created_at: "2026-03-20T00:00:00Z",
+		status: "RUNNING",
+		zone: "us-east1-b",
+		lifecycle: {
+			phase: "ready",
+		},
+		terminals: [session("terminal", "terminal-1")],
+		browsers: [],
+		files: [],
+		template: true,
+		template_operation: null,
+		...overrides,
+	};
+}
+
+describe("applyWorkspaceStateEventToWorkspace", () => {
+	test("applies a template operation update without removing sessions", () => {
+		const current = templateWorkspace();
+		const next = applyWorkspaceStateEventToWorkspace(current, {
+			workspace: current.name,
+			clearedActiveSession: false,
+			templateOperation: {
+				kind: "save",
+				phase: "waiting_for_template_ready",
+				detail: "Waiting for template workspace bootstrap",
+				last_error: null,
+				updated_at: "2026-03-22T12:00:00Z",
+				snapshot_name: "demo-template-2026-03-22",
+			},
+		});
+
+		expect(next).not.toBeNull();
+		expect(next).toMatchObject({
+			active_session: current.active_session,
+			terminals: current.terminals,
+		});
+		expect("template_operation" in (next ?? {})).toBe(true);
+		expect((next as TemplateWorkspace | null)?.template_operation).toEqual({
+			kind: "save",
+			phase: "waiting_for_template_ready",
+			detail: "Waiting for template workspace bootstrap",
+			last_error: null,
+			updated_at: "2026-03-22T12:00:00Z",
+			snapshot_name: "demo-template-2026-03-22",
+		});
+	});
+
+	test("applies a lifecycle update without removing sessions", () => {
+		const current = workspace();
+		const next = applyWorkspaceStateEventToWorkspace(current, {
+			workspace: current.name,
+			clearedActiveSession: false,
+			lifecycle: {
+				phase: "bootstrapping",
+				detail: "Preparing repository, credentials, and tools",
+				last_error: null,
+				updated_at: "2026-03-23T00:00:00Z",
+			},
+		});
+
+		expect(next).not.toBeNull();
+		expect(next?.terminals).toEqual(current.terminals);
+		expect(next?.browsers).toEqual(current.browsers);
+		expect(next?.files).toEqual(current.files);
+		expect(next?.lifecycle).toEqual({
+			phase: "bootstrapping",
+			detail: "Preparing repository, credentials, and tools",
+			last_error: null,
+			updated_at: "2026-03-23T00:00:00Z",
+		});
+	});
+});
 
 describe("removeWorkspaceSessionFromWorkspace", () => {
 	test("removes the last session and clears the active session", () => {

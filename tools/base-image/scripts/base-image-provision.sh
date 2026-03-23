@@ -48,6 +48,7 @@ apt-get install -y \
   file \
   findutils \
   git \
+  git-lfs \
   gnupg \
   glib-networking \
   jq \
@@ -79,6 +80,7 @@ apt-get install -y \
   xz-utils \
   zip \
   zsh
+git lfs install --system
 
 ARCHITECTURE="$(dpkg --print-architecture)"
 UBUNTU_CODENAME="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME}")"
@@ -248,6 +250,7 @@ direnv version
 fdfind --version
 find --version
 git --version
+git lfs version
 gh --version
 jq --version
 less --version

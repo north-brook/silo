@@ -14,16 +14,12 @@ import { xml } from "@codemirror/lang-xml";
 import { yaml } from "@codemirror/lang-yaml";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import {
-	RangeSetBuilder,
-	StateField,
 	type EditorState,
 	type Extension,
+	RangeSetBuilder,
+	StateField,
 } from "@codemirror/state";
-import {
-	Decoration,
-	type DecorationSet,
-	EditorView,
-} from "@codemirror/view";
+import { Decoration, type DecorationSet, EditorView } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
 import {
 	type QueryClient,
@@ -49,6 +45,7 @@ import {
 	filesRead,
 	filesSave,
 } from "@/workspaces/files/api";
+import { filePathOpensInBrowser } from "@/workspaces/files/browser";
 import { useFileSessions } from "@/workspaces/files/context";
 import { useGitSidebar } from "@/workspaces/git/context";
 import { useWorkspaceSessionRouteParams } from "@/workspaces/routes/params";
@@ -188,10 +185,7 @@ function parsePatchChangedLines(
 		}
 		const modifiedCount = Math.min(pendingDeletions, pendingAdditions.length);
 		for (let i = 0; i < pendingAdditions.length; i++) {
-			result.set(
-				pendingAdditions[i],
-				i < modifiedCount ? "modified" : "added",
-			);
+			result.set(pendingAdditions[i], i < modifiedCount ? "modified" : "added");
 		}
 		pendingDeletions = 0;
 		pendingAdditions = [];
@@ -199,9 +193,7 @@ function parsePatchChangedLines(
 
 	for (const line of lines) {
 		if (line.startsWith("@@")) {
-			const hunkMatch = line.match(
-				/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/,
-			);
+			const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
 			if (hunkMatch) {
 				flushBlock();
 				newLine = Number.parseInt(hunkMatch[1], 10);
@@ -276,7 +268,6 @@ function buildPatchDecorations(
 
 	return builder.finish();
 }
-
 
 // --- Component ---
 
@@ -622,7 +613,11 @@ export function WorkspaceFileSessionView() {
 					<PlaceholderState
 						icon={<FileCode2 size={18} className="text-text-muted" />}
 						title="Binary file"
-						description="Binary files open in a read-only placeholder in this first pass."
+						description={
+							filePathOpensInBrowser(path)
+								? "Open this file from the explorer to view it in a browser tab."
+								: "Binary files open in a read-only placeholder in this first pass."
+						}
 					/>
 				) : (
 					<CodeMirror

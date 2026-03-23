@@ -1,5 +1,6 @@
 mod bootstrap;
 mod browser;
+mod browser_file_server;
 mod browser_loopback;
 mod build_info;
 mod claude;
@@ -37,6 +38,10 @@ pub(crate) struct WorkspaceStateEvent {
     cleared_active_session: bool,
     removed_session_attachment_id: Option<String>,
     removed_session_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    template_operation: Option<crate::workspaces::TemplateOperationState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lifecycle: Option<crate::workspaces::WorkspaceLifecycle>,
 }
 
 const MENU_ID_NEW_WORKSPACE: &str = "new_workspace";
@@ -100,6 +105,33 @@ pub(crate) fn emit_workspace_state_changed(
     workspace: &str,
     removed_session: Option<(&str, &str)>,
     cleared_active_session: bool,
+    template_operation: Option<crate::workspaces::TemplateOperationState>,
+) {
+    emit_workspace_state_event(
+        app_handle,
+        workspace,
+        removed_session,
+        cleared_active_session,
+        template_operation,
+        None,
+    );
+}
+
+pub(crate) fn emit_workspace_lifecycle_changed(
+    app_handle: &AppHandle<AppRuntime>,
+    workspace: &str,
+    lifecycle: crate::workspaces::WorkspaceLifecycle,
+) {
+    emit_workspace_state_event(app_handle, workspace, None, false, None, Some(lifecycle));
+}
+
+fn emit_workspace_state_event(
+    app_handle: &AppHandle<AppRuntime>,
+    workspace: &str,
+    removed_session: Option<(&str, &str)>,
+    cleared_active_session: bool,
+    template_operation: Option<crate::workspaces::TemplateOperationState>,
+    lifecycle: Option<crate::workspaces::WorkspaceLifecycle>,
 ) {
     let (removed_session_kind, removed_session_attachment_id) = removed_session
         .map(|(kind, attachment_id)| (Some(kind.to_string()), Some(attachment_id.to_string())))
@@ -111,6 +143,8 @@ pub(crate) fn emit_workspace_state_changed(
             cleared_active_session,
             removed_session_attachment_id,
             removed_session_kind,
+            template_operation,
+            lifecycle,
         },
     );
 }
@@ -236,7 +270,10 @@ pub fn run() {
     let startup_environment = startup_env::initialize_process_environment();
     let cef_command_line_args = cef_command_line_args();
     let loopback_router = router::RouterManager::default();
-    let browser_manager = browser::BrowserManager::new(loopback_router.clone());
+    let browser_file_server = browser_file_server::BrowserFileServerManager::new()
+        .expect("workspace file server should initialize");
+    let browser_manager =
+        browser::BrowserManager::new(loopback_router.clone(), browser_file_server);
     let browser_loopback_manager = browser_loopback::BrowserLoopbackManager::new(loopback_router);
     let browser_loopback_resolver = browser_loopback_manager.clone();
     let _ = tauri_runtime_cef::set_loopback_request_resolver(std::sync::Arc::new(
@@ -287,6 +324,7 @@ pub fn run() {
                 .state::<state::WorkspaceMetadataManager>()
                 .inner()
                 .clone();
+            workspace_state.set_app_handle(app.handle().clone());
             bootstrap::initialize_workspace_metadata_manager(workspace_state.clone());
             templates::resume_running_template_operations(workspace_state);
 
@@ -625,6 +663,7 @@ pub fn run() {
             workspaces::workspaces_submit_prompt,
             workspaces::workspaces_delete_workspace,
             browser::browser_create_tab,
+            browser::browser_open_workspace_file,
             browser::browser_mount_tab,
             browser::browser_resize_tab,
             browser::browser_detach_tab,

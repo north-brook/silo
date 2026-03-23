@@ -4,7 +4,7 @@ import { ClaudeIcon } from "@/shared/ui/icons/claude";
 import { CodexIcon } from "@/shared/ui/icons/codex";
 import { GCloudIcon } from "@/shared/ui/icons/gcloud";
 import { GHIcon } from "@/shared/ui/icons/gh";
-import { LogoIcon } from "@/shared/ui/icons/logo";
+import { SiloIcon } from "@/shared/ui/icons/silo";
 import { Loader } from "@/shared/ui/loader";
 import type { WorkspaceLifecycle } from "@/workspaces/api";
 
@@ -38,7 +38,7 @@ const CONFIG_STEPS: ConfigStep[] = [
 function useProvisioningSteps(
 	status: string,
 	lifecycle: WorkspaceLifecycle,
-): { steps: Step[]; allDone: boolean } {
+): { steps: Step[] } {
 	const isRunning = status === "RUNNING";
 	const phase = lifecycle.phase;
 
@@ -63,11 +63,9 @@ function useProvisioningSteps(
 				? "done"
 				: "pending";
 	const terminalState: Step["state"] =
-		phase === "starting_terminal"
+		phase === "starting_terminal" || phase === "ready"
 			? "active"
-			: phase === "ready"
-				? "done"
-				: "pending";
+			: "pending";
 
 	const steps: Step[] = [
 		{
@@ -107,9 +105,7 @@ function useProvisioningSteps(
 		},
 	];
 
-	const allDone = phase === "ready";
-
-	return { steps, allDone };
+	return { steps };
 }
 
 function StepRow({ step }: { step: Step }) {
@@ -149,7 +145,7 @@ export function TemplatingWorkspace({
 	lifecycle: WorkspaceLifecycle;
 	status: string;
 }) {
-	const { steps, allDone } = useProvisioningSteps(status, lifecycle);
+	const { steps } = useProvisioningSteps(status, lifecycle);
 	const startupFailed = lifecycle.phase === "failed";
 	const startupError =
 		lifecycle.last_error ?? lifecycle.detail ?? "Template startup failed";
@@ -157,7 +153,7 @@ export function TemplatingWorkspace({
 	return (
 		<div className="flex-1 flex flex-col items-center justify-center p-6">
 			<div className="flex flex-col items-center gap-5">
-				<LogoIcon height={24} className="opacity-40" />
+				<SiloIcon height={24} />
 
 				<div className="flex flex-col gap-1.5">
 					{steps.map((step) => (
@@ -165,16 +161,11 @@ export function TemplatingWorkspace({
 					))}
 				</div>
 
-				{startupFailed ? (
+				{startupFailed && (
 					<p className="max-w-md text-center text-[11px] text-error">
 						{startupError}
 					</p>
-				) : allDone ? (
-					<div className="flex items-center gap-2 text-[11px] text-text-muted">
-						<Loader className="text-text-muted" />
-						<span>Opening terminal...</span>
-					</div>
-				) : null}
+				)}
 			</div>
 		</div>
 	);

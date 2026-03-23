@@ -53,6 +53,15 @@ export interface WorkspaceSession {
 	unread: boolean | null;
 }
 
+export interface WorkspaceTemplateOperationState {
+	kind: string;
+	phase: string;
+	detail?: string | null;
+	last_error?: string | null;
+	updated_at?: string | null;
+	snapshot_name?: string | null;
+}
+
 export interface WorkspacePromptResult {
 	attachment_id: string;
 }
@@ -72,6 +81,7 @@ export interface TemplateWorkspace extends WorkspaceBase {
 	browsers: WorkspaceSession[];
 	files: WorkspaceSession[];
 	template: true;
+	template_operation?: WorkspaceTemplateOperationState | null;
 }
 
 export type Workspace = TemplateWorkspace | BranchWorkspace;

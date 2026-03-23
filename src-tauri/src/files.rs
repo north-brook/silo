@@ -6,6 +6,8 @@ use crate::remote::{
 use crate::state::{active_session_metadata_entries, WorkspaceMetadataManager};
 use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
 use crate::{emit_workspace_state_changed, AppRuntime};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -51,6 +53,17 @@ pub struct WatchedFileState {
     exists: bool,
     binary: bool,
     revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceFileAsset {
+    pub(crate) bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct WorkspaceFileAssetPayload {
+    content_base64: Option<String>,
+    status: String,
 }
 
 #[tauri::command]
@@ -211,11 +224,85 @@ pub fn files_close_session(
         &workspace,
         Some(("file", &attachment_id)),
         cleared_active_session,
+        None,
     );
     Ok(())
 }
 
-async fn branch_workspace_lookup(workspace: &str) -> Result<WorkspaceLookup, String> {
+pub(crate) async fn read_workspace_file_asset(
+    workspace: &str,
+    path: &str,
+) -> Result<Option<WorkspaceFileAsset>, String> {
+    let lookup = branch_workspace_lookup(workspace).await?;
+    let path = normalize_repo_relative_path(path)?;
+    if browser_renderable_content_type(&path).is_none() {
+        return Err(format!(
+            "workspace file {} does not support browser rendering",
+            path
+        ));
+    }
+
+    let absolute_path = format!("/home/silo/workspace/{path}");
+    let command = workspace_shell_command(&format!(
+        "file_path={file_path}\n\
+if [ ! -f \"$file_path\" ]; then\n\
+  printf '%s' '{{\"status\":\"missing\"}}'\n\
+  exit 0\n\
+fi\n\
+printf '%s' '{{\"status\":\"ok\",\"content_base64\":\"'\n\
+base64 \"$file_path\" | tr -d '\\n'\n\
+printf '%s' '\"}}'\n",
+        file_path = shell_quote(&absolute_path),
+    ));
+    let result = run_remote_command(&lookup, &command).await?;
+    if !result.success {
+        return Err(file_command_error(
+            "failed to read workspace file for browser",
+            &result.stderr,
+        ));
+    }
+
+    let payload = parse_json_output::<WorkspaceFileAssetPayload>(
+        "failed to parse workspace file browser payload",
+        &result.stdout,
+        &result.stderr,
+    )?;
+    match payload.status.as_str() {
+        "missing" => Ok(None),
+        "ok" => {
+            let encoded = payload
+                .content_base64
+                .as_deref()
+                .ok_or_else(|| "workspace file browser payload missing content".to_string())?;
+            let bytes = BASE64_STANDARD.decode(encoded).map_err(|error| {
+                format!("failed to decode workspace file browser payload: {error}")
+            })?;
+            Ok(Some(WorkspaceFileAsset { bytes }))
+        }
+        other => Err(format!(
+            "workspace file browser payload returned unsupported status: {other}"
+        )),
+    }
+}
+
+pub(crate) fn browser_renderable_content_type(path: &str) -> Option<&'static str> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())?;
+
+    match extension.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "svg" => Some("image/svg+xml"),
+        "pdf" => Some("application/pdf"),
+        _ => None,
+    }
+}
+
+pub(crate) async fn branch_workspace_lookup(workspace: &str) -> Result<WorkspaceLookup, String> {
     let lookup = workspaces::find_workspace(workspace).await?;
     if lookup.workspace.is_template() {
         return Err(format!(
@@ -291,7 +378,7 @@ fn parse_json_output<T: for<'de> Deserialize<'de>>(
     })
 }
 
-fn normalize_repo_relative_path(path: &str) -> Result<String, String> {
+pub(crate) fn normalize_repo_relative_path(path: &str) -> Result<String, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err("file path must not be empty".to_string());
@@ -327,7 +414,7 @@ fn normalize_revision(revision: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-fn file_display_name(path: &str) -> String {
+pub(crate) fn file_display_name(path: &str) -> String {
     Path::new(path)
         .file_name()
         .and_then(|value| value.to_str())
@@ -360,5 +447,40 @@ fn file_command_error(prefix: &str, stderr: &str) -> String {
         prefix.to_string()
     } else {
         format!("{prefix}: {trimmed}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_renderable_content_type_matches_supported_files() {
+        assert_eq!(
+            browser_renderable_content_type("images/photo.PNG"),
+            Some("image/png")
+        );
+        assert_eq!(
+            browser_renderable_content_type("docs/manual.pdf"),
+            Some("application/pdf")
+        );
+        assert_eq!(
+            browser_renderable_content_type("icons/logo.svg"),
+            Some("image/svg+xml")
+        );
+    }
+
+    #[test]
+    fn browser_renderable_content_type_rejects_unsupported_files() {
+        assert_eq!(browser_renderable_content_type("archive.zip"), None);
+        assert_eq!(browser_renderable_content_type("notes.txt"), None);
+    }
+
+    #[test]
+    fn normalize_repo_relative_path_rejects_parent_segments() {
+        assert_eq!(
+            normalize_repo_relative_path("../secret.txt"),
+            Err("file path must stay within the workspace root".to_string())
+        );
     }
 }

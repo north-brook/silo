@@ -11,15 +11,8 @@ import {
 	type WorkspaceRouteState,
 	workspaceSessionHref,
 } from "@/workspaces/routes/paths";
-import {
-	TemplateOperationScreen,
-	WorkspaceResumingScreen,
-} from "@/workspaces/routes/transition-screens";
-import {
-	useTemplateState,
-	useWorkspaceProject,
-	useWorkspaceState,
-} from "@/workspaces/state";
+import { WorkspaceResumingScreen } from "@/workspaces/routes/transition-screens";
+import { useWorkspaceProject, useWorkspaceState } from "@/workspaces/state";
 import { TemplatingWorkspace } from "@/workspaces/template/screen";
 
 export default function WorkspacePage() {
@@ -29,23 +22,11 @@ export default function WorkspacePage() {
 function WorkspaceView() {
 	const location = useLocation();
 	const navigate = useNavigate();
-	const savingRoutedRef = useRef(false);
 	const routeState = location.state as WorkspaceRouteState | null;
 	const freshRef = useRef(routeState?.fresh === true);
 	const { isLoading, isMissing, workspace } = useWorkspaceState();
 	const project = useWorkspaceProject();
 	const transition = routeState?.transition;
-	const templateState = useTemplateState(
-		(workspace ? isTemplateWorkspace(workspace) : false) || isMissing
-			? project
-			: null,
-	);
-	const templateOperation = templateState.data?.operation ?? null;
-	const templateLifecycleOperation =
-		templateOperation &&
-		(templateOperation.kind === "save" || templateOperation.kind === "delete")
-			? templateOperation
-			: null;
 
 	const redirectHref = useMemo(() => {
 		if (!workspace || transition) {
@@ -93,35 +74,6 @@ function WorkspaceView() {
 
 		navigate(redirectHref, { replace: true });
 	}, [navigate, redirectHref]);
-
-	useEffect(() => {
-		if (
-			!templateLifecycleOperation ||
-			templateLifecycleOperation.status !== "completed" ||
-			(!isMissing && templateState.data?.workspace_present !== false) ||
-			savingRoutedRef.current
-		) {
-			return;
-		}
-
-		savingRoutedRef.current = true;
-		const timer = window.setTimeout(
-			() => navigate("/", { replace: true }),
-			1500,
-		);
-		return () => {
-			window.clearTimeout(timer);
-		};
-	}, [
-		isMissing,
-		navigate,
-		templateLifecycleOperation,
-		templateState.data?.workspace_present,
-	]);
-
-	if (templateLifecycleOperation) {
-		return <TemplateOperationScreen operation={templateLifecycleOperation} />;
-	}
 
 	if (transition === "resuming" && workspace) {
 		if (!workspaceIsReady(workspace)) {

@@ -70,7 +70,7 @@ pub struct TemplateWorkspace {
     browsers: Vec<WorkspaceSession>,
     files: Vec<WorkspaceSession>,
     template: bool,
-    #[serde(skip_serializing)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     template_operation: Option<TemplateOperationState>,
 }
 
@@ -93,7 +93,7 @@ pub struct WorkspaceLifecycle {
     updated_at: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct TemplateOperationState {
     pub(crate) kind: String,
     pub(crate) phase: String,
@@ -472,6 +472,35 @@ pub(crate) fn overlay_workspace_active_session(
     }
 }
 
+pub(crate) fn overlay_workspace_lifecycle(
+    workspace: Workspace,
+    lifecycle: WorkspaceLifecycle,
+) -> Workspace {
+    match workspace {
+        Workspace::Branch(mut workspace) => {
+            workspace.base.lifecycle = lifecycle;
+            Workspace::Branch(workspace)
+        }
+        Workspace::Template(mut workspace) => {
+            workspace.base.lifecycle = lifecycle;
+            Workspace::Template(workspace)
+        }
+    }
+}
+
+pub(crate) fn overlay_workspace_template_operation(
+    workspace: Workspace,
+    template_operation: Option<TemplateOperationState>,
+) -> Workspace {
+    match workspace {
+        Workspace::Branch(workspace) => Workspace::Branch(workspace),
+        Workspace::Template(mut workspace) => {
+            workspace.template_operation = template_operation;
+            Workspace::Template(workspace)
+        }
+    }
+}
+
 pub(crate) fn clear_invalid_workspace_active_session(workspace: Workspace) -> Workspace {
     let invalid = workspace
         .active_session()
@@ -607,6 +636,14 @@ pub async fn workspaces_create_workspace(project: String) -> Result<Workspace, S
         return Err(gcloud_error("failed to create workspace", &result.stderr));
     }
 
+    bootstrap::cache_workspace_bootstrap(
+        &workspace_name,
+        &config,
+        &project,
+        project_config,
+        &project_config.target_branch,
+        Some(&branch_name),
+    )?;
     log::info!("workspace {workspace_name} creation started for project {project}");
     bootstrap::start_workspace_startup_reconcile(workspace_name.clone());
     match describe_workspace_in_project(&workspace_name, &gcloud.account, &gcloud.project).await {
@@ -859,7 +896,13 @@ pub(crate) async fn find_workspace(name: &str) -> Result<WorkspaceLookup, String
 
     match matches.len() {
         0 => Err(format!("workspace not found: {name}")),
-        1 => Ok(matches.remove(0)),
+        1 => {
+            let mut lookup = matches.remove(0);
+            if let Some(manager) = crate::state::current_workspace_metadata_manager() {
+                lookup.workspace = manager.apply_workspace_state(lookup.workspace);
+            }
+            Ok(lookup)
+        }
         _ => Err(format!(
             "workspace {name} is ambiguous across multiple gcloud projects"
         )),
@@ -881,12 +924,13 @@ async fn update_workspace_metadata_in_lookup(
     .await
 }
 
-pub(crate) fn template_operation_metadata_entries(
+pub(crate) fn template_operation_metadata_entries_with_updated_at(
     kind: &str,
     phase: &str,
     detail: Option<&str>,
     last_error: Option<&str>,
     snapshot_name: Option<&str>,
+    updated_at: &str,
 ) -> Vec<WorkspaceMetadataEntry> {
     vec![
         WorkspaceMetadataEntry {
@@ -907,13 +951,18 @@ pub(crate) fn template_operation_metadata_entries(
         },
         WorkspaceMetadataEntry {
             key: TEMPLATE_OPERATION_UPDATED_AT_METADATA_KEY.to_string(),
-            value: Some(current_rfc3339_timestamp()),
+            value: Some(updated_at.to_string()),
         },
         WorkspaceMetadataEntry {
             key: TEMPLATE_OPERATION_SNAPSHOT_METADATA_KEY.to_string(),
             value: snapshot_name.map(str::to_string),
         },
     ]
+}
+
+pub(crate) fn gcloud_resource_was_not_found(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("was not found") || lower.contains("could not fetch resource")
 }
 
 pub(crate) async fn apply_workspace_metadata_entries_in_lookup(
@@ -1114,9 +1163,10 @@ pub(crate) async fn create_template_workspace_for_project(
     let config = ConfigStore::new()
         .and_then(|store| store.load())
         .map_err(|error| error.to_string())?;
-    if !config.projects.contains_key(project) {
-        return Err(format!("project not found: {project}"));
-    }
+    let project_config = config
+        .projects
+        .get(project)
+        .ok_or_else(|| format!("project not found: {project}"))?;
 
     let gcloud = resolve_project_gcloud_config(&config, project)?;
     let workspace_name = generate_template_workspace_name(project);
@@ -1149,6 +1199,14 @@ pub(crate) async fn create_template_workspace_for_project(
         ));
     }
 
+    bootstrap::cache_workspace_bootstrap(
+        &workspace_name,
+        &config,
+        project,
+        project_config,
+        &project_config.target_branch,
+        None,
+    )?;
     log::info!(
         "template workspace {} creation started for project {}",
         workspace_name,
@@ -1856,8 +1914,7 @@ pub(crate) async fn describe_snapshot_if_exists_in_project(
     .await?;
 
     if !result.success {
-        let stderr = result.stderr.to_ascii_lowercase();
-        if stderr.contains("was not found") || stderr.contains("could not fetch resource") {
+        if gcloud_resource_was_not_found(&result.stderr) {
             return Ok(None);
         }
         return Err(gcloud_error(
@@ -2464,10 +2521,25 @@ fn lifecycle_for_status(
     WorkspaceLifecycle::new(phase, detail, last_error, None)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn workspace_lifecycle_metadata_entries(
     phase: &str,
     detail: Option<&str>,
     last_error: Option<&str>,
+) -> Vec<WorkspaceMetadataEntry> {
+    workspace_lifecycle_metadata_entries_with_updated_at(
+        phase,
+        detail,
+        last_error,
+        &current_rfc3339_timestamp(),
+    )
+}
+
+pub(crate) fn workspace_lifecycle_metadata_entries_with_updated_at(
+    phase: &str,
+    detail: Option<&str>,
+    last_error: Option<&str>,
+    updated_at: &str,
 ) -> Vec<WorkspaceMetadataEntry> {
     vec![
         WorkspaceMetadataEntry {
@@ -2484,9 +2556,24 @@ pub(crate) fn workspace_lifecycle_metadata_entries(
         },
         WorkspaceMetadataEntry {
             key: WORKSPACE_LIFECYCLE_UPDATED_AT_METADATA_KEY.to_string(),
-            value: Some(current_rfc3339_timestamp()),
+            value: Some(updated_at.to_string()),
         },
     ]
+}
+
+pub(crate) fn workspace_lifecycle_state_with_updated_at(
+    phase: &str,
+    detail: Option<&str>,
+    last_error: Option<&str>,
+    updated_at: &str,
+) -> WorkspaceLifecycle {
+    lifecycle_for_status(
+        "RUNNING",
+        Some(phase.to_string()),
+        detail.map(sanitize_workspace_metadata_value),
+        last_error.map(sanitize_workspace_metadata_value),
+    )
+    .with_updated_at(Some(updated_at.to_string()))
 }
 
 fn sanitize_workspace_metadata_value(value: &str) -> String {

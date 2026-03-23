@@ -1,9 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { getVersion } from "@tauri-apps/api/app";
-import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
 	Box,
 	ChevronDown,
+	Cpu,
 	EllipsisVertical,
 	FolderOpen,
 	PanelLeft,
@@ -14,7 +14,6 @@ import {
 	Square,
 	Trash2,
 } from "lucide-react";
-import packageJson from "../../../package.json";
 import {
 	createContext,
 	type ReactNode,
@@ -471,23 +470,16 @@ function WorkspaceRow({
 
 	const saveTemplateMut = useMutation({
 		mutationFn: () => saveTemplate(workspace.project ?? ""),
-		onSuccess: (operation) => {
+		onSuccess: () => {
 			queryClient.invalidateQueries({
 				queryKey: ["workspaces_list_workspaces"],
 			});
 			queryClient.invalidateQueries({
 				queryKey: ["templates_list_templates"],
 			});
-			queryClient.setQueryData<TemplateState | undefined>(
-				["templates_get_state", workspace.project ?? ""],
-				(current) => ({
-					project: workspace.project ?? "",
-					workspace_name: workspace.name,
-					workspace_present: current?.workspace_present ?? true,
-					snapshot_name: current?.snapshot_name ?? null,
-					operation,
-				}),
-			);
+			queryClient.invalidateQueries({
+				queryKey: ["templates_get_state", workspace.project ?? ""],
+			});
 		},
 		onError: (error) => {
 			toast({
@@ -628,11 +620,10 @@ function WorkspaceRow({
 							type="button"
 							onClick={(e) => e.stopPropagation()}
 							className={`group/action shrink-0 ml-auto p-1 -mr-1 w-5 h-5 flex items-center justify-center text-text-placeholder hover:text-text-bright transition-opacity ${
-								(
-									isRunning &&
-										!isTemplate &&
-										(workspace.working || workspace.unread)
-								) || (isSuspended && !isTemplate)
+								(isRunning &&
+									!isTemplate &&
+									(workspace.working || workspace.unread)) ||
+								(isSuspended && !isTemplate)
 									? ""
 									: "opacity-0 group-hover:opacity-100"
 							}`}
@@ -777,30 +768,18 @@ function WorkspaceRow({
 
 function BarFooter() {
 	const openProject = useOpenProject();
-	const [appVersion, setAppVersion] = useState(packageJson.version);
 
-	useEffect(() => {
-		let cancelled = false;
-
-		void (async () => {
-			if (!isTauri()) {
-				return;
-			}
-
-			try {
-				const version = await getVersion();
-				if (!cancelled) {
-					setAppVersion(version);
-				}
-			} catch (error) {
-				console.error("failed to resolve app version", error);
-			}
-		})();
-
-		return () => {
-			cancelled = true;
-		};
-	}, []);
+	const memory = useQuery({
+		queryKey: ["system_memory_usage"],
+		queryFn: () =>
+			invoke<number>("system_memory_usage", {
+				log: "state_changes_only",
+				key: "poll:system_memory_usage",
+				stateChanged: (previous: number | undefined, next: number) =>
+					Math.round((previous ?? 0) / 50) !== Math.round(next / 50),
+			}),
+		refetchInterval: 5000,
+	});
 
 	return (
 		<div className="shrink-0">
@@ -818,7 +797,12 @@ function BarFooter() {
 				Open Project
 			</button>
 			<div className="px-3 py-2">
-				<span className="text-[11px] text-text-muted">v{appVersion}</span>
+				{memory.data !== undefined && (
+					<span className="flex items-center gap-1 text-[11px] text-text-muted">
+						<Cpu size={10} />
+						{memory.data.toFixed(1)} MB
+					</span>
+				)}
 			</div>
 		</div>
 	);

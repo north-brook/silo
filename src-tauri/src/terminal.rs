@@ -221,7 +221,8 @@ pub async fn terminal_create_terminal(
     workspace_state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
 ) -> Result<TerminalCreateResult, String> {
-    let attachment_id = create_pending_terminal_session(workspace_state.inner(), &workspace).await?;
+    let attachment_id =
+        create_pending_terminal_session(workspace_state.inner(), &workspace).await?;
     Ok(TerminalCreateResult { attachment_id })
 }
 
@@ -229,8 +230,8 @@ pub(crate) async fn ensure_template_startup_terminal_session(
     workspace_state: &WorkspaceMetadataManager,
     workspace: &str,
 ) -> Result<String, String> {
-    let workspace_with_state =
-        workspace_state.apply_workspace_state(workspaces::find_workspace(workspace).await?.workspace);
+    let workspace_with_state = workspace_state
+        .apply_workspace_state(workspaces::find_workspace(workspace).await?.workspace);
     let existing_attachment_id = workspace_with_state
         .active_session()
         .filter(|active| {
@@ -495,6 +496,7 @@ pub fn terminal_kill_terminal(
         &workspace,
         Some(("terminal", &attachment_id)),
         cleared_active_session,
+        None,
     );
 
     let workspace_for_kill = workspace.clone();

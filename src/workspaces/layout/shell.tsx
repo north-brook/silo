@@ -1,7 +1,12 @@
-import { useMutation, useMutationState, useQueryClient } from "@tanstack/react-query";
+import {
+	useMutation,
+	useMutationState,
+	useQueryClient,
+} from "@tanstack/react-query";
 import { Globe, Plus, Terminal, X } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation, useMatch, useNavigate } from "react-router-dom";
+import type { TemplateOperation } from "@/projects/api";
 import { domFocusSnapshot } from "@/shared/lib/focus-debug";
 import { invoke } from "@/shared/lib/invoke";
 import { shortcutEvents } from "@/shared/lib/shortcuts";
@@ -17,7 +22,11 @@ import { CodexIcon } from "@/shared/ui/icons/codex";
 import { Loader } from "@/shared/ui/loader";
 import { toast } from "@/shared/ui/toaster";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import type { Workspace, WorkspaceSession } from "@/workspaces/api";
+import {
+	isTemplateWorkspace,
+	type Workspace,
+	type WorkspaceSession,
+} from "@/workspaces/api";
 import {
 	type DisplayWorkspaceSession,
 	FileSessionsProvider,
@@ -35,9 +44,11 @@ import {
 	workspaceHref,
 	workspaceSessionHref,
 } from "@/workspaces/routes/paths";
+import { TemplateOperationScreen } from "@/workspaces/routes/transition-screens";
 import {
 	RouteWorkspaceStateProvider,
 	useCloudSessions,
+	useTemplateState,
 	useWorkspaceProject,
 	useWorkspaceReady,
 	useWorkspaceSessions,
@@ -117,6 +128,35 @@ function fileTabPresentation(session: WorkspaceSession) {
 	};
 }
 
+function templateLifecycleOperationFromWorkspace(
+	workspace: Workspace | null,
+): TemplateOperation | null {
+	if (
+		!workspace ||
+		!isTemplateWorkspace(workspace) ||
+		!workspace.template_operation
+	) {
+		return null;
+	}
+
+	const operation = workspace.template_operation;
+	if (operation.kind !== "save" && operation.kind !== "delete") {
+		return null;
+	}
+
+	return {
+		project: workspace.project ?? "",
+		workspace_name: workspace.name,
+		kind: operation.kind as TemplateOperation["kind"],
+		status: operation.phase === "failed" ? "failed" : "running",
+		phase: operation.phase,
+		detail: operation.detail ?? null,
+		last_error: operation.last_error ?? null,
+		snapshot_name: operation.snapshot_name ?? null,
+		updated_at: operation.updated_at ?? workspace.created_at,
+	};
+}
+
 function isLocalOnlyFileSession(
 	session: DisplayWorkspaceSession,
 	workspaceSessions: WorkspaceSession[],
@@ -147,9 +187,11 @@ function findLiveNeighbor(
 }
 
 function WorkspaceShellInner() {
-	const pathname = useLocation().pathname;
+	const location = useLocation();
+	const pathname = location.pathname;
 	const navigate = useNavigate();
 	const queryClient = useQueryClient();
+	const savingRoutedRef = useRef(false);
 	const browserMatch = useMatch(
 		"/projects/:project/workspaces/:workspace/browser/:attachmentId",
 	);
@@ -161,9 +203,26 @@ function WorkspaceShellInner() {
 	);
 	const { ensureWorkspaceSessions, removeSession } = useSessionHosts();
 	const { clearSession, getDisplaySessions } = useFileSessions();
-	const { invalidateWorkspace, workspace, workspaceName } = useWorkspaceState();
+	const { invalidateWorkspace, isMissing, workspace, workspaceName } =
+		useWorkspaceState();
 	const project = useWorkspaceProject();
 	const isWorkspaceReady = useWorkspaceReady();
+	const templateState = useTemplateState(
+		(workspace ? isTemplateWorkspace(workspace) : false) || isMissing
+			? project
+			: null,
+	);
+	const workspaceTemplateOperation =
+		templateLifecycleOperationFromWorkspace(workspace);
+	const templateStateOperation =
+		templateState.data?.operation &&
+		(templateState.data.operation.kind === "save" ||
+			templateState.data.operation.kind === "delete")
+			? templateState.data.operation
+			: null;
+	const templateLifecycleOperation = isMissing
+		? (templateStateOperation ?? workspaceTemplateOperation)
+		: (workspaceTemplateOperation ?? templateStateOperation);
 	const workspaceSessions = useWorkspaceSessions();
 	const sessions = useMemo(
 		() => getDisplaySessions(workspaceSessions),
@@ -187,6 +246,26 @@ function WorkspaceShellInner() {
 		() => workspaceHref({ project, workspace: workspaceName }),
 		[project, workspaceName],
 	);
+
+	useEffect(() => {
+		if (
+			!templateState.data?.operation ||
+			templateState.data.operation.status !== "completed" ||
+			templateState.data.workspace_present !== false ||
+			savingRoutedRef.current
+		) {
+			return;
+		}
+
+		savingRoutedRef.current = true;
+		const timer = window.setTimeout(
+			() => navigate("/", { replace: true }),
+			1500,
+		);
+		return () => {
+			window.clearTimeout(timer);
+		};
+	}, [navigate, templateState.data]);
 
 	const isCurrentLayoutInstance = useCallback(() => {
 		if (typeof window === "undefined") {
@@ -334,7 +413,7 @@ function WorkspaceShellInner() {
 				session.type === "file"
 					? (session.persistentAttachmentId ?? session.attachment_id)
 					: session.attachment_id,
-				);
+			);
 			clearSession(session.attachment_id);
 		},
 		onError: (error, session, context) => {
@@ -380,25 +459,24 @@ function WorkspaceShellInner() {
 			const isActive =
 				activeKind === session.type &&
 				activeAttachmentId === session.attachment_id;
-			const navigateTo =
-				isActive
-					? (() => {
-							const idx = sessions.findIndex(
-								(s) => s.attachment_id === session.attachment_id,
-							);
-							const preview = new Set(deletingIds);
-							preview.add(session.attachment_id);
-							const neighbor = findLiveNeighbor(sessions, idx, preview);
-							return neighbor
-								? workspaceSessionHref({
-										project,
-										workspace: workspaceName,
-										kind: neighbor.type,
-										attachmentId: neighbor.attachment_id,
-									})
-								: currentWorkspaceHref;
-						})()
-					: null;
+			const navigateTo = isActive
+				? (() => {
+						const idx = sessions.findIndex(
+							(s) => s.attachment_id === session.attachment_id,
+						);
+						const preview = new Set(deletingIds);
+						preview.add(session.attachment_id);
+						const neighbor = findLiveNeighbor(sessions, idx, preview);
+						return neighbor
+							? workspaceSessionHref({
+									project,
+									workspace: workspaceName,
+									kind: neighbor.type,
+									attachmentId: neighbor.attachment_id,
+								})
+							: currentWorkspaceHref;
+					})()
+				: null;
 
 			if (!session.preview && !isLocalOnly) {
 				killSession.mutate(session);
@@ -745,7 +823,11 @@ function WorkspaceShellInner() {
 						</div>
 					)}
 					<div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-						<Outlet />
+						{templateLifecycleOperation ? (
+							<TemplateOperationScreen operation={templateLifecycleOperation} />
+						) : (
+							<Outlet />
+						)}
 					</div>
 				</div>
 				<GitSidebar />

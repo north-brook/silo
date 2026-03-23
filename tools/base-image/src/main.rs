@@ -526,6 +526,7 @@ fn print_share_commands(config: &BaseImageConfig, image_name: &str) {
 mod tests {
     use super::{
         failure_code_from_output, output_contains_marker, BaseImageConfig, DEFAULT_IMAGE_FAMILY,
+        PROVISION_SCRIPT,
     };
 
     #[test]
@@ -564,11 +565,9 @@ mod tests {
 
     #[test]
     fn parse_defaults_to_public_image_access() {
-        let config = BaseImageConfig::parse(vec![
-            "--project".to_string(),
-            "silo-images".to_string(),
-        ])
-        .expect("config should parse");
+        let config =
+            BaseImageConfig::parse(vec!["--project".to_string(), "silo-images".to_string()])
+                .expect("config should parse");
 
         assert_eq!(config.members, vec!["allAuthenticatedUsers".to_string()]);
     }
@@ -597,5 +596,12 @@ mod tests {
             Some(17)
         );
         assert_eq!(failure_code_from_output("all good"), None);
+    }
+
+    #[test]
+    fn provision_script_installs_and_initializes_git_lfs() {
+        assert!(PROVISION_SCRIPT.contains("git-lfs"));
+        assert!(PROVISION_SCRIPT.contains("git lfs install --system"));
+        assert!(PROVISION_SCRIPT.contains("git lfs version"));
     }
 }

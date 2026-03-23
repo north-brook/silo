@@ -3,12 +3,17 @@ import { ChevronRight } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Loader } from "@/shared/ui/loader";
-import { type FileTreeEntry, filesListTree } from "@/workspaces/files/api";
+import {
+	type FileTreeEntry,
+	filesListTree,
+	filesOpenInBrowser,
+	filesPathOpensInBrowser,
+} from "@/workspaces/files/api";
 import { useFileSessions } from "@/workspaces/files/context";
 import { FileIcon } from "@/workspaces/files/icons";
 import { useGitSidebar } from "@/workspaces/git/context";
 import { useWorkspaceRouteParams } from "@/workspaces/routes/params";
-import { fileSessionHref } from "@/workspaces/routes/paths";
+import { browserSessionHref, fileSessionHref } from "@/workspaces/routes/paths";
 import { useWorkspaceSessions } from "@/workspaces/state";
 
 interface TreeNode {
@@ -117,6 +122,17 @@ export function GitFilesTab() {
 						expandedPaths={expandedPaths}
 						node={node}
 						onFileOpen={async (path, persistent) => {
+							if (filesPathOpensInBrowser(path)) {
+								const result = await filesOpenInBrowser(workspace, path);
+								navigate(
+									browserSessionHref({
+										project,
+										workspace,
+										attachmentId: result.attachment_id,
+									}),
+								);
+								return;
+							}
 							const result = await openFileTab({
 								path,
 								persistent,
@@ -152,20 +168,21 @@ function TreeGuideLines({ depth }: { depth: number }) {
 	if (depth === 0) return null;
 	return (
 		<>
-			{Array.from({ length: depth }, (_, i) => (
-				<span
-					key={i}
-					className="absolute top-0 bottom-0 w-px bg-border-light"
-					style={{ left: `${i * 12 + 14}px` }}
-				/>
-			))}
+			{Array.from({ length: depth }, (_, i) => {
+				const left = i * 12 + 14;
+				return (
+					<span
+						key={left}
+						className="absolute top-0 bottom-0 w-px bg-border-light"
+						style={{ left: `${left}px` }}
+					/>
+				);
+			})}
 		</>
 	);
 }
 
-function dirStatusType(
-	status: DirStatus,
-): "added" | "deleted" | "modified" {
+function dirStatusType(status: DirStatus): "added" | "deleted" | "modified" {
 	if (status.hasModified || (status.hasAdded && status.hasDeleted))
 		return "modified";
 	if (status.hasAdded) return "added";
@@ -222,9 +239,7 @@ function TreeRow({
 					className="relative w-full flex items-center gap-1 px-3 py-[3px] text-[11px] text-text hover:bg-btn-hover transition-colors"
 					style={{
 						paddingLeft: `${depth * 12 + 8}px`,
-						...gitRowStyle(
-							folderDiff ? dirStatusType(folderDiff) : null,
-						),
+						...gitRowStyle(folderDiff ? dirStatusType(folderDiff) : null),
 					}}
 				>
 					<TreeGuideLines depth={depth} />

@@ -1,4 +1,5 @@
 import { invoke } from "@/shared/lib/invoke";
+import { filePathOpensInBrowser } from "@/workspaces/files/browser";
 
 export interface FileTreeEntry {
 	path: string;
@@ -20,6 +21,10 @@ export interface FileSaveResult {
 }
 
 export interface FileSessionResult {
+	attachment_id: string;
+}
+
+export interface FileBrowserSessionResult {
 	attachment_id: string;
 }
 
@@ -97,6 +102,20 @@ export function filesOpenSession(
 	path: string,
 ): Promise<FileSessionResult> {
 	return invoke<FileSessionResult>("files_open_session", { workspace, path });
+}
+
+export function filesPathOpensInBrowser(path: string): boolean {
+	return filePathOpensInBrowser(path);
+}
+
+export function filesOpenInBrowser(
+	workspace: string,
+	path: string,
+): Promise<FileBrowserSessionResult> {
+	return invoke<FileBrowserSessionResult>("browser_open_workspace_file", {
+		workspace,
+		path,
+	});
 }
 
 export function filesCloseSession(

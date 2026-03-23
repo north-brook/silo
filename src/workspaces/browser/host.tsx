@@ -71,6 +71,11 @@ export function BrowserSessionHost({
 			viewport: HIDDEN_VIEWPORT,
 			visible: false,
 		});
+		if (lastViewportRef.current === hiddenViewportKey) {
+			return;
+		}
+		const previousViewportKey = lastViewportRef.current;
+		lastViewportRef.current = hiddenViewportKey;
 		void invoke("browser_resize_tab", {
 			workspace: session.workspace,
 			attachmentId: session.attachmentId,
@@ -81,7 +86,6 @@ export function BrowserSessionHost({
 				if (cancelled) {
 					return;
 				}
-				lastViewportRef.current = hiddenViewportKey;
 				console.info("browser host concealed", {
 					workspace: session.workspace,
 					attachmentId: session.attachmentId,
@@ -92,6 +96,9 @@ export function BrowserSessionHost({
 			.catch((error: Error) => {
 				if (cancelled) {
 					return;
+				}
+				if (lastViewportRef.current === hiddenViewportKey) {
+					lastViewportRef.current = previousViewportKey;
 				}
 				onHostStateChangeRef.current({
 					status: "error",

@@ -11,11 +11,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { gitUpdateBranch, gitUpdateTargetBranch } from "@/workspaces/git/api";
 import { invoke } from "@/shared/lib/invoke";
-import {
-	type ListedProject,
-	type TemplateState,
-	saveTemplate,
-} from "@/projects/api";
+import { type ListedProject, saveTemplate } from "@/projects/api";
 import {
 	isTemplateWorkspace,
 	type Workspace,
@@ -24,7 +20,6 @@ import {
 import { useGitSidebar } from "@/workspaces/git/context";
 import { GitSidebarToggle } from "@/workspaces/git/toggle";
 import { GitTopBarActions } from "@/workspaces/git/top-bar-actions";
-import { useTemplateState } from "@/workspaces/state";
 import Image from "@/shared/ui/image";
 import { Loader } from "@/shared/ui/loader";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
@@ -76,9 +71,11 @@ function ProjectsSidebarReopenButton() {
 function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 	const { isOpen: projectsBarOpen } = useProjectsSidebar();
 	const queryClient = useQueryClient();
-	const templateState = useTemplateState(workspace.project);
-	const templateOperation = templateState.data?.operation;
-	const templateBusy = templateOperation?.status === "running";
+	const templateOperation = isTemplateWorkspace(workspace)
+		? (workspace.template_operation ?? null)
+		: null;
+	const templateBusy =
+		templateOperation != null && templateOperation.phase.trim() !== "failed";
 
 	const projects = useQuery({
 		queryKey: ["projects_list_projects"],
@@ -90,23 +87,16 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 
 	const save = useMutation({
 		mutationFn: () => saveTemplate(workspace.project ?? ""),
-		onSuccess: (operation) => {
+		onSuccess: () => {
 			queryClient.invalidateQueries({
 				queryKey: ["workspaces_list_workspaces"],
 			});
 			queryClient.invalidateQueries({
 				queryKey: ["templates_list_templates"],
 			});
-			queryClient.setQueryData<TemplateState | undefined>(
-				["templates_get_state", workspace.project ?? ""],
-				(current) => ({
-					project: workspace.project ?? "",
-					workspace_name: workspace.name,
-					workspace_present: current?.workspace_present ?? true,
-					snapshot_name: current?.snapshot_name ?? null,
-					operation,
-				}),
-			);
+			queryClient.invalidateQueries({
+				queryKey: ["templates_get_state", workspace.project ?? ""],
+			});
 		},
 		onError: (error) => {
 			toast({
@@ -372,7 +362,7 @@ function BranchTopBar({ workspace }: { workspace: Workspace }) {
 				</div>
 				<div data-tauri-drag-region className="h-full flex-1" />
 				<GitTopBarActions />
-			<GitSidebarToggle />
+				<GitSidebarToggle />
 			</div>
 		</header>
 	);

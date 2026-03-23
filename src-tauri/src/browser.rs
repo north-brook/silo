@@ -1,5 +1,9 @@
 use crate::bootstrap;
+use crate::browser_file_server::{
+    workspace_file_display_name_from_url, workspace_file_logical_url, BrowserFileServerManager,
+};
 use crate::browser_loopback::BrowserLoopbackManager;
+use crate::files;
 use crate::router::RouterManager;
 use crate::state::{active_session_metadata_entries, WorkspaceMetadataManager};
 use crate::terminal;
@@ -85,10 +89,11 @@ struct BrowserStateEvent {
     popup_attachment_id: Option<String>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct BrowserManager {
     webviews: Arc<Mutex<HashMap<String, BrowserWebviewState>>>,
     sessions: Arc<Mutex<HashMap<String, WorkspaceSession>>>,
+    file_server: BrowserFileServerManager,
     loopback_router: RouterManager,
 }
 
@@ -100,6 +105,42 @@ pub async fn browser_create_tab(
     url: Option<String>,
 ) -> Result<BrowserCreateResult, String> {
     create_browser_tab(state.inner(), metadata.inner(), workspace, url).await
+}
+
+#[tauri::command]
+pub async fn browser_open_workspace_file(
+    state: State<'_, BrowserManager>,
+    metadata: State<'_, WorkspaceMetadataManager>,
+    workspace: String,
+    path: String,
+) -> Result<BrowserCreateResult, String> {
+    let lookup = files::branch_workspace_lookup(&workspace).await?;
+    let path = files::normalize_repo_relative_path(&path)?;
+    if files::browser_renderable_content_type(&path).is_none() {
+        return Err(format!(
+            "workspace file does not support browser rendering: {path}"
+        ));
+    }
+
+    let logical_url = workspace_file_logical_url(&workspace, &path)?;
+    if let Some(existing) = find_browser_session_by_logical_url(
+        state.inner(),
+        &workspace,
+        lookup.workspace.browsers(),
+        &logical_url,
+    )? {
+        return Ok(BrowserCreateResult {
+            attachment_id: existing.attachment_id,
+        });
+    }
+
+    create_browser_tab(
+        state.inner(),
+        metadata.inner(),
+        workspace,
+        Some(logical_url),
+    )
+    .await
 }
 
 async fn create_browser_tab(
@@ -263,6 +304,7 @@ pub fn browser_kill_tab(
         &workspace,
         Some((BROWSER_KIND, &attachment_id)),
         cleared_active_session,
+        None,
     );
 
     let manager = state.inner().clone();
@@ -349,10 +391,7 @@ pub async fn browser_report_page_state(
     title: Option<String>,
     favicon_url: Option<String>,
 ) -> Result<BrowserMetadataResult, String> {
-    let logical_url = state
-        .loopback_router
-        .logical_url_for_reported_url(&workspace, &url)
-        .unwrap_or_else(|| url.clone());
+    let logical_url = state.logical_url_for_reported_url(&workspace, &url);
     let normalized = normalize_browser_url(Some(&logical_url))?;
     let existing = find_existing_browser_session(state.inner(), &workspace, &attachment_id).await;
     let merged_title = preserve_better_browser_title(
@@ -497,10 +536,14 @@ pub async fn browser_toggle_devtools(
 }
 
 impl BrowserManager {
-    pub(crate) fn new(loopback_router: RouterManager) -> Self {
+    pub(crate) fn new(
+        loopback_router: RouterManager,
+        file_server: BrowserFileServerManager,
+    ) -> Self {
         Self {
             webviews: Arc::default(),
             sessions: Arc::default(),
+            file_server,
             loopback_router,
         }
     }
@@ -576,6 +619,16 @@ impl BrowserManager {
         }
 
         if let Some(resolved_url) = self
+            .file_server
+            .rewrite_workspace_file_url(&normalized.logical_url)?
+        {
+            return Ok(BrowserUrlTarget {
+                logical_url: normalized.logical_url,
+                resolved_url,
+            });
+        }
+
+        if let Some(resolved_url) = self
             .loopback_router
             .rewrite_loopback_url(lookup, &normalized.logical_url)?
         {
@@ -586,6 +639,16 @@ impl BrowserManager {
         }
 
         Ok(normalized)
+    }
+
+    fn logical_url_for_reported_url(&self, workspace: &str, resolved_url: &str) -> String {
+        self.file_server
+            .logical_url_for_resolved_url(resolved_url)
+            .or_else(|| {
+                self.loopback_router
+                    .logical_url_for_reported_url(workspace, resolved_url)
+            })
+            .unwrap_or_else(|| logical_browser_url(resolved_url))
     }
 
     fn ensure_webview(
@@ -750,6 +813,12 @@ impl BrowserManager {
         viewport: BrowserViewport,
         visible: bool,
     ) -> Result<bool, String> {
+        if let Some(state) = self.current_webview_state(workspace, attachment_id)? {
+            if browser_webview_state_matches_request(&state, viewport, visible) {
+                return Ok(true);
+            }
+        }
+
         let label = browser_webview_label(workspace, attachment_id);
         let Some(webview) = app.get_webview(&label) else {
             return Ok(false);
@@ -768,6 +837,12 @@ impl BrowserManager {
         workspace: &str,
         attachment_id: &str,
     ) -> Result<bool, String> {
+        if let Some(state) = self.current_webview_state(workspace, attachment_id)? {
+            if browser_webview_state_is_hidden(&state) {
+                return Ok(true);
+            }
+        }
+
         let label = browser_webview_label(workspace, attachment_id);
         let Some(webview) = app.get_webview(&label) else {
             return Ok(false);
@@ -897,6 +972,18 @@ fn browser_session_cache_key(workspace: &str, attachment_id: &str) -> String {
     format!("{workspace}:{attachment_id}")
 }
 
+fn browser_webview_state_matches_request(
+    state: &BrowserWebviewState,
+    viewport: BrowserViewport,
+    visible: bool,
+) -> bool {
+    state.viewport == viewport && state.visible == visible
+}
+
+fn browser_webview_state_is_hidden(state: &BrowserWebviewState) -> bool {
+    !state.visible
+}
+
 fn set_webview_viewport(
     webview: &Webview<AppRuntime>,
     viewport: BrowserViewport,
@@ -967,10 +1054,7 @@ fn handle_page_load(
         let _ = webview.eval("window.__SILO_BROWSER_SYNC__ && window.__SILO_BROWSER_SYNC__();");
     }
 
-    let logical_url = manager
-        .loopback_router
-        .logical_url_for_reported_url(workspace, &resolved_url)
-        .unwrap_or_else(|| logical_browser_url(&resolved_url));
+    let logical_url = manager.logical_url_for_reported_url(workspace, &resolved_url);
     let workspace = workspace.to_string();
     let attachment_id = attachment_id.to_string();
     let app_handle = app.clone();
@@ -1018,10 +1102,7 @@ fn handle_title_changed(
         .ok()
         .flatten()
         .unwrap_or_else(|| BROWSER_DEFAULT_URL.to_string());
-    let logical_url = manager
-        .loopback_router
-        .logical_url_for_reported_url(workspace, &resolved_url)
-        .unwrap_or_else(|| logical_browser_url(&resolved_url));
+    let logical_url = manager.logical_url_for_reported_url(workspace, &resolved_url);
     let workspace = workspace.to_string();
     let attachment_id = attachment_id.to_string();
     let title = title.trim().to_string();
@@ -1281,6 +1362,9 @@ fn browser_title_for_url(url: &str) -> String {
     if url == BROWSER_DEFAULT_URL {
         return "browser".to_string();
     }
+    if let Some(name) = workspace_file_display_name_from_url(url) {
+        return name;
+    }
     if let Ok(parsed) = Url::parse(url) {
         if let Some(host) = parsed.host_str() {
             return host.to_string();
@@ -1290,6 +1374,9 @@ fn browser_title_for_url(url: &str) -> String {
 }
 
 fn browser_favicon_for_url(url: &str) -> Option<String> {
+    if workspace_file_display_name_from_url(url).is_some() {
+        return None;
+    }
     let parsed = Url::parse(url).ok()?;
     let host = parsed.host_str()?;
     let scheme = parsed.scheme();
@@ -1374,6 +1461,32 @@ async fn find_existing_browser_session(
                 .find(|session| session.attachment_id == attachment_id)
                 .cloned()
         })
+}
+
+fn find_browser_session_by_logical_url(
+    manager: &BrowserManager,
+    workspace: &str,
+    persisted_sessions: &[WorkspaceSession],
+    logical_url: &str,
+) -> Result<Option<WorkspaceSession>, String> {
+    if let Some(session) = manager
+        .cache_sessions_for_workspace(workspace)?
+        .into_iter()
+        .find(|session| {
+            session.logical_url.as_deref() == Some(logical_url)
+                || session.url.as_deref() == Some(logical_url)
+        })
+    {
+        return Ok(Some(session));
+    }
+
+    Ok(persisted_sessions
+        .iter()
+        .find(|session| {
+            session.logical_url.as_deref() == Some(logical_url)
+                || session.url.as_deref() == Some(logical_url)
+        })
+        .cloned())
 }
 
 struct BrowserPageMetadata {
@@ -1630,5 +1743,41 @@ mod tests {
                 "popupAttachmentId": "browser-2",
             })
         );
+    }
+
+    #[test]
+    fn browser_webview_state_match_requires_same_viewport_and_visibility() {
+        let state = BrowserWebviewState {
+            resolved_url: "https://example.com".to_string(),
+            viewport: BrowserViewport {
+                x: 10.0,
+                y: 20.0,
+                width: 800.0,
+                height: 600.0,
+            },
+            visible: false,
+        };
+
+        assert!(browser_webview_state_matches_request(
+            &state,
+            state.viewport,
+            false,
+        ));
+        assert!(!browser_webview_state_matches_request(
+            &state,
+            state.viewport,
+            true,
+        ));
+        assert!(!browser_webview_state_matches_request(
+            &state,
+            BrowserViewport {
+                x: 10.0,
+                y: 20.0,
+                width: 1024.0,
+                height: 600.0,
+            },
+            false,
+        ));
+        assert!(browser_webview_state_is_hidden(&state));
     }
 }

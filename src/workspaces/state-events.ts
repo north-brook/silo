@@ -1,5 +1,7 @@
 import {
 	isTemplateWorkspace,
+	type WorkspaceLifecycle,
+	type WorkspaceTemplateOperationState,
 	type Workspace,
 	type WorkspaceSession,
 } from "@/workspaces/api";
@@ -9,6 +11,8 @@ export interface WorkspaceStateEventPayload {
 	clearedActiveSession: boolean;
 	removedSessionAttachmentId?: string | null;
 	removedSessionKind?: string | null;
+	templateOperation?: WorkspaceTemplateOperationState | null;
+	lifecycle?: WorkspaceLifecycle | null;
 }
 
 export function applyWorkspaceStateEventToWorkspace(
@@ -21,15 +25,40 @@ export function applyWorkspaceStateEventToWorkspace(
 
 	const nextActiveSession = event.clearedActiveSession
 		? null
-		: current.active_session ?? null;
+		: (current.active_session ?? null);
+	const hasTemplateOperationUpdate = event.templateOperation !== undefined;
+	const nextTemplateOperation =
+		hasTemplateOperationUpdate && isTemplateWorkspace(current)
+			? (event.templateOperation ?? null)
+			: isTemplateWorkspace(current)
+				? (current.template_operation ?? null)
+				: null;
+	const hasLifecycleUpdate = event.lifecycle !== undefined;
+	const nextLifecycle =
+		hasLifecycleUpdate && event.lifecycle ? event.lifecycle : current.lifecycle;
 
 	if (!event.removedSessionAttachmentId || !event.removedSessionKind) {
-		if (nextActiveSession === current.active_session) {
+		if (
+			nextActiveSession === current.active_session &&
+			(!hasLifecycleUpdate || nextLifecycle === current.lifecycle) &&
+			(!isTemplateWorkspace(current) ||
+				!hasTemplateOperationUpdate ||
+				nextTemplateOperation === current.template_operation)
+		) {
 			return current;
+		}
+		if (isTemplateWorkspace(current)) {
+			return {
+				...current,
+				active_session: nextActiveSession,
+				lifecycle: nextLifecycle,
+				template_operation: nextTemplateOperation,
+			};
 		}
 		return {
 			...current,
 			active_session: nextActiveSession,
+			lifecycle: nextLifecycle,
 		};
 	}
 
@@ -57,7 +86,11 @@ export function applyWorkspaceStateEventToWorkspace(
 		nextTerminals.length === current.terminals.length &&
 		nextBrowsers.length === current.browsers.length &&
 		nextFiles.length === current.files.length &&
-		nextActiveSession === current.active_session
+		nextActiveSession === current.active_session &&
+		(!hasLifecycleUpdate || nextLifecycle === current.lifecycle) &&
+		(!isTemplateWorkspace(current) ||
+			!hasTemplateOperationUpdate ||
+			nextTemplateOperation === current.template_operation)
 	) {
 		return current;
 	}
@@ -69,6 +102,8 @@ export function applyWorkspaceStateEventToWorkspace(
 			terminals: nextTerminals,
 			browsers: nextBrowsers,
 			files: nextFiles,
+			lifecycle: nextLifecycle,
+			template_operation: nextTemplateOperation,
 		};
 	}
 
@@ -78,6 +113,7 @@ export function applyWorkspaceStateEventToWorkspace(
 		terminals: nextTerminals,
 		browsers: nextBrowsers,
 		files: nextFiles,
+		lifecycle: nextLifecycle,
 		unread: nextUnread,
 		working: nextWorking,
 	};
