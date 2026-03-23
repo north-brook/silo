@@ -9,23 +9,23 @@ import {
 	Save,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { gitUpdateBranch, gitUpdateTargetBranch } from "@/workspaces/git/api";
-import { invoke } from "@/shared/lib/invoke";
 import { type ListedProject, saveTemplate } from "@/projects/api";
+import { useProjectsSidebar } from "@/projects/sidebar";
+import { invoke } from "@/shared/lib/invoke";
+import Image from "@/shared/ui/image";
+import { Loader } from "@/shared/ui/loader";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import { toast } from "@/shared/ui/toaster";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import {
 	isTemplateWorkspace,
 	type Workspace,
 	workspaceIsReady,
 } from "@/workspaces/api";
+import { gitUpdateBranch, gitUpdateTargetBranch } from "@/workspaces/git/api";
 import { useGitSidebar } from "@/workspaces/git/context";
 import { GitSidebarToggle } from "@/workspaces/git/toggle";
 import { GitTopBarActions } from "@/workspaces/git/top-bar-actions";
-import Image from "@/shared/ui/image";
-import { Loader } from "@/shared/ui/loader";
-import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
-import { useProjectsSidebar } from "@/projects/sidebar";
-import { toast } from "@/shared/ui/toaster";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 export function TopBar({ workspace }: { workspace: Workspace }) {
 	if (isTemplateWorkspace(workspace)) {
@@ -152,9 +152,9 @@ function TemplateTopBar({ workspace }: { workspace: Workspace }) {
 
 function BranchTopBar({ workspace }: { workspace: Workspace }) {
 	const { isOpen: projectsBarOpen } = useProjectsSidebar();
-	const { prStatus } = useGitSidebar();
+	const { prSummary } = useGitSidebar();
 	const queryClient = useQueryClient();
-	const hasPr = prStatus?.status === "open";
+	const hasPr = prSummary?.status === "open";
 	const branchWorkspace = isTemplateWorkspace(workspace) ? null : workspace;
 
 	const [editingBranch, setEditingBranch] = useState(false);

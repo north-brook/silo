@@ -75,15 +75,26 @@ export interface Check {
 	link: string | null;
 	started_at: string | null;
 	completed_at: string | null;
-	log_excerpt: string;
-	log_truncated: boolean;
-	log_available: boolean;
 }
 
-export interface PullRequestObservation {
+export interface PullRequestChecksSummary {
+	total: number;
+	has_pending: boolean;
+	has_failing: boolean;
+	has_cancelled: boolean;
+}
+
+export interface PullRequestSummary {
+	status: "open" | "closed" | "merged";
+	number: number;
+	url: string;
+	head_ref_oid: string;
+	checks: PullRequestChecksSummary | null;
+}
+
+export interface PullRequestDetails {
 	title: string | null;
 	body: string | null;
-	deployments: Deployment[];
 	checks: Check[];
 }
 
@@ -121,15 +132,39 @@ export function gitPrStatus(
 	);
 }
 
-export function gitPrObserve(
+export function gitPrSummary(
 	workspace: string,
-): Promise<PullRequestObservation | null> {
-	return invoke<PullRequestObservation | null>(
-		"git_pr_observe",
+): Promise<PullRequestSummary | null> {
+	return invoke<PullRequestSummary | null>(
+		"git_pr_summary",
 		{ workspace },
 		{
 			log: "state_changes_only",
-			key: `poll:git_pr_observe:${workspace}`,
+			key: `poll:git_pr_summary:${workspace}`,
+		},
+	);
+}
+
+export function gitPrDetails(
+	workspace: string,
+): Promise<PullRequestDetails | null> {
+	return invoke<PullRequestDetails | null>(
+		"git_pr_details",
+		{ workspace },
+		{
+			log: "state_changes_only",
+			key: `poll:git_pr_details:${workspace}`,
+		},
+	);
+}
+
+export function gitPrDeployments(workspace: string): Promise<Deployment[]> {
+	return invoke<Deployment[]>(
+		"git_pr_deployments",
+		{ workspace },
+		{
+			log: "state_changes_only",
+			key: `poll:git_pr_deployments:${workspace}`,
 		},
 	);
 }

@@ -1,6 +1,6 @@
-import { useCallback, useMemo, useState } from "react";
-import { ChevronsDownUp, ChevronsUpDown, ExternalLink } from "lucide-react";
 import { PatchDiff } from "@pierre/diffs/react";
+import { ChevronsDownUp, ChevronsUpDown, ExternalLink } from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Loader } from "@/shared/ui/loader";
 import { useFileSessions } from "@/workspaces/files/context";
@@ -66,7 +66,7 @@ export function GitDiffTab() {
 	if (!diff || !hasDiffFiles) {
 		return (
 			<div className="flex h-full items-center justify-center px-6 text-center">
-				<p className="text-sm text-text-placeholder">No changes to show.</p>
+				<p className="text-[11px] text-text-muted">No changes yet</p>
 			</div>
 		);
 	}
@@ -204,8 +204,11 @@ function DiffFileView({
 	}
 
 	return (
+		// biome-ignore lint/a11y/useSemanticElements: PatchDiff renders nested interactive controls, so this wrapper cannot be a button element.
 		<div
 			className="pierre-diff-container rounded border border-border-light"
+			role="button"
+			tabIndex={0}
 			onClick={() =>
 				setLocalCollapsed({
 					value: !collapsed,

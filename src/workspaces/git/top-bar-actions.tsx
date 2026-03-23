@@ -7,22 +7,9 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import type { CheckState } from "@/workspaces/git/api";
-import {
-	gitCreatePr,
-	gitMergePr,
-	gitPush,
-	gitTreeDirty,
-} from "@/workspaces/git/api";
-import { CheckStateIcon, GitChecksStatusIndicator } from "@/workspaces/git/checks";
-import { useGitSidebar } from "@/workspaces/git/context";
 import { invoke } from "@/shared/lib/invoke";
 import { shortcutEvents } from "@/shared/lib/shortcuts";
 import { useShortcut } from "@/shared/lib/use-shortcut";
-import {
-	type SessionRouteState,
-	workspaceSessionHref,
-} from "@/workspaces/routes/paths";
 import {
 	Dialog,
 	DialogClose,
@@ -33,6 +20,22 @@ import {
 import { Loader } from "@/shared/ui/loader";
 import { toast } from "@/shared/ui/toaster";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import {
+	gitCreatePr,
+	gitMergePr,
+	gitPrDetails,
+	gitPush,
+	gitTreeDirty,
+} from "@/workspaces/git/api";
+import {
+	CheckStateIcon,
+	GitChecksStatusIndicator,
+} from "@/workspaces/git/checks";
+import { useGitSidebar } from "@/workspaces/git/context";
+import {
+	type SessionRouteState,
+	workspaceSessionHref,
+} from "@/workspaces/routes/paths";
 import { useWorkspaceReady } from "@/workspaces/state";
 
 export function GitTopBarActions() {
@@ -44,16 +47,14 @@ export function GitTopBarActions() {
 		diff,
 		hasChanges,
 		openTab,
-		prStatus,
-		prStatusLoading,
-		observation,
-		observationLoading,
+		prSummary,
+		prSummaryLoading,
 	} = useGitSidebar();
 	const isReady = useWorkspaceReady();
 	const navigate = useNavigate();
 	const queryClient = useQueryClient();
 
-	const hasPr = prStatus?.status === "open";
+	const hasPr = prSummary?.status === "open";
 
 	const treeDirty = useQuery({
 		queryKey: ["git_tree_dirty", workspace],
@@ -65,8 +66,15 @@ export function GitTopBarActions() {
 	const createPr = useMutation({
 		mutationFn: () => gitCreatePr(workspace),
 		onSuccess: (result) => {
-			queryClient.invalidateQueries({ queryKey: ["git_pr_status", workspace] });
-			queryClient.invalidateQueries({ queryKey: ["git_pr_observe", workspace] });
+			queryClient.invalidateQueries({
+				queryKey: ["git_pr_summary", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["git_pr_details", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["git_pr_deployments", workspace],
+			});
 			queryClient.invalidateQueries({
 				queryKey: ["terminal_list_terminals", workspace],
 			});
@@ -96,8 +104,18 @@ export function GitTopBarActions() {
 		mutationFn: () => gitPush(workspace),
 		onSuccess: (result) => {
 			queryClient.invalidateQueries({ queryKey: ["git_diff", workspace] });
-			queryClient.invalidateQueries({ queryKey: ["git_tree_dirty", workspace] });
-			queryClient.invalidateQueries({ queryKey: ["git_pr_observe", workspace] });
+			queryClient.invalidateQueries({
+				queryKey: ["git_tree_dirty", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["git_pr_summary", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["git_pr_details", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["git_pr_deployments", workspace],
+			});
 			queryClient.invalidateQueries({
 				queryKey: ["terminal_list_terminals", workspace],
 			});
@@ -142,43 +160,33 @@ export function GitTopBarActions() {
 		},
 	});
 
+	const [mergeConfirmOpen, setMergeConfirmOpen] = useState(false);
 	const dirty = treeDirty.data ?? true;
-	const isLoading =
-		prStatusLoading || (hasPr && treeDirty.isLoading);
+	const isLoading = prSummaryLoading || (hasPr && treeDirty.isLoading);
 
-	const showCreatePr = !isLoading && !prStatus && hasChanges;
+	const showCreatePr = !isLoading && !prSummary && hasChanges;
 	const showMerge = !isLoading && hasPr && !dirty;
 	const showPush = !isLoading && hasPr && dirty;
+	const mergeDetailsQuery = useQuery({
+		queryKey: ["git_pr_details", workspace, prSummary?.head_ref_oid ?? null],
+		queryFn: () => gitPrDetails(workspace),
+		enabled: !!workspace && mergeConfirmOpen && showMerge,
+		refetchInterval: 15000,
+	});
 
-	const checks = observation?.checks ?? [];
-	const pendingCheckStates: CheckState[] = [
-		"in_progress",
-		"pending",
-		"queued",
-		"waiting",
-		"requested",
-	];
-	const failCheckStates: CheckState[] = [
-		"failure",
-		"startup_failure",
-		"timed_out",
-	];
-	const checksRunning = checks.some((check) =>
-		pendingCheckStates.includes(check.state),
-	);
-	const checksFailing = checks.some((check) =>
-		failCheckStates.includes(check.state),
-	);
-	const mergeColor = checksRunning
-		? "bg-btn text-text hover:bg-btn-hover"
-		: checksFailing
-			? "bg-yellow-600 text-white hover:bg-yellow-500"
-			: "bg-green-600 text-white hover:bg-green-500";
-
-	const [mergeConfirmOpen, setMergeConfirmOpen] = useState(false);
+	const checks = mergeDetailsQuery.data?.checks ?? [];
+	const checksKnown = prSummary?.checks != null;
+	const checksRunning = prSummary?.checks?.has_pending ?? false;
+	const checksFailing = prSummary?.checks?.has_failing ?? false;
+	const mergeColor =
+		!checksKnown || checksRunning
+			? "bg-btn text-text hover:bg-btn-hover"
+			: checksFailing
+				? "bg-yellow-600 text-white hover:bg-yellow-500"
+				: "bg-green-600 text-white hover:bg-green-500";
 
 	const handleMerge = () => {
-		if (checksRunning || checksFailing) {
+		if (!checksKnown || checksRunning || checksFailing) {
 			setMergeConfirmOpen(true);
 			return;
 		}
@@ -266,8 +274,8 @@ export function GitTopBarActions() {
 										className="flex items-center justify-center h-5 px-1.5 rounded text-text-muted hover:bg-btn-hover hover:text-text-bright transition-colors"
 									>
 										<GitChecksStatusIndicator
-											observation={observation}
-											isLoading={observationLoading}
+											checks={prSummary?.checks ?? null}
+											isLoading={prSummaryLoading}
 										/>
 									</button>
 								</TooltipTrigger>
@@ -359,9 +367,11 @@ export function GitTopBarActions() {
 				>
 					<DialogHeader className="flex flex-row items-center justify-between">
 						<DialogTitle>
-							{checksFailing
-								? "Merge with failing checks?"
-								: "Merge with running checks?"}
+							{!checksKnown
+								? "Merge without loaded checks?"
+								: checksFailing
+									? "Merge with failing checks?"
+									: "Merge with running checks?"}
 						</DialogTitle>
 						<DialogClose className="text-text-muted hover:text-text transition-colors">
 							<X size={14} />
@@ -369,17 +379,28 @@ export function GitTopBarActions() {
 					</DialogHeader>
 
 					<div className="mt-3 flex flex-col gap-0.5">
-						{[...checks]
-							.sort((left, right) => left.name.localeCompare(right.name))
-							.map((check) => (
-								<div
-									key={check.id}
-									className="flex items-center gap-2 px-1 py-1 text-[11px]"
-								>
-									<CheckStateIcon state={check.state} />
-									<span className="text-text truncate">{check.name}</span>
-								</div>
-							))}
+						{mergeDetailsQuery.isLoading ? (
+							<div className="flex items-center justify-center py-4">
+								<Loader />
+							</div>
+						) : mergeDetailsQuery.isError ? (
+							<p className="py-2 text-[11px] text-text-muted">
+								Failed to load checks.{" "}
+								{queryErrorMessage(mergeDetailsQuery.error)}
+							</p>
+						) : (
+							[...checks]
+								.sort((left, right) => left.name.localeCompare(right.name))
+								.map((check) => (
+									<div
+										key={check.id}
+										className="flex items-center gap-2 px-1 py-1 text-[11px]"
+									>
+										<CheckStateIcon state={check.state} />
+										<span className="text-text truncate">{check.name}</span>
+									</div>
+								))
+						)}
 					</div>
 
 					<button
@@ -412,4 +433,8 @@ function HotkeyHint({ keys }: { keys: string[] }) {
 			))}
 		</span>
 	);
+}
+
+function queryErrorMessage(error: unknown): string {
+	return error instanceof Error && error.message ? error.message : "";
 }

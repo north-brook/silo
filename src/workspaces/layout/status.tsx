@@ -1,7 +1,10 @@
 import { Box, GitBranch, GitMerge, GitPullRequest } from "lucide-react";
 import { Loader } from "@/shared/ui/loader";
-import { type WorkspaceLifecycle } from "@/workspaces/api";
-import type { CheckState, PullRequestObservation, PullRequestStatus } from "@/workspaces/git/api";
+import type { WorkspaceLifecycle } from "@/workspaces/api";
+import type {
+	PullRequestChecksSummary,
+	PullRequestSummary,
+} from "@/workspaces/git/api";
 
 interface WorkspaceStatus {
 	status: string;
@@ -12,30 +15,16 @@ interface WorkspaceStatus {
 	optimisticStarting?: boolean;
 	optimisticStopping?: boolean;
 	optimisticSuspending?: boolean;
-	prStatus?: PullRequestStatus | null;
-	observation?: PullRequestObservation | null;
+	prSummary?: PullRequestSummary | null;
 	dirty?: boolean;
 }
 
-const failStates: CheckState[] = [
-	"failure",
-	"startup_failure",
-	"timed_out",
-	"cancelled",
-];
-const pendingStates: CheckState[] = [
-	"in_progress",
-	"pending",
-	"queued",
-	"waiting",
-	"requested",
-];
-
-function checksColor(checks: { state: CheckState }[]): string | null {
-	if (checks.length === 0) return null;
-	if (checks.some((c) => failStates.includes(c.state))) return "text-red-400";
-	if (checks.some((c) => pendingStates.includes(c.state)))
-		return "text-yellow-400";
+function checksColor(
+	checks: PullRequestChecksSummary | null | undefined,
+): string | null {
+	if (!checks || checks.total === 0) return null;
+	if (checks.has_failing || checks.has_cancelled) return "text-red-400";
+	if (checks.has_pending) return "text-yellow-400";
 	return "text-emerald-400";
 }
 
@@ -70,23 +59,22 @@ export function WorkspaceIndicator({
 	// Suspended: show yellow tint, keep PR-aware icon shape
 	if (isSuspended) {
 		const Icon =
-			workspace.prStatus?.status === "merged"
+			workspace.prSummary?.status === "merged"
 				? GitMerge
-				: workspace.prStatus?.status === "open"
+				: workspace.prSummary?.status === "open"
 					? GitPullRequest
 					: GitBranch;
 		return <Icon size={12} className="shrink-0 text-yellow-400" />;
 	}
 
 	// Determine icon shape from PR lifecycle
-	if (workspace.prStatus?.status === "merged")
+	if (workspace.prSummary?.status === "merged")
 		return <GitMerge size={12} className="shrink-0 text-text-muted" />;
 
-	if (workspace.prStatus?.status === "open") {
-		const checks = workspace.observation?.checks ?? [];
+	if (workspace.prSummary?.status === "open") {
 		// Priority: failing > dirty > pending > passing > default
 		let color = "text-text-muted";
-		const checkColor = checksColor(checks);
+		const checkColor = checksColor(workspace.prSummary.checks);
 		if (checkColor === "text-red-400") color = "text-red-400";
 		else if (workspace.dirty) color = "text-blue-400";
 		else if (checkColor) color = checkColor;
@@ -120,8 +108,8 @@ export function workspaceStatusLabel(workspace: WorkspaceStatus): string {
 				return "Waiting for SSH...";
 			case "bootstrapping":
 				return "Preparing...";
-				case "waiting_for_agent":
-					return "Starting services...";
+			case "waiting_for_agent":
+				return "Starting services...";
 			case "failed":
 				return "Startup failed";
 			default:

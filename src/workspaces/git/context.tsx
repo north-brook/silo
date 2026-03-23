@@ -6,10 +6,8 @@ import { isTemplateWorkspace, workspaceIsReady } from "@/workspaces/api";
 import {
 	type Diff,
 	gitDiff,
-	gitPrObserve,
-	gitPrStatus,
-	type PullRequestObservation,
-	type PullRequestStatus,
+	gitPrSummary,
+	type PullRequestSummary,
 } from "@/workspaces/git/api";
 import { useWorkspaceProject, useWorkspaceState } from "@/workspaces/state";
 
@@ -26,10 +24,8 @@ interface GitSidebarContextValue {
 	workspace: string;
 	project: string;
 	isInBranchWorkspace: boolean;
-	prStatus: PullRequestStatus | null;
-	prStatusLoading: boolean;
-	observation: PullRequestObservation | null;
-	observationLoading: boolean;
+	prSummary: PullRequestSummary | null;
+	prSummaryLoading: boolean;
 }
 
 const GitSidebarContext = createContext<GitSidebarContextValue>({
@@ -43,10 +39,8 @@ const GitSidebarContext = createContext<GitSidebarContextValue>({
 	workspace: "",
 	project: "",
 	isInBranchWorkspace: false,
-	prStatus: null,
-	prStatusLoading: false,
-	observation: null,
-	observationLoading: false,
+	prSummary: null,
+	prSummaryLoading: false,
 });
 
 export function useGitSidebar() {
@@ -74,21 +68,14 @@ export function GitSidebarProvider({ children }: { children: ReactNode }) {
 		(diff.data?.overview.deletions ?? 0) > 0 ||
 		(diff.data?.overview.files_changed ?? 0) > 0;
 
-	const prStatusQuery = useQuery({
-		queryKey: ["git_pr_status", workspaceName],
-		queryFn: () => gitPrStatus(workspaceName),
+	const prSummaryQuery = useQuery({
+		queryKey: ["git_pr_summary", workspaceName],
+		queryFn: () => gitPrSummary(workspaceName),
 		enabled: isReadyBranchWorkspace,
 		refetchInterval: 10000,
 	});
 
-	const hasPr = prStatusQuery.data?.status === "open";
-
-	const observationQuery = useQuery({
-		queryKey: ["git_pr_observe", workspaceName],
-		queryFn: () => gitPrObserve(workspaceName),
-		enabled: isReadyBranchWorkspace && hasPr,
-		refetchInterval: 15000,
-	});
+	const hasPr = prSummaryQuery.data?.status === "open";
 
 	const [isOpen, setIsOpen] = useState(false);
 	const [activeTab, setActiveTab] = useState<GitSidebarTab>("diff");
@@ -175,10 +162,8 @@ export function GitSidebarProvider({ children }: { children: ReactNode }) {
 				workspace: workspaceName,
 				project,
 				isInBranchWorkspace,
-				prStatus: prStatusQuery.data ?? null,
-				prStatusLoading: prStatusQuery.isLoading,
-				observation: observationQuery.data ?? null,
-				observationLoading: observationQuery.isLoading,
+				prSummary: prSummaryQuery.data ?? null,
+				prSummaryLoading: prSummaryQuery.isLoading,
 			}}
 		>
 			{children}

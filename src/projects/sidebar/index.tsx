@@ -23,33 +23,33 @@ import {
 	useState,
 } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { invoke } from "@/shared/lib/invoke";
 import {
 	deleteTemplate,
 	type ListedProject,
 	type SnapshotTemplate,
-	type TemplateState,
 	saveTemplate,
+	type TemplateState,
 } from "@/projects/api";
+import { useNewWorkspace } from "@/projects/sidebar/new-workspace";
+import { useOpenProject } from "@/projects/sidebar/open-project";
+import { invoke } from "@/shared/lib/invoke";
 import { shortcutEvents } from "@/shared/lib/shortcuts";
 import { useShortcut } from "@/shared/lib/use-shortcut";
+import { LogoIcon } from "@/shared/ui/icons/logo";
+import Image from "@/shared/ui/image";
+import { Loader } from "@/shared/ui/loader";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import { toast } from "@/shared/ui/toaster";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import {
 	createWorkspace as createWorkspaceCommand,
 	isTemplateWorkspace,
 	type Workspace,
-	workspaceLabel,
 	workspaceIsReady,
+	workspaceLabel,
 } from "@/workspaces/api";
-import { LogoIcon } from "@/shared/ui/icons/logo";
-import Image from "@/shared/ui/image";
-import { Loader } from "@/shared/ui/loader";
-import { useNewWorkspace } from "@/projects/sidebar/new-workspace";
-import { useOpenProject } from "@/projects/sidebar/open-project";
-import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
-import { toast } from "@/shared/ui/toaster";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { gitPrSummary, gitTreeDirty } from "@/workspaces/git/api";
 import { WorkspaceIndicator } from "@/workspaces/layout/status";
-import { gitPrStatus, gitPrObserve, gitTreeDirty } from "@/workspaces/git/api";
 import {
 	type WorkspaceRouteState,
 	workspaceHref,
@@ -531,20 +531,11 @@ function WorkspaceRow({
 	const isReadyBranch =
 		!isTemplate && isRunning && workspace.lifecycle.phase === "ready";
 
-	const prStatusQuery = useQuery({
-		queryKey: ["git_pr_status", workspace.name],
-		queryFn: () => gitPrStatus(workspace.name),
+	const prSummaryQuery = useQuery({
+		queryKey: ["git_pr_summary", workspace.name],
+		queryFn: () => gitPrSummary(workspace.name),
 		enabled: isReadyBranch,
 		refetchInterval: 10000,
-	});
-
-	const hasPr = prStatusQuery.data?.status === "open";
-
-	const observationQuery = useQuery({
-		queryKey: ["git_pr_observe", workspace.name],
-		queryFn: () => gitPrObserve(workspace.name),
-		enabled: isReadyBranch && hasPr,
-		refetchInterval: 15000,
 	});
 
 	const dirtyQuery = useQuery({
@@ -600,8 +591,7 @@ function WorkspaceRow({
 						optimisticStarting,
 						optimisticStopping,
 						optimisticSuspending,
-						prStatus: prStatusQuery.data ?? null,
-						observation: observationQuery.data ?? null,
+						prSummary: prSummaryQuery.data ?? null,
 						dirty: dirtyQuery.data ?? false,
 					}}
 				/>
@@ -620,10 +610,11 @@ function WorkspaceRow({
 							type="button"
 							onClick={(e) => e.stopPropagation()}
 							className={`group/action shrink-0 ml-auto p-1 -mr-1 w-5 h-5 flex items-center justify-center text-text-placeholder hover:text-text-bright transition-opacity ${
-								(isRunning &&
-									!isTemplate &&
-									(workspace.working || workspace.unread)) ||
-								(isSuspended && !isTemplate)
+								(
+									isRunning &&
+										!isTemplate &&
+										(workspace.working || workspace.unread)
+								) || (isSuspended && !isTemplate)
 									? ""
 									: "opacity-0 group-hover:opacity-100"
 							}`}
@@ -787,12 +778,12 @@ function BarFooter() {
 				type="button"
 				onClick={() => openProject.open()}
 				disabled={openProject.isPending}
-				className="flex items-center gap-2 w-full px-3 py-2.5 text-xs text-text-muted hover:bg-btn-hover hover:text-text-bright transition-colors disabled:opacity-50"
+				className="flex items-center gap-1.5 w-full px-3 py-2.5 text-xs text-text-muted hover:bg-btn-hover hover:text-text-bright transition-colors disabled:opacity-50"
 			>
 				{openProject.isPending ? (
 					<Loader className="text-text-muted" />
 				) : (
-					<FolderOpen size={12} />
+					<FolderOpen size={16} />
 				)}
 				Open Project
 			</button>
@@ -1012,8 +1003,8 @@ export function ProjectsSidebar() {
 				}}
 				className={`group flex items-center w-full px-3 py-2.5 text-xs transition-colors cursor-pointer ${isHome ? "bg-btn-hover text-text-bright" : "text-text hover:bg-btn-hover hover:text-text-bright"}`}
 			>
-				<span className="flex items-center gap-2 min-w-0 flex-1">
-					<LogoIcon height={12} />
+				<span className="flex items-center gap-1.5 min-w-0 flex-1">
+					<LogoIcon height={16} />
 					Dashboard
 				</span>
 				{metaKeyHeld ? (
