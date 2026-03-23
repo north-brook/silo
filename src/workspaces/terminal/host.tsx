@@ -579,7 +579,7 @@ export function TerminalSessionHost({
 			theme: THEME,
 			fontFamily:
 				'"SF Mono", "Fira Code", "JetBrains Mono", "Cascadia Code", ui-monospace, monospace',
-			fontSize: 11,
+			fontSize: 12,
 			lineHeight: 1.2,
 			cursorBlink: true,
 			cursorStyle: "bar",
