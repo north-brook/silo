@@ -1,11 +1,11 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Loader } from "@/shared/ui/loader";
 import {
-	type FileTreeEntry,
-	filesListTree,
+	type FileTreeDirectory,
+	filesListDirectory,
 	filesOpenInBrowser,
 	filesPathOpensInBrowser,
 } from "@/workspaces/files/api";
@@ -18,6 +18,7 @@ import { useWorkspaceSessions } from "@/workspaces/state";
 
 interface TreeNode {
 	children: Map<string, TreeNode>;
+	expandable: boolean;
 	gitIgnored: boolean;
 	name: string;
 	path: string;
@@ -36,15 +37,31 @@ type DirStatus = {
 
 export function GitFilesTab() {
 	const navigate = useNavigate();
+	const queryClient = useQueryClient();
 	const { workspaceName: workspace, project } = useWorkspaceRouteParams();
 	const workspaceSessions = useWorkspaceSessions();
 	const { diff } = useGitSidebar();
 	const { openFileTab } = useFileSessions();
-	const filesQuery = useQuery({
-		queryKey: ["files_list_tree", workspace],
-		queryFn: () => filesListTree(workspace),
+	const [expandedPaths, setExpandedPaths] = useState<Set<string>>(
+		new Set([""]),
+	);
+	const rootQuery = useQuery({
+		queryKey: ["files_list_directory", workspace, ""],
+		queryFn: () => filesListDirectory(workspace),
 		enabled: !!workspace,
 		refetchInterval: 5000,
+	});
+	const expandedDirectoryPaths = useMemo(
+		() => Array.from(expandedPaths).filter((path) => path.length > 0).sort(),
+		[expandedPaths],
+	);
+	const directoryQueries = useQueries({
+		queries: expandedDirectoryPaths.map((path) => ({
+			queryKey: ["files_list_directory", workspace, path],
+			queryFn: () => filesListDirectory(workspace, path),
+			enabled: !!workspace,
+			refetchInterval: 5000,
+		})),
 	});
 	const diffByPath = useMemo(() => {
 		const entries = new Map<string, DiffInfo>();
@@ -86,15 +103,45 @@ export function GitFilesTab() {
 		return statuses;
 	}, [diffByPath]);
 
-	const tree = useMemo(
-		() => buildTree(filesQuery.data ?? []),
-		[filesQuery.data],
-	);
-	const [expandedPaths, setExpandedPaths] = useState<Set<string>>(
-		new Set([""]),
-	);
+	const directorySlices = useMemo(() => {
+		const slices = new Map<string, FileTreeDirectory>();
+		if (rootQuery.data) {
+			slices.set("", rootQuery.data);
+		}
+		for (const [index, path] of expandedDirectoryPaths.entries()) {
+			const slice = directoryQueries[index]?.data;
+			if (slice) {
+				slices.set(path, slice);
+			}
+		}
+		return slices;
+	}, [directoryQueries, expandedDirectoryPaths, rootQuery.data]);
 
-	if (filesQuery.isLoading && !filesQuery.data) {
+	const loadingPaths = useMemo(() => {
+		const paths = new Set<string>();
+		for (const [index, path] of expandedDirectoryPaths.entries()) {
+			const query = directoryQueries[index];
+			if (query && !query.data && (query.isLoading || query.isFetching)) {
+				paths.add(path);
+			}
+		}
+		return paths;
+	}, [directoryQueries, expandedDirectoryPaths]);
+
+	const errorsByPath = useMemo(() => {
+		const errors = new Map<string, string>();
+		for (const [index, path] of expandedDirectoryPaths.entries()) {
+			const error = directoryQueries[index]?.error;
+			if (error) {
+				errors.set(path, queryErrorMessage(error));
+			}
+		}
+		return errors;
+	}, [directoryQueries, expandedDirectoryPaths]);
+
+	const tree = useMemo(() => buildTree(directorySlices), [directorySlices]);
+
+	if (rootQuery.isLoading && !rootQuery.data) {
 		return (
 			<div className="h-full flex items-center justify-center">
 				<Loader />
@@ -102,7 +149,15 @@ export function GitFilesTab() {
 		);
 	}
 
-	if (!filesQuery.data?.length) {
+	if (rootQuery.isError && !rootQuery.data) {
+		return (
+			<div className="h-full flex items-center justify-center px-4 text-center text-[11px] text-text-muted">
+				Failed to load files.
+			</div>
+		);
+	}
+
+	if (!rootQuery.data?.entries.length) {
 		return (
 			<div className="h-full flex items-center justify-center px-4 text-center text-[11px] text-text-muted">
 				No files found.
@@ -121,6 +176,8 @@ export function GitFilesTab() {
 						diffByPath={diffByPath}
 						dirStatusByPath={dirStatusByPath}
 						expandedPaths={expandedPaths}
+						errorsByPath={errorsByPath}
+						loadingPaths={loadingPaths}
 						node={node}
 						onFileOpen={async (path, persistent) => {
 							if (filesPathOpensInBrowser(path)) {
@@ -155,6 +212,12 @@ export function GitFilesTab() {
 									next.delete(path);
 								} else {
 									next.add(path);
+									if (workspace && path) {
+										void queryClient.prefetchQuery({
+											queryKey: ["files_list_directory", workspace, path],
+											queryFn: () => filesListDirectory(workspace, path),
+										});
+									}
 								}
 								return next;
 							});
@@ -180,6 +243,24 @@ function TreeGuideLines({ depth }: { depth: number }) {
 				);
 			})}
 		</>
+	);
+}
+
+function TreeStatusRow({
+	depth,
+	message,
+}: {
+	depth: number;
+	message: string;
+}) {
+	return (
+		<div
+			className="relative px-3 py-[3px] text-[11px] text-text-muted"
+			style={{ paddingLeft: `${depth * 12 + 24}px` }}
+		>
+			<TreeGuideLines depth={depth} />
+			{message}
+		</div>
 	);
 }
 
@@ -216,6 +297,8 @@ function TreeRow({
 	diffByPath,
 	dirStatusByPath,
 	expandedPaths,
+	errorsByPath,
+	loadingPaths,
 	node,
 	onFileOpen,
 	onToggleFolder,
@@ -224,6 +307,8 @@ function TreeRow({
 	diffByPath: Map<string, DiffInfo>;
 	dirStatusByPath: Map<string, DirStatus>;
 	expandedPaths: ReadonlySet<string>;
+	errorsByPath: ReadonlyMap<string, string>;
+	loadingPaths: ReadonlySet<string>;
 	node: TreeNode;
 	onFileOpen: (path: string, persistent: boolean) => Promise<void>;
 	onToggleFolder: (path: string) => void;
@@ -232,12 +317,19 @@ function TreeRow({
 		const open = expandedPaths.has(node.path);
 		const folderDiff = dirStatusByPath.get(node.path);
 		const textClass = node.gitIgnored ? "text-text-muted" : "text-text";
+		const loading = loadingPaths.has(node.path);
+		const error = errorsByPath.get(node.path) ?? null;
+		const children = Array.from(node.children.values()).sort(compareTreeNodes);
 
 		return (
 			<div>
 				<button
 					type="button"
-					onClick={() => onToggleFolder(node.path)}
+					onClick={() => {
+						if (node.expandable) {
+							onToggleFolder(node.path);
+						}
+					}}
 					className={`relative w-full flex items-center gap-1 px-3 py-[3px] text-[11px] ${textClass} hover:bg-btn-hover transition-colors`}
 					style={{
 						paddingLeft: `${depth * 12 + 8}px`,
@@ -246,10 +338,16 @@ function TreeRow({
 				>
 					<TreeGuideLines depth={depth} />
 					<span className="w-4 flex items-center justify-center shrink-0">
-						<ChevronRight
-							size={11}
-							className={`text-text-muted transition-transform duration-150 ${open ? "rotate-90" : ""}`}
-						/>
+						{node.expandable ? (
+							loading ? (
+								<Loader className="text-text-muted" />
+							) : (
+								<ChevronRight
+									size={11}
+									className={`text-text-muted transition-transform duration-150 ${open ? "rotate-90" : ""}`}
+								/>
+							)
+						) : null}
 					</span>
 					<span className="truncate">{node.name}</span>
 					{folderDiff && (
@@ -258,21 +356,25 @@ function TreeRow({
 						</span>
 					)}
 				</button>
+				{open && error && <TreeStatusRow depth={depth + 1} message="Failed to load directory." />}
+				{open && !error && loading && children.length === 0 && (
+					<TreeStatusRow depth={depth + 1} message="Loading..." />
+				)}
 				{open &&
-					Array.from(node.children.values())
-						.sort(compareTreeNodes)
-						.map((child) => (
-							<TreeRow
-								key={child.path}
-								depth={depth + 1}
-								diffByPath={diffByPath}
-								dirStatusByPath={dirStatusByPath}
-								expandedPaths={expandedPaths}
-								node={child}
-								onFileOpen={onFileOpen}
-								onToggleFolder={onToggleFolder}
-							/>
-						))}
+					children.map((child) => (
+						<TreeRow
+							key={child.path}
+							depth={depth + 1}
+							diffByPath={diffByPath}
+							dirStatusByPath={dirStatusByPath}
+							expandedPaths={expandedPaths}
+							errorsByPath={errorsByPath}
+							loadingPaths={loadingPaths}
+							node={child}
+							onFileOpen={onFileOpen}
+							onToggleFolder={onToggleFolder}
+						/>
+					))}
 			</div>
 		);
 	}
@@ -324,56 +426,50 @@ function TreeRow({
 	);
 }
 
-function buildTree(entries: FileTreeEntry[]) {
+function buildTree(slices: ReadonlyMap<string, FileTreeDirectory>) {
 	const root: TreeNode = {
 		children: new Map(),
+		expandable: true,
 		gitIgnored: false,
 		name: "",
 		path: "",
 		type: "directory",
 	};
+	const nodesByPath = new Map<string, TreeNode>([["", root]]);
+	const directoryPaths = Array.from(slices.keys()).sort(compareDirectoryDepth);
 
-	for (const entry of entries) {
-		const segments = entry.path.split("/").filter(Boolean);
-		let current = root;
-		let currentPath = "";
-		for (const [index, segment] of segments.entries()) {
-			currentPath = currentPath ? `${currentPath}/${segment}` : segment;
-			const isLeaf = index === segments.length - 1;
-			const existing = current.children.get(segment);
-			if (existing) {
-				current = existing;
-				continue;
-			}
+	for (const directoryPath of directoryPaths) {
+		const slice = slices.get(directoryPath);
+		const parent = nodesByPath.get(directoryPath);
+		if (!slice || !parent || parent.type !== "directory") {
+			continue;
+		}
 
-			const next: TreeNode = {
+		parent.children = new Map();
+		for (const entry of slice.entries) {
+			const child: TreeNode = {
 				children: new Map(),
-				gitIgnored: isLeaf ? entry.git_ignored : false,
-				name: segment,
-				path: currentPath,
-				type: isLeaf ? "file" : "directory",
+				expandable: entry.expandable,
+				gitIgnored: entry.git_ignored,
+				name: entry.name,
+				path: entry.path,
+				type: entry.kind,
 			};
-			current.children.set(segment, next);
-			current = next;
+			parent.children.set(entry.name, child);
+			nodesByPath.set(entry.path, child);
 		}
 	}
 
-	updateDirectoryGitIgnoredState(root);
 	return root;
 }
 
-function updateDirectoryGitIgnoredState(node: TreeNode): boolean {
-	if (node.type === "file") {
-		return node.gitIgnored;
+function compareDirectoryDepth(left: string, right: string) {
+	const leftDepth = left ? left.split("/").length : 0;
+	const rightDepth = right ? right.split("/").length : 0;
+	if (leftDepth !== rightDepth) {
+		return leftDepth - rightDepth;
 	}
-
-	let allChildrenIgnored = node.children.size > 0;
-	for (const child of node.children.values()) {
-		allChildrenIgnored =
-			updateDirectoryGitIgnoredState(child) && allChildrenIgnored;
-	}
-	node.gitIgnored = node.path === "" ? false : allChildrenIgnored;
-	return node.gitIgnored;
+	return left.localeCompare(right);
 }
 
 function compareTreeNodes(left: TreeNode, right: TreeNode) {
@@ -381,4 +477,11 @@ function compareTreeNodes(left: TreeNode, right: TreeNode) {
 		return left.type === "directory" ? -1 : 1;
 	}
 	return left.name.localeCompare(right.name);
+}
+
+function queryErrorMessage(error: unknown) {
+	if (error instanceof Error) {
+		return error.message;
+	}
+	return String(error);
 }

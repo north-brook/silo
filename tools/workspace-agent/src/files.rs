@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
-use crate::args::required_flag_value;
+use crate::args::{optional_flag_value, required_flag_value};
 use crate::daemon::state::{FileWatchState, ObserverEvent};
 use crate::runtime::{load_state, send_event, write_json_stdout, RuntimePaths};
 
@@ -19,6 +19,28 @@ const WORKSPACE_ROOT: &str = "/home/silo/workspace";
 pub(crate) struct FileTreeEntry {
     pub(crate) path: String,
     pub(crate) git_ignored: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FileTreeNodeKind {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct FileTreeNode {
+    pub(crate) path: String,
+    pub(crate) name: String,
+    pub(crate) kind: FileTreeNodeKind,
+    pub(crate) git_ignored: bool,
+    pub(crate) expandable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct FileTreeDirectory {
+    pub(crate) directory_path: String,
+    pub(crate) entries: Vec<FileTreeNode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -54,6 +76,13 @@ pub(crate) struct FileWatchEntry {
 
 pub(crate) fn run_files_tree() -> Result<(), String> {
     write_json_stdout(&list_workspace_files()?)
+}
+
+pub(crate) fn run_files_directory(args: &[String]) -> Result<(), String> {
+    let path = optional_flag_value(args, "--path")?
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    write_json_stdout(&list_workspace_directory(path)?)
 }
 
 pub(crate) fn run_files_read(args: &[String]) -> Result<(), String> {
@@ -120,12 +149,122 @@ pub(crate) fn list_workspace_files() -> Result<Vec<FileTreeEntry>, String> {
     list_workspace_files_in(&workspace_root)
 }
 
+pub(crate) fn list_workspace_directory(path: Option<&str>) -> Result<FileTreeDirectory, String> {
+    let workspace_root = workspace_root();
+    list_workspace_directory_in(&workspace_root, path)
+}
+
 fn list_workspace_files_in(workspace_root: &Path) -> Result<Vec<FileTreeEntry>, String> {
     let mut entries = Vec::new();
     collect_workspace_files(workspace_root, workspace_root, &mut entries)?;
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     entries.dedup_by(|left, right| left.path == right.path);
     mark_gitignored_entries(workspace_root, &mut entries)?;
+    Ok(entries)
+}
+
+fn list_workspace_directory_in(
+    workspace_root: &Path,
+    path: Option<&str>,
+) -> Result<FileTreeDirectory, String> {
+    let directory_path = normalize_directory_relative_path(path)?;
+    let absolute_path = if directory_path.is_empty() {
+        workspace_root.to_path_buf()
+    } else {
+        workspace_root.join(&directory_path)
+    };
+    let metadata = fs::metadata(&absolute_path).map_err(|error| {
+        format!(
+            "failed to read workspace directory {}: {error}",
+            absolute_path.display()
+        )
+    })?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "workspace path {} is not a directory",
+            absolute_path.display()
+        ));
+    }
+
+    let mut entries = collect_directory_entries(workspace_root, &absolute_path)?;
+    sort_file_tree_nodes(&mut entries);
+    Ok(FileTreeDirectory {
+        directory_path,
+        entries,
+    })
+}
+
+fn collect_directory_entries(
+    workspace_root: &Path,
+    directory: &Path,
+) -> Result<Vec<FileTreeNode>, String> {
+    let read_dir = fs::read_dir(directory).map_err(|error| {
+        format!(
+            "failed to read workspace directory {}: {error}",
+            directory.display()
+        )
+    })?;
+    let mut entries = Vec::new();
+
+    for child in read_dir {
+        let child = child.map_err(|error| {
+            format!(
+                "failed to read workspace directory {}: {error}",
+                directory.display()
+            )
+        })?;
+        let file_name = child.file_name();
+        if directory == workspace_root && file_name == OsStr::new(".git") {
+            continue;
+        }
+
+        let child_path = child.path();
+        let file_type = child.file_type().map_err(|error| {
+            format!(
+                "failed to read workspace file type {}: {error}",
+                child_path.display()
+            )
+        })?;
+
+        let kind = if file_type.is_dir() {
+            FileTreeNodeKind::Directory
+        } else if file_type.is_symlink() {
+            match fs::metadata(&child_path) {
+                Ok(metadata) if metadata.is_dir() => continue,
+                Ok(_) | Err(_) => FileTreeNodeKind::File,
+            }
+        } else if file_type.is_file() {
+            FileTreeNodeKind::File
+        } else {
+            continue;
+        };
+
+        let path = child_path
+            .strip_prefix(workspace_root)
+            .map_err(|error| format!("failed to strip workspace root prefix: {error}"))?
+            .to_str()
+            .map(|value| value.replace('\\', "/"))
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "file path must be valid UTF-8".to_string())?;
+        let name = file_name
+            .to_str()
+            .map(str::to_string)
+            .ok_or_else(|| "file path must be valid UTF-8".to_string())?;
+        let expandable = match kind {
+            FileTreeNodeKind::File => false,
+            FileTreeNodeKind::Directory => directory_has_children(workspace_root, &child_path)?,
+        };
+
+        entries.push(FileTreeNode {
+            path,
+            name,
+            kind,
+            git_ignored: false,
+            expandable,
+        });
+    }
+
+    mark_gitignored_directory_entries(workspace_root, &mut entries)?;
     Ok(entries)
 }
 
@@ -191,12 +330,79 @@ fn collect_workspace_files(
     Ok(())
 }
 
+fn directory_has_children(workspace_root: &Path, directory: &Path) -> Result<bool, String> {
+    let read_dir = fs::read_dir(directory).map_err(|error| {
+        format!(
+            "failed to read workspace directory {}: {error}",
+            directory.display()
+        )
+    })?;
+
+    for child in read_dir {
+        let child = child.map_err(|error| {
+            format!(
+                "failed to read workspace directory {}: {error}",
+                directory.display()
+            )
+        })?;
+        let file_name = child.file_name();
+        if directory == workspace_root && file_name == OsStr::new(".git") {
+            continue;
+        }
+
+        let file_type = child.file_type().map_err(|error| {
+            format!(
+                "failed to read workspace file type {}: {error}",
+                child.path().display()
+            )
+        })?;
+        if file_type.is_dir() || file_type.is_file() {
+            return Ok(true);
+        }
+        if file_type.is_symlink() {
+            match fs::metadata(child.path()) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) | Err(_) => return Ok(true),
+            }
+        }
+    }
+
+    Ok(false)
+}
+
 fn mark_gitignored_entries(
     workspace_root: &Path,
     entries: &mut [FileTreeEntry],
 ) -> Result<(), String> {
-    if entries.is_empty() {
-        return Ok(());
+    let ignored_paths = gitignored_paths(
+        workspace_root,
+        &entries.iter().map(|entry| entry.path.clone()).collect::<Vec<_>>(),
+    )?;
+    for entry in entries {
+        entry.git_ignored = ignored_paths.contains(entry.path.as_str());
+    }
+
+    Ok(())
+}
+
+fn mark_gitignored_directory_entries(
+    workspace_root: &Path,
+    entries: &mut [FileTreeNode],
+) -> Result<(), String> {
+    let ignored_paths = gitignored_paths(
+        workspace_root,
+        &entries.iter().map(|entry| entry.path.clone()).collect::<Vec<_>>(),
+    )?;
+    for entry in entries {
+        entry.git_ignored = ignored_paths.contains(entry.path.as_str());
+    }
+
+    Ok(())
+}
+
+fn gitignored_paths(workspace_root: &Path, paths: &[String]) -> Result<HashSet<String>, String> {
+    if paths.is_empty() {
+        return Ok(HashSet::new());
     }
 
     let mut child = Command::new("git")
@@ -212,9 +418,9 @@ fn mark_gitignored_entries(
         .stdin
         .take()
         .ok_or_else(|| "failed to open git check-ignore stdin".to_string())?;
-    for entry in &*entries {
+    for path in paths {
         stdin
-            .write_all(entry.path.as_bytes())
+            .write_all(path.as_bytes())
             .map_err(|error| format!("failed to write gitignored file list: {error}"))?;
         stdin
             .write_all(&[0])
@@ -238,16 +444,19 @@ fn mark_gitignored_entries(
         }
     }
 
-    let ignored_paths = String::from_utf8_lossy(&output.stdout)
+    Ok(String::from_utf8_lossy(&output.stdout)
         .split('\0')
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .collect::<HashSet<_>>();
-    for entry in entries {
-        entry.git_ignored = ignored_paths.contains(entry.path.as_str());
-    }
+        .collect::<HashSet<_>>())
+}
 
-    Ok(())
+fn sort_file_tree_nodes(entries: &mut [FileTreeNode]) {
+    entries.sort_by(|left, right| match (&left.kind, &right.kind) {
+        (FileTreeNodeKind::Directory, FileTreeNodeKind::File) => std::cmp::Ordering::Less,
+        (FileTreeNodeKind::File, FileTreeNodeKind::Directory) => std::cmp::Ordering::Greater,
+        _ => left.name.cmp(&right.name),
+    });
 }
 
 pub(crate) fn read_workspace_file(path: &str) -> Result<FileReadResult, String> {
@@ -335,6 +544,16 @@ pub(crate) fn write_workspace_file(
 
 pub(crate) fn workspace_root() -> PathBuf {
     PathBuf::from(WORKSPACE_ROOT)
+}
+
+fn normalize_directory_relative_path(path: Option<&str>) -> Result<String, String> {
+    let Some(path) = path.map(str::trim) else {
+        return Ok(String::new());
+    };
+    if path.is_empty() {
+        return Ok(String::new());
+    }
+    normalize_repo_relative_path(path)
 }
 
 pub(crate) fn normalize_repo_relative_path(path: &str) -> Result<String, String> {
@@ -434,6 +653,105 @@ mod tests {
         );
     }
 
+    #[test]
+    fn list_workspace_directory_returns_direct_children_with_gitignored_state() {
+        let workspace = TestWorkspace::new("files-directory-root");
+        workspace.write_file(".gitignore", "dist/\n*.env\nnode_modules/\n");
+        workspace.write_file(".env", "secret");
+        workspace.write_file("tracked.env", "tracked");
+        workspace.write_file(".vscode/settings.json", "{}");
+        workspace.write_file("dist/out.js", "console.log('build')");
+        workspace.write_file("node_modules/pkg/index.js", "export {};");
+        workspace.write_file("src/main.ts", "export const app = true;");
+        workspace.git(&["add", ".gitignore", ".vscode/settings.json", "src/main.ts"]);
+        workspace.git(&["add", "-f", "tracked.env"]);
+
+        let directory = list_workspace_directory_in(&workspace.root, None)
+            .expect("workspace directory should list");
+
+        assert_eq!(
+            directory,
+            FileTreeDirectory {
+                directory_path: String::new(),
+                entries: vec![
+                    FileTreeNode {
+                        path: ".vscode".to_string(),
+                        name: ".vscode".to_string(),
+                        kind: FileTreeNodeKind::Directory,
+                        git_ignored: false,
+                        expandable: true,
+                    },
+                    FileTreeNode {
+                        path: "dist".to_string(),
+                        name: "dist".to_string(),
+                        kind: FileTreeNodeKind::Directory,
+                        git_ignored: true,
+                        expandable: true,
+                    },
+                    FileTreeNode {
+                        path: "node_modules".to_string(),
+                        name: "node_modules".to_string(),
+                        kind: FileTreeNodeKind::Directory,
+                        git_ignored: true,
+                        expandable: true,
+                    },
+                    FileTreeNode {
+                        path: "src".to_string(),
+                        name: "src".to_string(),
+                        kind: FileTreeNodeKind::Directory,
+                        git_ignored: false,
+                        expandable: true,
+                    },
+                    FileTreeNode {
+                        path: ".env".to_string(),
+                        name: ".env".to_string(),
+                        kind: FileTreeNodeKind::File,
+                        git_ignored: true,
+                        expandable: false,
+                    },
+                    FileTreeNode {
+                        path: ".gitignore".to_string(),
+                        name: ".gitignore".to_string(),
+                        kind: FileTreeNodeKind::File,
+                        git_ignored: false,
+                        expandable: false,
+                    },
+                    FileTreeNode {
+                        path: "tracked.env".to_string(),
+                        name: "tracked.env".to_string(),
+                        kind: FileTreeNodeKind::File,
+                        git_ignored: false,
+                        expandable: false,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn list_workspace_directory_only_returns_one_level_of_children() {
+        let workspace = TestWorkspace::new("files-directory-nested");
+        workspace.write_file(".gitignore", "node_modules/\n");
+        workspace.write_file("node_modules/pkg/index.js", "export {};");
+
+        let directory = list_workspace_directory_in(&workspace.root, Some("node_modules"))
+            .expect("workspace directory should list");
+
+        assert_eq!(
+            directory,
+            FileTreeDirectory {
+                directory_path: "node_modules".to_string(),
+                entries: vec![FileTreeNode {
+                    path: "node_modules/pkg".to_string(),
+                    name: "pkg".to_string(),
+                    kind: FileTreeNodeKind::Directory,
+                    git_ignored: true,
+                    expandable: true,
+                }],
+            }
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn list_workspace_files_skips_git_dir_and_symlinked_directories() {
@@ -466,6 +784,50 @@ mod tests {
         );
         assert!(!entries.iter().any(|entry| entry.path.starts_with(".git/")));
         assert!(!entries.iter().any(|entry| entry.path.starts_with("linked-dir/")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_workspace_directory_skips_git_dir_and_symlinked_directories() {
+        let workspace = TestWorkspace::new("files-directory-symlink");
+        workspace.write_file(".git/config", "[core]");
+        workspace.write_file("linked-target/inner.txt", "inner");
+        workspace.write_file("real.txt", "real");
+        workspace.symlink("linked-target", "linked-dir");
+        workspace.symlink("real.txt", "real-link.txt");
+
+        let directory = list_workspace_directory_in(&workspace.root, None)
+            .expect("workspace directory should list");
+
+        assert_eq!(
+            directory,
+            FileTreeDirectory {
+                directory_path: String::new(),
+                entries: vec![
+                    FileTreeNode {
+                        path: "linked-target".to_string(),
+                        name: "linked-target".to_string(),
+                        kind: FileTreeNodeKind::Directory,
+                        git_ignored: false,
+                        expandable: true,
+                    },
+                    FileTreeNode {
+                        path: "real-link.txt".to_string(),
+                        name: "real-link.txt".to_string(),
+                        kind: FileTreeNodeKind::File,
+                        git_ignored: false,
+                        expandable: false,
+                    },
+                    FileTreeNode {
+                        path: "real.txt".to_string(),
+                        name: "real.txt".to_string(),
+                        kind: FileTreeNodeKind::File,
+                        git_ignored: false,
+                        expandable: false,
+                    },
+                ],
+            }
+        );
     }
 
     struct TestWorkspace {

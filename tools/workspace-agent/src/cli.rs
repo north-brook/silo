@@ -8,8 +8,8 @@ use crate::daemon::state::{
 };
 use crate::daemon::zmx::list_zmx_sessions;
 use crate::files::{
-    run_files_read, run_files_sync_watch_set, run_files_tree, run_files_watch_state,
-    run_files_write,
+    run_files_directory, run_files_read, run_files_sync_watch_set, run_files_tree,
+    run_files_watch_state, run_files_write,
 };
 use crate::runtime::{load_state, send_event, write_json_stdout, RuntimePaths};
 
@@ -25,6 +25,7 @@ pub(crate) fn run() -> Result<(), String> {
         "mark-read" => run_mark_read(&args[1..]),
         "terminals" => run_terminals(),
         "assistant-proxy" => run_assistant_proxy(&args[1..]),
+        "files-directory" => run_files_directory(&args[1..]),
         "files-tree" => run_files_tree(),
         "files-read" => run_files_read(&args[1..]),
         "files-write" => run_files_write(&args[1..]),

@@ -9,7 +9,7 @@ use crate::{emit_workspace_state_changed, AppRuntime};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, State};
@@ -18,6 +18,28 @@ use tauri::{AppHandle, State};
 pub struct FileTreeEntry {
     path: String,
     git_ignored: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileTreeNodeKind {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileTreeNode {
+    path: String,
+    name: String,
+    kind: FileTreeNodeKind,
+    git_ignored: bool,
+    expandable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FileTreeDirectory {
+    directory_path: String,
+    entries: Vec<FileTreeNode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -76,6 +98,45 @@ pub async fn files_list_tree(workspace: String) -> Result<Vec<FileTreeEntry>, St
         &agent_remote_command("files-tree"),
     )
     .await
+}
+
+#[tauri::command]
+pub async fn files_list_directory(
+    workspace: String,
+    path: Option<String>,
+) -> Result<FileTreeDirectory, String> {
+    let lookup = branch_workspace_lookup(&workspace).await?;
+    let directory_path = match path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(path) => Some(normalize_repo_relative_path(path)?),
+        None => None,
+    };
+    let command = match directory_path.as_deref() {
+        Some(path) => {
+            agent_remote_command(&format!("files-directory --path {}", shell_quote(path)))
+        }
+        None => agent_remote_command("files-directory"),
+    };
+
+    match run_agent_json_command(&lookup, "failed to list workspace directory", &command).await {
+        Ok(directory) => Ok(directory),
+        Err(error) if is_unknown_files_directory_command_error(&error) => {
+            let entries = run_agent_json_command::<Vec<FileTreeEntry>>(
+                &lookup,
+                "failed to list workspace files",
+                &agent_remote_command("files-tree"),
+            )
+            .await?;
+            Ok(file_tree_directory_from_legacy_entries(
+                directory_path.as_deref().unwrap_or(""),
+                &entries,
+            ))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[tauri::command]
@@ -379,6 +440,78 @@ fn parse_json_output<T: for<'de> Deserialize<'de>>(
     })
 }
 
+fn is_unknown_files_directory_command_error(error: &str) -> bool {
+    error.contains("unknown command: files-directory")
+}
+
+fn file_tree_directory_from_legacy_entries(
+    directory_path: &str,
+    entries: &[FileTreeEntry],
+) -> FileTreeDirectory {
+    let mut direct_entries = Vec::new();
+    let mut directories = HashMap::<String, (String, bool)>::new();
+    let directory_prefix = (!directory_path.is_empty()).then(|| format!("{directory_path}/"));
+
+    for entry in entries {
+        let remainder = match directory_prefix.as_deref() {
+            Some(prefix) => match entry.path.strip_prefix(prefix) {
+                Some(value) => value,
+                None => continue,
+            },
+            None => entry.path.as_str(),
+        };
+
+        if remainder.is_empty() {
+            continue;
+        }
+
+        if let Some((name, _)) = remainder.split_once('/') {
+            let child_path = if directory_path.is_empty() {
+                name.to_string()
+            } else {
+                format!("{directory_path}/{name}")
+            };
+            directories
+                .entry(child_path)
+                .and_modify(|(_, git_ignored)| *git_ignored &= entry.git_ignored)
+                .or_insert_with(|| (name.to_string(), entry.git_ignored));
+            continue;
+        }
+
+        direct_entries.push(FileTreeNode {
+            path: entry.path.clone(),
+            name: remainder.to_string(),
+            kind: FileTreeNodeKind::File,
+            git_ignored: entry.git_ignored,
+            expandable: false,
+        });
+    }
+
+    direct_entries.extend(directories.into_iter().map(|(path, (name, git_ignored))| {
+        FileTreeNode {
+            path,
+            name,
+            kind: FileTreeNodeKind::Directory,
+            git_ignored,
+            expandable: true,
+        }
+    }));
+    sort_file_tree_nodes(&mut direct_entries);
+
+    FileTreeDirectory {
+        directory_path: directory_path.to_string(),
+        entries: direct_entries,
+    }
+}
+
+fn sort_file_tree_nodes(entries: &mut [FileTreeNode]) {
+    entries.sort_by(|left, right| match (&left.kind, &right.kind) {
+        (FileTreeNodeKind::Directory, FileTreeNodeKind::File) => std::cmp::Ordering::Less,
+        (FileTreeNodeKind::File, FileTreeNodeKind::Directory) => std::cmp::Ordering::Greater,
+        _ => left.name.cmp(&right.name),
+    });
+}
+
 pub(crate) fn normalize_repo_relative_path(path: &str) -> Result<String, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -482,6 +615,101 @@ mod tests {
         assert_eq!(
             normalize_repo_relative_path("../secret.txt"),
             Err("file path must stay within the workspace root".to_string())
+        );
+    }
+
+    #[test]
+    fn file_tree_directory_from_legacy_entries_returns_root_children() {
+        let directory = file_tree_directory_from_legacy_entries(
+            "",
+            &[
+                FileTreeEntry {
+                    path: "README.md".to_string(),
+                    git_ignored: false,
+                },
+                FileTreeEntry {
+                    path: "src/main.ts".to_string(),
+                    git_ignored: false,
+                },
+                FileTreeEntry {
+                    path: "node_modules/pkg/index.js".to_string(),
+                    git_ignored: true,
+                },
+            ],
+        );
+
+        assert_eq!(
+            directory,
+            FileTreeDirectory {
+                directory_path: "".to_string(),
+                entries: vec![
+                    FileTreeNode {
+                        path: "node_modules".to_string(),
+                        name: "node_modules".to_string(),
+                        kind: FileTreeNodeKind::Directory,
+                        git_ignored: true,
+                        expandable: true,
+                    },
+                    FileTreeNode {
+                        path: "src".to_string(),
+                        name: "src".to_string(),
+                        kind: FileTreeNodeKind::Directory,
+                        git_ignored: false,
+                        expandable: true,
+                    },
+                    FileTreeNode {
+                        path: "README.md".to_string(),
+                        name: "README.md".to_string(),
+                        kind: FileTreeNodeKind::File,
+                        git_ignored: false,
+                        expandable: false,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn file_tree_directory_from_legacy_entries_returns_nested_children() {
+        let directory = file_tree_directory_from_legacy_entries(
+            "node_modules",
+            &[
+                FileTreeEntry {
+                    path: "node_modules/.bin/vite".to_string(),
+                    git_ignored: true,
+                },
+                FileTreeEntry {
+                    path: "node_modules/pkg/index.js".to_string(),
+                    git_ignored: true,
+                },
+                FileTreeEntry {
+                    path: "src/main.ts".to_string(),
+                    git_ignored: false,
+                },
+            ],
+        );
+
+        assert_eq!(
+            directory,
+            FileTreeDirectory {
+                directory_path: "node_modules".to_string(),
+                entries: vec![
+                    FileTreeNode {
+                        path: "node_modules/.bin".to_string(),
+                        name: ".bin".to_string(),
+                        kind: FileTreeNodeKind::Directory,
+                        git_ignored: true,
+                        expandable: true,
+                    },
+                    FileTreeNode {
+                        path: "node_modules/pkg".to_string(),
+                        name: "pkg".to_string(),
+                        kind: FileTreeNodeKind::Directory,
+                        git_ignored: true,
+                        expandable: true,
+                    },
+                ],
+            }
         );
     }
 }

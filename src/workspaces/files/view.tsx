@@ -687,12 +687,14 @@ async function invalidateFileQueries(
 					queryKey: ["files_read", workspace, path],
 				})
 			: Promise.resolve(),
-		queryClient.invalidateQueries({
-			queryKey: ["files_get_watched_state", workspace],
-		}),
-		queryClient.invalidateQueries({ queryKey: ["files_list_tree", workspace] }),
-		queryClient.invalidateQueries({ queryKey: ["git_diff", workspace] }),
-	]);
+			queryClient.invalidateQueries({
+				queryKey: ["files_get_watched_state", workspace],
+			}),
+			queryClient.invalidateQueries({
+				queryKey: ["files_list_directory", workspace],
+			}),
+			queryClient.invalidateQueries({ queryKey: ["git_diff", workspace] }),
+		]);
 }
 
 function applyRemoteFile(

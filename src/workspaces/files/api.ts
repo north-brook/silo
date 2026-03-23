@@ -6,6 +6,21 @@ export interface FileTreeEntry {
 	git_ignored: boolean;
 }
 
+export type FileTreeNodeKind = "file" | "directory";
+
+export interface FileTreeNode {
+	path: string;
+	name: string;
+	kind: FileTreeNodeKind;
+	git_ignored: boolean;
+	expandable: boolean;
+}
+
+export interface FileTreeDirectory {
+	directory_path: string;
+	entries: FileTreeNode[];
+}
+
 export interface FileReadResult {
 	path: string;
 	exists: boolean;
@@ -43,6 +58,20 @@ export function filesListTree(workspace: string): Promise<FileTreeEntry[]> {
 		{
 			log: "state_changes_only",
 			key: `poll:files_list_tree:${workspace}`,
+		},
+	);
+}
+
+export function filesListDirectory(
+	workspace: string,
+	path?: string | null,
+): Promise<FileTreeDirectory> {
+	return invoke<FileTreeDirectory>(
+		"files_list_directory",
+		path ? { workspace, path } : { workspace },
+		{
+			log: "state_changes_only",
+			key: `poll:files_list_directory:${workspace}:${path ?? ""}`,
 		},
 	);
 }
