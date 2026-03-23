@@ -406,11 +406,11 @@ pub(crate) fn spawn_remote_port_forward(
         .map_err(|error| format!("failed to start ssh port forward: {error}"))
 }
 
-pub(crate) fn build_terminal_attach_command(
+pub(crate) async fn build_terminal_attach_command(
     lookup: &WorkspaceLookup,
     remote_command: &str,
 ) -> Result<CommandBuilder, String> {
-    let session = ensure_ssh_session_blocking(lookup)?;
+    let session = ensure_ssh_session(lookup).await?;
     let mut command = CommandBuilder::new("ssh");
     command.args(ssh_common_args(&session));
     command.args([

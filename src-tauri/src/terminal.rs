@@ -312,6 +312,9 @@ pub async fn terminal_attach_terminal(
         name: attachment_id.clone(),
     };
     let startup_command = command.or_else(|| state.take_startup_command(&key));
+    let attach_command =
+        build_terminal_attach_command(&lookup, &terminal_attach_remote_command(&attachment_id))
+            .await?;
 
     let _reservation = match wait_for_attachment_slot(state.inner(), &key, &attachment_id).await? {
         AttachmentSlot::Existing(existing) => {
@@ -335,8 +338,8 @@ pub async fn terminal_attach_terminal(
     let attachment = spawn_terminal_attachment(
         app,
         state.inner().clone(),
-        lookup.clone(),
         key,
+        attach_command,
         cols,
         rows,
         output,
@@ -645,8 +648,8 @@ fn resize_attachment(attachment: &Attachment, cols: u16, rows: u16) -> Result<()
 fn spawn_terminal_attachment(
     app: AppHandle<AppRuntime>,
     manager: TerminalManager,
-    lookup: WorkspaceLookup,
     key: AttachmentKey,
+    command: portable_pty::CommandBuilder,
     cols: u16,
     rows: u16,
     output: Channel<Vec<u8>>,
@@ -661,9 +664,6 @@ fn spawn_terminal_attachment(
             pixel_height: 0,
         })
         .map_err(|error| format!("failed to create terminal pty: {error}"))?;
-    let command =
-        build_terminal_attach_command(&lookup, &terminal_attach_remote_command(&key.name))?;
-
     let child = pair
         .slave
         .spawn_command(command)
