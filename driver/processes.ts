@@ -6,19 +6,24 @@ export type RunningSiloProcess = {
 	pid: number;
 };
 
-export function listRunningSiloApps(): RunningSiloProcess[] {
-	if (process.platform !== "darwin") {
-		return [];
-	}
+export type SiloAppFlavor = "dev" | "prod";
 
-	const output = spawnSync("ps", ["-Ao", "pid=,command="], {
-		encoding: "utf8",
-	});
-	if (output.status !== 0) {
-		return [];
-	}
+const siloAppCommandMarkers: Record<SiloAppFlavor, string[]> = {
+	dev: ["/Silo Dev.app/Contents/MacOS/Silo Dev"],
+	prod: ["/Silo.app/Contents/MacOS/Silo"],
+};
 
-	return output.stdout
+function isIgnoredProcess(command: string) {
+	return command.includes("playwright test");
+}
+
+export function parseRunningSiloApps(
+	output: string,
+	flavor: SiloAppFlavor = "dev",
+): RunningSiloProcess[] {
+	const markers = siloAppCommandMarkers[flavor];
+
+	return output
 		.split("\n")
 		.map((line) => line.trim())
 		.filter((line) => line.length > 0)
@@ -39,16 +44,34 @@ export function listRunningSiloApps(): RunningSiloProcess[] {
 		.filter((entry): entry is RunningSiloProcess => entry !== null)
 		.filter(
 			(entry) =>
-				entry.command.includes("/Silo.app/Contents/MacOS/Silo") &&
-				!entry.command.includes("playwright test"),
+				markers.some((marker) => entry.command.includes(marker)) &&
+				!isIgnoredProcess(entry.command),
 		);
 }
 
-export function assertNoRunningSiloApp() {
-	const running = listRunningSiloApps();
+export function listRunningSiloApps(
+	flavor: SiloAppFlavor = "dev",
+): RunningSiloProcess[] {
+	if (process.platform !== "darwin") {
+		return [];
+	}
+
+	const output = spawnSync("ps", ["-Ao", "pid=,command="], {
+		encoding: "utf8",
+	});
+	if (output.status !== 0) {
+		return [];
+	}
+
+	return parseRunningSiloApps(output.stdout, flavor);
+}
+
+export function assertNoRunningSiloApp(flavor: SiloAppFlavor = "dev") {
+	const running = listRunningSiloApps(flavor);
 	if (running.length > 0) {
+		const appName = flavor === "dev" ? "Silo Dev" : "Silo";
 		throw new Error(
-			`Close running Silo.app instances before using the driver.\n${running
+			`Close running ${appName} instances before using the driver.\n${running
 				.map(({ pid, command }) => `${pid} ${command}`)
 				.join("\n")}`,
 		);
@@ -108,8 +131,11 @@ export async function stopProcessByPid(
 	}
 }
 
-export async function stopOwnedSiloApps(initialPids: Set<number>) {
-	for (const processInfo of listRunningSiloApps()) {
+export async function stopOwnedSiloApps(
+	initialPids: Set<number>,
+	flavor: SiloAppFlavor = "dev",
+) {
+	for (const processInfo of listRunningSiloApps(flavor)) {
 		if (!initialPids.has(processInfo.pid)) {
 			try {
 				process.kill(processInfo.pid, "SIGTERM");
@@ -119,7 +145,7 @@ export async function stopOwnedSiloApps(initialPids: Set<number>) {
 
 	await sleep(1_000);
 
-	for (const processInfo of listRunningSiloApps()) {
+	for (const processInfo of listRunningSiloApps(flavor)) {
 		if (!initialPids.has(processInfo.pid)) {
 			try {
 				process.kill(processInfo.pid, "SIGKILL");

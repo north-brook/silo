@@ -6,7 +6,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export const repoRoot = path.resolve(__dirname, "..");
-export const defaultSourceStateDir = path.join(os.homedir(), ".silo");
+export const defaultSourceStateDir = path.join(os.homedir(), ".silo-dev");
 export const driverRootDir = path.join(repoRoot, "test-results", "driver");
 export const driverSessionDir = path.join(driverRootDir, "sessions");
 export const tracesDirName = "traces";

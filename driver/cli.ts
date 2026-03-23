@@ -104,7 +104,7 @@ function sessionOption() {
 function sourceStateDirOption() {
 	return new Option(
 		"--source-state-dir <path>",
-		"Source Silo state dir. Defaults to the active user state dir.",
+		"Source Silo state dir. Defaults to ~/.silo-dev for driver-launched sessions.",
 	);
 }
 

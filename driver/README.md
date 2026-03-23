@@ -20,6 +20,8 @@ bun run driver -- session close --session <id>
 ```
 
 `session launch` already waits for app readiness before returning.
+It launches the Tauri dev app and seeds isolated session state from `~/.silo-dev` unless `--source-state-dir` is provided.
+On macOS, a running production `Silo.app` does not block the driver; only another `Silo Dev` instance is treated as a conflicting app launch.
 
 Core selector forms:
 
@@ -47,7 +49,7 @@ All commands print JSON to stdout and use nonzero exit codes on failure. Human-r
 
 Commands that attach to a running app now require an explicit session target via `--session <id>` or `SILO_DRIVER_SESSION`. Use `latest` only when you intentionally want the newest session.
 
-Driver runs also emit trace bundles under the active Silo home, typically `~/.silo/traces/<trace-id>/`.
+Driver runs also emit trace bundles under the configured source Silo home, typically `~/.silo-dev/traces/<trace-id>/`.
 Each trace directory includes:
 
 - `manifest.json`
@@ -61,7 +63,7 @@ Each trace directory includes:
 - `video.stderr.log`
 - `vite.stdout.log` / `vite.stderr.log` when the driver started Vite itself
 
-Global driver CLI history is written to `~/.silo/traces/driver-history.jsonl`.
+Global driver CLI history is written to `~/.silo-dev/traces/driver-history.jsonl` by default.
 
 Video capture starts automatically for driver-launched sessions and finalizes into `video.mp4` when the session closes.
 Use `bun run driver -- video status --session <id>` for a live session or `bun run driver -- video status --trace-id <trace-id>` after close.
