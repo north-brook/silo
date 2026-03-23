@@ -35,7 +35,7 @@ export default function Home() {
 					href={`https://github.com/${repo}`}
 					target="_blank"
 					rel="noopener noreferrer"
-					className="inline-flex items-center gap-1.5 font-mono text-sm text-text-muted transition-colors hover:text-text-bright"
+					className="inline-flex items-center gap-1.5 font-mono text-xs text-text transition-colors hover:text-text-bright"
 				>
 					GitHub
 					<ArrowUpRight size={12} />
@@ -74,7 +74,7 @@ export default function Home() {
 					Orchestrate parallel AI agents on cloud VMs from your Mac
 				</h1>
 
-				<p className="animate-fade-in-up delay-200 mt-5 max-w-lg text-center font-mono text-base leading-relaxed text-text-muted">
+				<p className="animate-fade-in-up delay-200 mt-5 max-w-lg text-center font-mono text-sm leading-relaxed text-text">
 					Each task gets its own VM with dedicated ports, docker images, and
 					isolated services. Agents keep working when your laptop sleeps or
 					disconnects. Parallelize development without compromise.
@@ -83,7 +83,7 @@ export default function Home() {
 				<div className="animate-fade-in-up delay-300 mt-8 flex flex-col items-center gap-2.5">
 					<a
 						href={DOWNLOAD_PATH}
-						className="inline-flex items-center justify-center gap-3 rounded-md bg-text-bright px-5 py-2 font-mono text-base font-medium text-bg transition-colors hover:bg-white"
+						className="inline-flex items-center justify-center gap-3 rounded-md bg-text-bright px-5 py-2 font-mono text-sm font-medium text-bg transition-colors hover:bg-white"
 					>
 						<svg width="14" height="17" viewBox="0 0 814 1000" className="text-bg">
 							<title>Apple</title>
@@ -94,7 +94,7 @@ export default function Home() {
 						</svg>
 						Download for Apple Silicon
 					</a>
-					<span className="font-mono text-sm text-text-placeholder">
+					<span className="font-mono text-xs text-text-muted">
 						Open source. Bring your own cloud & keys.
 					</span>
 				</div>

@@ -58,7 +58,7 @@ const editorTheme = EditorView.theme(
 			height: "100%",
 			backgroundColor: "var(--color-surface)",
 			color: "var(--color-text)",
-			fontSize: "var(--text-base)",
+			fontSize: "var(--text-sm)",
 		},
 		".cm-scroller": {
 			fontFamily: "var(--font-mono)",
@@ -664,7 +664,7 @@ function PlaceholderState({
 				{icon}
 			</div>
 			<div className="space-y-1">
-				<div className="text-base text-text-bright">{title}</div>
+				<div className="text-sm text-text-bright">{title}</div>
 				<div className="text-sm text-text-muted max-w-sm">
 					{description}
 				</div>

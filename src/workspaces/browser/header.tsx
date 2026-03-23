@@ -217,7 +217,7 @@ export function BrowserSessionHeader({
 				spellCheck={false}
 				autoCorrect="off"
 				autoCapitalize="off"
-				className="flex-1 min-w-0 h-7 rounded-md bg-bg px-2.5 text-base text-text-bright outline-none border border-border-light focus:border-text-muted transition-colors"
+				className="flex-1 min-w-0 h-7 rounded-md bg-bg px-2.5 text-sm text-text-bright outline-none border border-border-light focus:border-text-muted transition-colors"
 			/>
 			<button
 				type="button"

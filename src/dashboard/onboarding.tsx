@@ -307,7 +307,7 @@ function DashboardLoader() {
 		<>
 			<div data-tauri-drag-region className="h-8 shrink-0" />
 			<div className="flex flex-1 items-center justify-center px-6">
-				<div className="inline-flex items-center gap-2 text-base text-text-muted">
+				<div className="inline-flex items-center gap-2 text-sm text-text-muted">
 					<Loader />
 					<span>Checking connections</span>
 				</div>
@@ -321,26 +321,26 @@ function ServiceRow({ service }: { service: ServiceConnection }) {
 		!service.connected && service.ready && service.onAction;
 
 	const left = (
-		<span className="inline-flex items-center gap-2 text-base text-text-bright">
+		<span className="inline-flex items-center gap-2 text-sm text-text-bright">
 			{service.icon}
 			{service.name}
 		</span>
 	);
 
 	const right = service.connected ? (
-		<span className="inline-flex items-center gap-2 text-base text-text-bright">
+		<span className="inline-flex items-center gap-2 text-sm text-text-bright">
 			<Check size={14} className="text-[#4ade80]" />
 			Connected
 		</span>
 	) : service.isActing ? (
 		<Loader className="text-text-muted" />
 	) : isActionable ? (
-		<span className="inline-flex items-center gap-1 text-base text-text-muted transition-colors group-hover:text-text-bright">
+		<span className="inline-flex items-center gap-1 text-sm text-text-muted transition-colors group-hover:text-text-bright">
 			Connect
 			<ArrowUpRight size={14} />
 		</span>
 	) : (
-		<span className="inline-flex items-center gap-2 text-base text-text-muted">
+		<span className="inline-flex items-center gap-2 text-sm text-text-muted">
 			<Loader />
 			Checking
 		</span>

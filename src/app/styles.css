@@ -20,11 +20,11 @@
 	--color-btn-hover: #1a1b22;
 	--color-btn-active: #111218;
 
-	--text-xs: 9px;
-	--text-xs--line-height: 12px;
+	--text-xs: 10px;
+	--text-xs--line-height: 14px;
 	--text-sm: 11px;
 	--text-sm--line-height: 16px;
-	--text-base: 13px;
+	--text-base: 12px;
 	--text-base--line-height: 18px;
 
 	--font-mono:
@@ -88,7 +88,7 @@
 
 	input,
 	textarea {
-		@apply bg-surface border border-border-light rounded-md px-3 py-2 text-base text-text-bright outline-none transition-colors duration-150 placeholder:text-text-placeholder focus:border-accent/30;
+		@apply bg-surface border border-border-light rounded-md px-3 py-2 text-sm text-text-bright outline-none transition-colors duration-150 placeholder:text-text-placeholder focus:border-accent/30;
 	}
 
 	button,

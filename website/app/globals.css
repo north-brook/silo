@@ -16,14 +16,7 @@
 	--color-accent: #638cff;
 	--color-accent-hover: #7a9fff;
 
-	--text-xs: 9px;
-	--text-xs--line-height: 12px;
-	--text-sm: 11px;
-	--text-sm--line-height: 16px;
-	--text-base: 13px;
-	--text-base--line-height: 18px;
-
-	--font-mono:
+--font-mono:
 		"SF Mono", "Fira Code", "JetBrains Mono",
 		"Cascadia Code", ui-monospace, monospace;
 }
