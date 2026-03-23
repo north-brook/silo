@@ -3,6 +3,7 @@ import { filePathOpensInBrowser } from "@/workspaces/files/browser";
 
 export interface FileTreeEntry {
 	path: string;
+	git_ignored: boolean;
 }
 
 export interface FileReadResult {

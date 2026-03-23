@@ -1,9 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	createContext,
-	type Dispatch,
 	type ReactNode,
-	type SetStateAction,
 	useCallback,
 	useContext,
 	useEffect,
@@ -12,26 +10,35 @@ import {
 	useState,
 } from "react";
 import { toast } from "@/shared/ui/toaster";
-import type { WorkspaceSession } from "@/workspaces/api";
 import {
-	filesGetWatchedState,
+	workspaceSessions as listWorkspaceSessions,
+	type Workspace,
+	type WorkspaceSession,
+} from "@/workspaces/api";
+import {
 	filesCloseSession,
+	filesGetWatchedState,
 	filesOpenSession,
 	filesSetWatchedPaths,
 	type WatchedFileState,
 } from "@/workspaces/files/api";
+import {
+	clearWorkspaceLocalSession,
+	type DisplayWorkspaceSession,
+	defaultFileTabState,
+	type FileTabState,
+	getWorkspaceLocalFileState,
+	updateWorkspaceLocalFileState,
+	updateWorkspaceLocalSessionStates,
+	updateWorkspaceLocalSessions,
+	type WorkspaceLocalFileState,
+} from "@/workspaces/files/local-state";
 import { useWorkspaceSessions, useWorkspaceState } from "@/workspaces/state";
 
-export interface FileTabState {
-	conflicted: boolean;
-	dirty: boolean;
-	saving: boolean;
-}
-
-export interface DisplayWorkspaceSession extends WorkspaceSession {
-	persistentAttachmentId?: string | null;
-	preview?: boolean;
-}
+export type {
+	DisplayWorkspaceSession,
+	FileTabState,
+} from "@/workspaces/files/local-state";
 
 interface OpenFileTabOptions {
 	path: string;
@@ -70,12 +77,6 @@ interface FileSessionsContextValue {
 	clearSession: (attachmentId: string) => void;
 }
 
-const defaultTabState: FileTabState = {
-	conflicted: false,
-	dirty: false,
-	saving: false,
-};
-
 const FileSessionsContext = createContext<FileSessionsContextValue | null>(
 	null,
 );
@@ -84,97 +85,146 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 	const queryClient = useQueryClient();
 	const { workspaceName } = useWorkspaceState();
 	const workspaceSessions = useWorkspaceSessions();
-	const [localSessions, setLocalSessions] = useState<DisplayWorkspaceSession[]>(
+	const [workspaceLocalFileStates, setWorkspaceLocalFileStates] = useState<
+		Record<string, WorkspaceLocalFileState>
+	>({});
+	const workspaceLocalFileStatesRef = useRef(workspaceLocalFileStates);
+	const pendingPersistentOpensRef = useRef(new Map<string, Set<string>>());
+	const activeWorkspaceLocalFileState = useMemo(
+		() => getWorkspaceLocalFileState(workspaceLocalFileStates, workspaceName),
+		[workspaceLocalFileStates, workspaceName],
+	);
+	const localSessions = activeWorkspaceLocalFileState.sessions;
+	const sessionStates = activeWorkspaceLocalFileState.sessionStates;
+
+	useEffect(() => {
+		workspaceLocalFileStatesRef.current = workspaceLocalFileStates;
+	}, [workspaceLocalFileStates]);
+
+	const updateWorkspaceSessionsState = useCallback(
+		(
+			workspace: string | null | undefined,
+			updater: (
+				previous: DisplayWorkspaceSession[],
+			) => DisplayWorkspaceSession[],
+		) => {
+			setWorkspaceLocalFileStates((previous) =>
+				updateWorkspaceLocalSessions(previous, workspace, updater),
+			);
+		},
 		[],
 	);
-	const [sessionStates, setSessionStates] = useState<
-		Record<string, FileTabState>
-	>({});
-	const localSessionsRef = useRef(localSessions);
-	const workspaceSessionsRef = useRef(workspaceSessions);
-	const pendingPersistentOpensRef = useRef(
-		new Map<string, { path: string; workspace: string }>(),
+
+	const updateWorkspaceSessionTabStates = useCallback(
+		(
+			workspace: string | null | undefined,
+			updater: (
+				previous: Record<string, FileTabState>,
+			) => Record<string, FileTabState>,
+		) => {
+			setWorkspaceLocalFileStates((previous) =>
+				updateWorkspaceLocalSessionStates(previous, workspace, updater),
+			);
+		},
+		[],
+	);
+
+	const clearPendingPersistentOpen = useCallback(
+		(workspace: string | null | undefined, attachmentId: string) => {
+			if (!workspace) {
+				return;
+			}
+			const pendingWorkspaceOpens =
+				pendingPersistentOpensRef.current.get(workspace);
+			if (!pendingWorkspaceOpens) {
+				return;
+			}
+			pendingWorkspaceOpens.delete(attachmentId);
+			if (pendingWorkspaceOpens.size === 0) {
+				pendingPersistentOpensRef.current.delete(workspace);
+			}
+		},
+		[],
 	);
 
 	useEffect(() => {
-		localSessionsRef.current = localSessions;
-	}, [localSessions]);
-
-	useEffect(() => {
-		workspaceSessionsRef.current = workspaceSessions;
-	}, [workspaceSessions]);
-
-	useEffect(() => {
+		if (!workspaceName) {
+			return;
+		}
 		const persistedIds = new Set(
 			workspaceSessions
 				.filter((session) => session.type === "file")
 				.map((session) => session.attachment_id),
 		);
-		const removedIds: string[] = [];
-		setLocalSessions((previous) => {
-			const next = previous.filter((session) => {
-				if (!session.persistentAttachmentId) {
-					return true;
+		setWorkspaceLocalFileStates((previous) =>
+			updateWorkspaceLocalFileState(previous, workspaceName, (current) => {
+				const removedIds: string[] = [];
+				const nextSessions = current.sessions.filter((session) => {
+					if (!session.persistentAttachmentId) {
+						return true;
+					}
+					const keep = persistedIds.has(session.persistentAttachmentId);
+					if (!keep) {
+						removedIds.push(session.attachment_id);
+					}
+					return keep;
+				});
+				if (removedIds.length === 0) {
+					return current;
 				}
-				const keep = persistedIds.has(session.persistentAttachmentId);
-				if (!keep) {
-					removedIds.push(session.attachment_id);
+
+				let nextSessionStates = current.sessionStates;
+				for (const attachmentId of removedIds) {
+					if (!(attachmentId in nextSessionStates)) {
+						continue;
+					}
+					if (nextSessionStates === current.sessionStates) {
+						nextSessionStates = { ...current.sessionStates };
+					}
+					delete nextSessionStates[attachmentId];
 				}
-				return keep;
-			});
-			return next.length === previous.length ? previous : next;
-		});
-		if (removedIds.length === 0) {
-			return;
-		}
-		setSessionStates((previous) => {
-			let changed = false;
-			const next = { ...previous };
-			for (const attachmentId of removedIds) {
-				if (attachmentId in next) {
-					delete next[attachmentId];
-					changed = true;
-				}
-			}
-			return changed ? next : previous;
-		});
-	}, [workspaceSessions]);
+
+				return {
+					sessions: nextSessions,
+					sessionStates: nextSessionStates,
+				};
+			}),
+		);
+	}, [workspaceName, workspaceSessions]);
 
 	const setSessionState = useCallback<
 		FileSessionsContextValue["setSessionState"]
-	>((attachmentId, next) => {
-		setSessionStates((previous) => {
-			const prior = previous[attachmentId] ?? defaultTabState;
-			const patch = typeof next === "function" ? next(prior) : next;
-			const updated = { ...prior, ...patch };
-			if (
-				updated.dirty === prior.dirty &&
-				updated.conflicted === prior.conflicted &&
-				updated.saving === prior.saving
-			) {
-				return previous;
-			}
-			return {
-				...previous,
-				[attachmentId]: updated,
-			};
-		});
-	}, []);
+	>(
+		(attachmentId, next) => {
+			updateWorkspaceSessionTabStates(workspaceName, (previous) => {
+				const prior = previous[attachmentId] ?? defaultFileTabState;
+				const patch = typeof next === "function" ? next(prior) : next;
+				const updated = { ...prior, ...patch };
+				if (
+					updated.dirty === prior.dirty &&
+					updated.conflicted === prior.conflicted &&
+					updated.saving === prior.saving
+				) {
+					return previous;
+				}
+				return {
+					...previous,
+					[attachmentId]: updated,
+				};
+			});
+		},
+		[updateWorkspaceSessionTabStates, workspaceName],
+	);
 
-	const clearSession = useCallback((attachmentId: string) => {
-		pendingPersistentOpensRef.current.delete(attachmentId);
-		setLocalSessions((current) =>
-			current.filter((session) => session.attachment_id !== attachmentId),
-		);
-		setSessionStates((previous) => {
-			if (!(attachmentId in previous)) {
-				return previous;
-			}
-			const next = { ...previous };
-			delete next[attachmentId];
-			return next;
-		});
-	}, []);
+	const clearSession = useCallback(
+		(attachmentId: string) => {
+			clearPendingPersistentOpen(workspaceName, attachmentId);
+			setWorkspaceLocalFileStates((previous) =>
+				clearWorkspaceLocalSession(previous, workspaceName, attachmentId),
+			);
+		},
+		[clearPendingPersistentOpen, workspaceName],
+	);
 
 	const resolveSession = useCallback<
 		FileSessionsContextValue["resolveSession"]
@@ -281,17 +331,22 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 			path: string;
 			workspace: string;
 		}) => {
-			const pending = pendingPersistentOpensRef.current;
-			if (pending.has(attachmentId)) {
+			let pendingWorkspaceOpens =
+				pendingPersistentOpensRef.current.get(workspace);
+			if (!pendingWorkspaceOpens) {
+				pendingWorkspaceOpens = new Set<string>();
+				pendingPersistentOpensRef.current.set(workspace, pendingWorkspaceOpens);
+			}
+			if (pendingWorkspaceOpens.has(attachmentId)) {
 				return;
 			}
-			pending.set(attachmentId, { path, workspace });
+			pendingWorkspaceOpens.add(attachmentId);
 
 			void (async () => {
 				try {
 					const result = await filesOpenSession(workspace, path);
 					let sessionStillOpen = false;
-					setLocalSessions((previous) =>
+					updateWorkspaceSessionsState(workspace, (previous) =>
 						previous.map((session) => {
 							if (session.attachment_id !== attachmentId) {
 								return session;
@@ -306,25 +361,34 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 					);
 
 					if (!sessionStillOpen) {
+						const cachedWorkspace = queryClient.getQueryData<Workspace | null>([
+							"workspaces_get_workspace",
+							workspace,
+						]);
+						const cachedWorkspaceSessions = cachedWorkspace
+							? listWorkspaceSessions(cachedWorkspace)
+							: [];
 						const hasReplacementSession =
-							localSessionsRef.current.some(
+							getWorkspaceLocalFileState(
+								workspaceLocalFileStatesRef.current,
+								workspace,
+							).sessions.some(
 								(session) =>
 									session.type === "file" &&
 									session.path === path &&
 									(session.attachment_id !== attachmentId ||
 										session.persistentAttachmentId === result.attachment_id),
 							) ||
-							workspaceSessionsRef.current.some(
+							cachedWorkspaceSessions.some(
 								(session) =>
 									session.type === "file" &&
 									session.path === path &&
 									session.attachment_id === result.attachment_id,
 							);
 						if (!hasReplacementSession) {
-							void filesCloseSession(
-								workspace,
-								result.attachment_id,
-							).catch(() => {});
+							void filesCloseSession(workspace, result.attachment_id).catch(
+								() => {},
+							);
 						}
 						return;
 					}
@@ -333,9 +397,12 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 						queryKey: ["workspaces_get_workspace", workspace],
 					});
 				} catch (error) {
-					if (!localSessionsRef.current.some(
-						(session) => session.attachment_id === attachmentId,
-					)) {
+					if (
+						!getWorkspaceLocalFileState(
+							workspaceLocalFileStatesRef.current,
+							workspace,
+						).sessions.some((session) => session.attachment_id === attachmentId)
+					) {
 						return;
 					}
 					toast({
@@ -347,11 +414,11 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 								: "The file opened locally, but metadata sync failed.",
 					});
 				} finally {
-					pending.delete(attachmentId);
+					clearPendingPersistentOpen(workspace, attachmentId);
 				}
 			})();
 		},
-		[queryClient],
+		[clearPendingPersistentOpen, queryClient, updateWorkspaceSessionsState],
 	);
 
 	const openFileTab = useCallback<FileSessionsContextValue["openFileTab"]>(
@@ -362,7 +429,11 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 			workspaceSessions,
 			localFirst = false,
 		}) => {
-			const localExisting = localSessions.find(
+			const workspaceLocalSessions = getWorkspaceLocalFileState(
+				workspaceLocalFileStates,
+				workspace,
+			).sessions;
+			const localExisting = workspaceLocalSessions.find(
 				(session) => session.path === path,
 			);
 			if (localExisting) {
@@ -372,7 +443,7 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 					(localFirst && !localExisting.persistentAttachmentId)
 				) {
 					if (persistent && localFirst) {
-						setLocalSessions((previous) =>
+						updateWorkspaceSessionsState(workspace, (previous) =>
 							previous.map((session) =>
 								session.attachment_id === localExisting.attachment_id
 									? {
@@ -392,16 +463,13 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 					}
 					return {
 						attachmentId: localExisting.attachment_id,
-						preview:
-							persistent && localFirst
-								? false
-								: !!localExisting.preview,
+						preview: persistent && localFirst ? false : !!localExisting.preview,
 					};
 				}
 
 				const persistentAttachmentId = await ensurePersistentAttachmentId({
 					localSession: localExisting,
-					setLocalSessions,
+					updateWorkspaceSessionsState,
 					workspace,
 					workspaceSessions,
 				});
@@ -425,9 +493,9 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 
 			if (!persistent) {
 				const previewAttachmentId =
-					localSessions.find((session) => session.preview)?.attachment_id ??
-					createLocalAttachmentId();
-				setLocalSessions((previous) => {
+					workspaceLocalSessions.find((session) => session.preview)
+						?.attachment_id ?? createLocalAttachmentId();
+				updateWorkspaceSessionsState(workspace, (previous) => {
 					const previewSession = previous.find((session) => session.preview);
 					if (previewSession) {
 						return previous.map((session) =>
@@ -441,22 +509,22 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 						createLocalSession(path, previewAttachmentId, true),
 					];
 				});
-				setSessionStates((previous) => ({
+				updateWorkspaceSessionTabStates(workspace, (previous) => ({
 					...previous,
-					[previewAttachmentId]: defaultTabState,
+					[previewAttachmentId]: defaultFileTabState,
 				}));
 				return { attachmentId: previewAttachmentId, preview: true };
 			}
 
 			if (localFirst) {
 				const attachmentId = createLocalAttachmentId();
-				setLocalSessions((previous) => [
+				updateWorkspaceSessionsState(workspace, (previous) => [
 					...previous,
 					createLocalSession(path, attachmentId, false),
 				]);
-				setSessionStates((previous) => ({
+				updateWorkspaceSessionTabStates(workspace, (previous) => ({
 					...previous,
-					[attachmentId]: defaultTabState,
+					[attachmentId]: defaultFileTabState,
 				}));
 				startPersistentOpenInBackground({
 					attachmentId,
@@ -472,14 +540,23 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 			});
 			return { attachmentId: result.attachment_id, preview: false };
 		},
-		[localSessions, queryClient, startPersistentOpenInBackground],
+		[
+			queryClient,
+			startPersistentOpenInBackground,
+			updateWorkspaceSessionTabStates,
+			updateWorkspaceSessionsState,
+			workspaceLocalFileStates,
+		],
 	);
 
 	const promotePreviewTab = useCallback<
 		FileSessionsContextValue["promotePreviewTab"]
 	>(
 		async (workspace, workspaceSessions, attachmentId) => {
-			const localSession = localSessions.find(
+			const localSession = getWorkspaceLocalFileState(
+				workspaceLocalFileStates,
+				workspace,
+			).sessions.find(
 				(session) => session.attachment_id === attachmentId && session.preview,
 			);
 			if (!localSession?.path?.trim()) {
@@ -488,7 +565,7 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 
 			const persistentAttachmentId = await ensurePersistentAttachmentId({
 				localSession,
-				setLocalSessions,
+				updateWorkspaceSessionsState,
 				workspace,
 				workspaceSessions,
 			});
@@ -497,7 +574,7 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 					queryKey: ["workspaces_get_workspace", workspace],
 				});
 			} else {
-				setLocalSessions((previous) =>
+				updateWorkspaceSessionsState(workspace, (previous) =>
 					previous.map((session) =>
 						session.attachment_id === attachmentId
 							? {
@@ -510,14 +587,14 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 			}
 			return attachmentId;
 		},
-		[localSessions, queryClient],
+		[queryClient, updateWorkspaceSessionsState, workspaceLocalFileStates],
 	);
 
 	const value = useMemo<FileSessionsContextValue>(
 		() => ({
 			getDisplaySessions,
 			getSessionState: (attachmentId) =>
-				sessionStates[attachmentId] ?? defaultTabState,
+				sessionStates[attachmentId] ?? defaultFileTabState,
 			getWatchedFileState: (path) =>
 				path ? (watchedFilesByPath.get(path) ?? null) : null,
 			openFileTab,
@@ -557,17 +634,20 @@ export function useFileSessions() {
 
 async function ensurePersistentAttachmentId({
 	localSession,
-	setLocalSessions,
+	updateWorkspaceSessionsState,
 	workspace,
 	workspaceSessions,
 }: {
 	localSession: DisplayWorkspaceSession;
-	setLocalSessions: Dispatch<SetStateAction<DisplayWorkspaceSession[]>>;
+	updateWorkspaceSessionsState: (
+		workspace: string,
+		updater: (previous: DisplayWorkspaceSession[]) => DisplayWorkspaceSession[],
+	) => void;
 	workspace: string;
 	workspaceSessions: WorkspaceSession[];
 }) {
 	if (localSession.persistentAttachmentId) {
-		setLocalSessions((previous) =>
+		updateWorkspaceSessionsState(workspace, (previous) =>
 			previous.map((session) =>
 				session.attachment_id === localSession.attachment_id
 					? {
@@ -584,7 +664,7 @@ async function ensurePersistentAttachmentId({
 		(session) => session.type === "file" && session.path === localSession.path,
 	);
 	if (existing) {
-		setLocalSessions((previous) =>
+		updateWorkspaceSessionsState(workspace, (previous) =>
 			previous.map((session) =>
 				session.attachment_id === localSession.attachment_id
 					? {
@@ -599,7 +679,7 @@ async function ensurePersistentAttachmentId({
 	}
 
 	const result = await filesOpenSession(workspace, localSession.path ?? "");
-	setLocalSessions((previous) =>
+	updateWorkspaceSessionsState(workspace, (previous) =>
 		previous.map((session) =>
 			session.attachment_id === localSession.attachment_id
 				? {

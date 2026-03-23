@@ -18,6 +18,7 @@ import { useWorkspaceSessions } from "@/workspaces/state";
 
 interface TreeNode {
 	children: Map<string, TreeNode>;
+	gitIgnored: boolean;
 	name: string;
 	path: string;
 	type: "directory" | "file";
@@ -104,7 +105,7 @@ export function GitFilesTab() {
 	if (!filesQuery.data?.length) {
 		return (
 			<div className="h-full flex items-center justify-center px-4 text-center text-[11px] text-text-muted">
-				No tracked or untracked files found.
+				No files found.
 			</div>
 		);
 	}
@@ -230,13 +231,14 @@ function TreeRow({
 	if (node.type === "directory") {
 		const open = expandedPaths.has(node.path);
 		const folderDiff = dirStatusByPath.get(node.path);
+		const textClass = node.gitIgnored ? "text-text-muted" : "text-text";
 
 		return (
 			<div>
 				<button
 					type="button"
 					onClick={() => onToggleFolder(node.path)}
-					className="relative w-full flex items-center gap-1 px-3 py-[3px] text-[11px] text-text hover:bg-btn-hover transition-colors"
+					className={`relative w-full flex items-center gap-1 px-3 py-[3px] text-[11px] ${textClass} hover:bg-btn-hover transition-colors`}
 					style={{
 						paddingLeft: `${depth * 12 + 8}px`,
 						...gitRowStyle(folderDiff ? dirStatusType(folderDiff) : null),
@@ -276,6 +278,7 @@ function TreeRow({
 	}
 
 	const diff = diffByPath.get(node.path) ?? null;
+	const textClass = node.gitIgnored ? "text-text-muted" : "text-text";
 
 	return (
 		<button
@@ -286,7 +289,7 @@ function TreeRow({
 			onDoubleClick={() => {
 				void onFileOpen(node.path, true);
 			}}
-			className="relative w-full flex items-center justify-between gap-2 px-3 py-[3px] text-[11px] text-text hover:bg-btn-hover transition-colors"
+			className={`relative w-full flex items-center justify-between gap-2 px-3 py-[3px] text-[11px] ${textClass} hover:bg-btn-hover transition-colors`}
 			style={{
 				paddingLeft: `${depth * 12 + 8}px`,
 				...gitRowStyle(
@@ -324,6 +327,7 @@ function TreeRow({
 function buildTree(entries: FileTreeEntry[]) {
 	const root: TreeNode = {
 		children: new Map(),
+		gitIgnored: false,
 		name: "",
 		path: "",
 		type: "directory",
@@ -344,6 +348,7 @@ function buildTree(entries: FileTreeEntry[]) {
 
 			const next: TreeNode = {
 				children: new Map(),
+				gitIgnored: isLeaf ? entry.git_ignored : false,
 				name: segment,
 				path: currentPath,
 				type: isLeaf ? "file" : "directory",
@@ -353,7 +358,22 @@ function buildTree(entries: FileTreeEntry[]) {
 		}
 	}
 
+	updateDirectoryGitIgnoredState(root);
 	return root;
+}
+
+function updateDirectoryGitIgnoredState(node: TreeNode): boolean {
+	if (node.type === "file") {
+		return node.gitIgnored;
+	}
+
+	let allChildrenIgnored = node.children.size > 0;
+	for (const child of node.children.values()) {
+		allChildrenIgnored =
+			updateDirectoryGitIgnoredState(child) && allChildrenIgnored;
+	}
+	node.gitIgnored = node.path === "" ? false : allChildrenIgnored;
+	return node.gitIgnored;
 }
 
 function compareTreeNodes(left: TreeNode, right: TreeNode) {

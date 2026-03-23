@@ -17,6 +17,7 @@ use tauri::{AppHandle, State};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FileTreeEntry {
     path: String,
+    git_ignored: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
