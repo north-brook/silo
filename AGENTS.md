@@ -43,22 +43,22 @@ Many bugs that look like frontend issues are actually stale VM state, agent stat
 - The dev app (`Silo Dev`) uses `~/.silo-dev` by default
 - By default, Tauri/plugin logs live under the active state dir's `logs/` folder
 - When `SILO_STATE_DIR` is set, app-local logs live under `$SILO_STATE_DIR/logs`
-- Driver-launched runs emit a trace bundle under the source Silo home, usually `~/.silo/traces/<trace-id>/`
-- Start by listing recent log files: `ls -lt ~/.silo/logs | head`
-- Tail the newest log: `tail -n 200 ~/.silo/logs/<file>`
+- Driver-launched runs emit a trace bundle under the source Silo home, usually `~/.silo-dev/traces/<trace-id>/`
+- Start by listing recent log files: `ls -lt ~/.silo-dev/logs | head`
+- Tail the newest log: `tail -n 200 ~/.silo-dev/logs/<file>`
 - For driver runs, inspect `manifest.json` in the trace directory first, then read `driver.jsonl`, `app.log`, and `video-metadata.json`
 - If the UI is behaving oddly, also inspect the terminal that launched `bun run tauri dev`
 
 ## Trace Bundles
 
-Driver-launched verification runs produce a trace bundle under the active Silo home, usually `~/.silo/traces/<trace-id>/`.
+Driver-launched verification runs produce a trace bundle under the active source Silo home, usually `~/.silo-dev/traces/<trace-id>/`.
 
 - Treat the trace bundle as the primary observability unit for automation runs
 - Start with `manifest.json` to discover the exact log and artifact paths for that run
 - `driver.jsonl` records driver command attempts in order
 - `app.log` is the app/session log for that run
 - `video.mp4` and `video-metadata.json` capture the rendered UI for the run
-- Global driver CLI history lives at `~/.silo/traces/driver-history.jsonl`
+- Global driver CLI history lives at `~/.silo-dev/traces/driver-history.jsonl` by default
 - Prefer inspecting one trace bundle over manually correlating files across `test-results/` and state directories
 
 ## Local State
@@ -89,8 +89,8 @@ The current e2e direction is Playwright attached to the CEF runtime over CDP, no
 - Enable CDP with `SILO_CEF_REMOTE_DEBUGGING_PORT`
 - Keep app-local state isolated with `SILO_STATE_DIR`
 - Run `bun run e2e:preflight` before live e2e to verify local tools, auth, and source state
-- On macOS, close any existing `Silo.app` instance before running live e2e; the app is single-instance and a second launch can be redirected into the existing process
-- When a live test or driver run fails, inspect the matching trace bundle under `~/.silo/traces/<trace-id>/` first, then check `test-results/e2e/` or isolated state directories if needed
+- On macOS, close any existing `Silo Dev.app` or driver-launched dev session before running live e2e; the production `Silo.app` can stay open in parallel
+- When a live test or driver run fails, inspect the matching trace bundle under `~/.silo-dev/traces/<trace-id>/` first, then check `test-results/e2e/` or isolated state directories if needed
 
 When adding new live e2e coverage:
 
@@ -108,7 +108,7 @@ Use the repo-local `driver/` CLI when you need programmatic verification against
 - Start with read-heavy commands such as `help`, `schema`, `history`, `session status`, `app status`, `app service-status`, `video status`, `page snapshot`, `element text`, `element attr`, `element exists`, and `element count`
 - Use write commands such as `element click`, `element type`, `page press`, and `element wait` to drive a real workflow when inspection alone is not enough
 - Prefer the higher-level app commands when they exist; use lower-level selector-driven commands as the escape hatch
-- Use explicit `--id` values when you want a stable trace name under `~/.silo/traces/`
+- Use explicit `--id` values when you want a stable trace name under `~/.silo-dev/traces/`
 - Keep sessions explicit and clean them up when finished with `bun run driver -- session close --session <id>`
 - Driver-launched sessions record `video.mp4` automatically and finalize it on `bun run driver -- session close --session <id>`
 - If a command fails, read the stderr help text first, then inspect the JSON error payload and the matching trace bundle
@@ -157,6 +157,17 @@ The app spans local and remote state. Be explicit about which side owns what.
 - Prefer backend-owned state over frontend-only merges when correctness matters
 - Prefer checking live remote state before adding compatibility or fallback logic
 - Avoid documenting transient implementation details here unless they are stable and architectural
+
+## State Management
+
+Default to a Rust-first state model.
+
+- Keep durable user and project configuration in `config.toml` under the active app state dir
+- Keep correctness-sensitive app and workspace state in the Tauri/Rust backend, not in ad hoc React-only state
+- Use backend-owned local overlays for fast UI transitions when waiting on `gcloud`, VM metadata propagation, or other slow control-plane work
+- Persist workspace state that must survive app restarts or be observable across processes in VM metadata, then layer local backend state on top while that metadata catches up
+- Treat the frontend as a consumer of backend queries and events; avoid parallel frontend state machines for workspace lifecycle or template operations unless the state is purely presentational
+- Treat live VM state and agent state as the runtime truth for readiness, health, and in-VM behavior; metadata is useful, but it can lag
 
 ## General Guidance
 
