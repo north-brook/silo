@@ -273,8 +273,9 @@ pub fn run() {
     let browser_file_server = browser_file_server::BrowserFileServerManager::new()
         .expect("workspace file server should initialize");
     let browser_manager =
-        browser::BrowserManager::new(loopback_router.clone(), browser_file_server);
-    let browser_loopback_manager = browser_loopback::BrowserLoopbackManager::new(loopback_router);
+        browser::BrowserManager::new(loopback_router.clone(), browser_file_server.clone());
+    let browser_loopback_manager =
+        browser_loopback::BrowserLoopbackManager::new(loopback_router, browser_file_server);
     let browser_loopback_resolver = browser_loopback_manager.clone();
     let _ = tauri_runtime_cef::set_loopback_request_resolver(std::sync::Arc::new(
         move |webview_label, original_url| {
@@ -630,7 +631,9 @@ pub fn run() {
             git::git_update_branch,
             git::git_update_target_branch,
             git::git_pr_status,
-            git::git_pr_observe,
+            git::git_pr_summary,
+            git::git_pr_details,
+            git::git_pr_deployments,
             git::git_tree_dirty,
             git::git_push,
             git::git_create_pr,

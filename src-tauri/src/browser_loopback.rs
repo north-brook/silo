@@ -1,3 +1,4 @@
+use crate::browser_file_server::BrowserFileServerManager;
 use crate::router::RouterManager;
 use crate::workspaces::{self, WorkspaceLookup};
 use std::collections::HashMap;
@@ -5,13 +6,15 @@ use std::sync::{Arc, RwLock};
 
 #[derive(Clone)]
 pub struct BrowserLoopbackManager {
+    file_server: BrowserFileServerManager,
     loopback_router: RouterManager,
     workspace_lookups: Arc<RwLock<HashMap<String, WorkspaceLookup>>>,
 }
 
 impl BrowserLoopbackManager {
-    pub fn new(loopback_router: RouterManager) -> Self {
+    pub fn new(loopback_router: RouterManager, file_server: BrowserFileServerManager) -> Self {
         Self {
+            file_server,
             loopback_router,
             workspace_lookups: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -31,6 +34,14 @@ impl BrowserLoopbackManager {
         let Some(workspace) = browser_label_workspace(webview_label) else {
             return Ok(None);
         };
+
+        if self
+            .file_server
+            .logical_url_for_resolved_url(original_url)
+            .is_some()
+        {
+            return Ok(None);
+        }
 
         if self
             .loopback_router
@@ -75,4 +86,28 @@ fn browser_label_workspace(label: &str) -> Option<&str> {
         return None;
     }
     parts.next()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::browser_file_server::workspace_file_logical_url;
+
+    #[test]
+    fn rewrite_loopback_url_skips_workspace_file_server_requests() {
+        let file_server = BrowserFileServerManager::new().expect("file server");
+        let manager = BrowserLoopbackManager::new(RouterManager::default(), file_server.clone());
+        let logical =
+            workspace_file_logical_url("demo-workspace", "docs/report.final.pdf").expect("url");
+        let resolved = file_server
+            .rewrite_workspace_file_url(&logical)
+            .expect("resolved url")
+            .expect("workspace file url");
+
+        let rewritten = manager
+            .rewrite_loopback_url("browser:demo-workspace:tab-1", &resolved)
+            .expect("rewrite result");
+
+        assert_eq!(rewritten, None);
+    }
 }

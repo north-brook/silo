@@ -10,14 +10,13 @@ use crate::terminal::TerminalManager;
 use crate::workspaces::{self, WorkspaceLookup};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 use tauri::State;
 use toml::Value as TomlValue;
-
-const MAX_CHECK_LOG_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone)]
 struct CommandResult {
@@ -30,9 +29,10 @@ struct CommandResult {
 struct BranchWorkspaceContext {
     lookup: WorkspaceLookup,
     target_branch: String,
+    repo_owner: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PullRequestSummary {
     number: u64,
     head_ref_oid: String,
@@ -41,6 +41,52 @@ struct PullRequestSummary {
     url: String,
     title: String,
     body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HistoricalPullRequestCacheKey {
+    workspace: String,
+    account: String,
+    gcloud_project: String,
+    branch: String,
+    target_branch: String,
+}
+
+#[derive(Debug, Clone)]
+struct CachedHistoricalPullRequest {
+    pull_request: Option<PullRequestSummary>,
+    cached_at: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CurrentPullRequestCacheKey {
+    workspace: String,
+    account: String,
+    gcloud_project: String,
+    branch: String,
+    target_branch: String,
+}
+
+#[derive(Debug, Clone)]
+struct CachedCurrentPullRequest {
+    pull_request: PullRequestSummary,
+    cached_at: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PullRequestHeadCacheKey {
+    workspace: String,
+    account: String,
+    gcloud_project: String,
+    pr_number: u64,
+    head_ref_oid: String,
+}
+
+#[derive(Debug, Clone)]
+struct CachedPullRequestData<T> {
+    value: T,
+    terminal: bool,
+    verified_at: Instant,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -97,9 +143,6 @@ pub struct Check {
     link: Option<String>,
     started_at: Option<String>,
     completed_at: Option<String>,
-    log_excerpt: String,
-    log_truncated: bool,
-    log_available: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -123,11 +166,11 @@ pub enum CheckState {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct PullRequestObservation {
-    title: Option<String>,
-    body: Option<String>,
-    deployments: Vec<Deployment>,
-    checks: Vec<Check>,
+pub struct PullRequestChecksSummary {
+    total: usize,
+    has_pending: bool,
+    has_failing: bool,
+    has_cancelled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -138,9 +181,47 @@ pub struct PullRequestStatus {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PullRequestStatusSummary {
+    status: String,
+    number: u64,
+    url: String,
+    head_ref_oid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checks: Option<PullRequestChecksSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PullRequestDetails {
+    title: Option<String>,
+    body: Option<String>,
+    checks: Vec<Check>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct GitTerminalResult {
     attachment_id: String,
 }
+
+// Cache only the historical fallback. The live `gh pr view` lookup still runs on
+// every poll so newly opened PRs show up immediately.
+const HISTORICAL_PULL_REQUEST_CACHE_TTL: Duration = Duration::from_secs(300);
+static HISTORICAL_PULL_REQUEST_CACHE: LazyLock<
+    Mutex<HashMap<HistoricalPullRequestCacheKey, CachedHistoricalPullRequest>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+const CURRENT_PULL_REQUEST_CACHE_TTL: Duration = Duration::from_secs(10);
+static CURRENT_PULL_REQUEST_CACHE: LazyLock<
+    Mutex<HashMap<CurrentPullRequestCacheKey, CachedCurrentPullRequest>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+const TERMINAL_PULL_REQUEST_DATA_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
+static PULL_REQUEST_CHECKS_SUMMARY_CACHE: LazyLock<
+    Mutex<HashMap<PullRequestHeadCacheKey, CachedPullRequestData<PullRequestChecksSummary>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static PULL_REQUEST_CHECKS_CACHE: LazyLock<
+    Mutex<HashMap<PullRequestHeadCacheKey, CachedPullRequestData<Vec<Check>>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static PULL_REQUEST_DEPLOYMENTS_CACHE: LazyLock<
+    Mutex<HashMap<PullRequestHeadCacheKey, CachedPullRequestData<Vec<Deployment>>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 async fn run_gh<I, S>(args: I) -> Option<CommandResult>
 where
@@ -391,6 +472,42 @@ pub async fn git_pr_status(workspace: String) -> Result<Option<PullRequestStatus
 }
 
 #[tauri::command]
+pub async fn git_pr_summary(workspace: String) -> Result<Option<PullRequestStatusSummary>, String> {
+    let context = branch_workspace_context(&workspace).await?;
+    let Some(pr) = find_pull_request(&context).await? else {
+        clear_pull_request_caches_for_workspace(&context);
+        return Ok(None);
+    };
+
+    let checks = if pr.status == "open" {
+        retain_current_pull_request_caches(&context, &pr);
+        match fetch_or_cached_pr_checks_summary(&context, &pr).await {
+            Ok(checks) => Some(checks),
+            Err(error) => {
+                log::warn!(
+                    "failed to summarize pull request checks for workspace {} pr {}: {}",
+                    workspace,
+                    pr.number,
+                    error
+                );
+                None
+            }
+        }
+    } else {
+        clear_pull_request_caches_for_workspace(&context);
+        None
+    };
+
+    Ok(Some(PullRequestStatusSummary {
+        status: pr.status,
+        number: pr.number,
+        url: pr.url,
+        head_ref_oid: pr.head_ref_oid,
+        checks,
+    }))
+}
+
+#[tauri::command]
 pub async fn git_tree_dirty(workspace: String) -> Result<bool, String> {
     log::info!("checking tree dirtiness for workspace {workspace}");
     let context = branch_workspace_context(&workspace).await?;
@@ -398,20 +515,32 @@ pub async fn git_tree_dirty(workspace: String) -> Result<bool, String> {
 }
 
 #[tauri::command]
-pub async fn git_pr_observe(workspace: String) -> Result<Option<PullRequestObservation>, String> {
+pub async fn git_pr_details(workspace: String) -> Result<Option<PullRequestDetails>, String> {
     let context = branch_workspace_context(&workspace).await?;
     let Some(pr) = find_open_pull_request(&context).await? else {
+        clear_pull_request_caches_for_workspace(&context);
         return Ok(None);
     };
 
-    let deployments = fetch_pr_deployments(&context, &pr).await?;
-    let checks = fetch_pr_checks(&context, &pr).await?;
-    Ok(Some(PullRequestObservation {
+    retain_current_pull_request_caches(&context, &pr);
+    let checks = fetch_or_cached_pr_checks(&context, &pr).await?;
+    Ok(Some(PullRequestDetails {
         title: Some(pr.title),
         body: Some(pr.body),
-        deployments,
         checks,
     }))
+}
+
+#[tauri::command]
+pub async fn git_pr_deployments(workspace: String) -> Result<Vec<Deployment>, String> {
+    let context = branch_workspace_context(&workspace).await?;
+    let Some(pr) = find_open_pull_request(&context).await? else {
+        clear_pull_request_caches_for_workspace(&context);
+        return Ok(Vec::new());
+    };
+
+    retain_current_pull_request_caches(&context, &pr);
+    fetch_or_cached_pr_deployments(&context, &pr).await
 }
 
 #[tauri::command]
@@ -422,6 +551,7 @@ pub async fn git_push(
 ) -> Result<GitTerminalResult, String> {
     log::info!("pushing workspace branch for {workspace}");
     let context = branch_workspace_context(&workspace).await?;
+    clear_pull_request_caches_for_workspace(&context);
     let branch = current_workspace_branch(&context).await?;
     let prompt = prompts::git_push_prompt(&branch, &context.target_branch);
     let command = terminal::codex_prompt_command(&prompt);
@@ -491,6 +621,8 @@ pub async fn git_rerun_failed_checks(workspace: String) -> Result<(), String> {
         }
     }
 
+    clear_pull_request_caches(&pull_request_head_cache_key(&context, &pr));
+
     Ok(())
 }
 
@@ -502,6 +634,7 @@ pub async fn git_create_pr(
 ) -> Result<GitTerminalResult, String> {
     log::info!("creating pull request for workspace {workspace}");
     let context = branch_workspace_context(&workspace).await?;
+    clear_pull_request_caches_for_workspace(&context);
     let branch = current_workspace_branch(&context).await?;
     let prompt = prompts::git_create_pr_prompt(&branch, &context.target_branch);
     let command = terminal::codex_prompt_command(&prompt);
@@ -554,6 +687,7 @@ async fn branch_workspace_context(workspace: &str) -> Result<BranchWorkspaceCont
             workspace
         ));
     }
+    let project = workspace_project_config(&lookup.workspace)?;
 
     let target_branch = lookup
         .workspace
@@ -566,6 +700,7 @@ async fn branch_workspace_context(workspace: &str) -> Result<BranchWorkspaceCont
     Ok(BranchWorkspaceContext {
         lookup,
         target_branch,
+        repo_owner: github_repo_owner_from_remote_url(&project.remote_url)?,
     })
 }
 
@@ -619,24 +754,481 @@ async fn current_workspace_branch(context: &BranchWorkspaceContext) -> Result<St
     Ok(branch.to_string())
 }
 
+fn workspace_project_config(workspace: &workspaces::Workspace) -> Result<ProjectConfig, String> {
+    let project_name = workspace
+        .project()
+        .ok_or_else(|| format!("workspace {} is missing a project label", workspace.name()))?;
+    let config = ConfigStore::new()
+        .and_then(|store| store.load())
+        .map_err(|error| error.to_string())?;
+    config.projects.get(project_name).cloned().ok_or_else(|| {
+        format!(
+            "project not found for workspace {}: {project_name}",
+            workspace.name()
+        )
+    })
+}
+
+fn github_repo_owner_from_remote_url(remote_url: &str) -> Result<String, String> {
+    let remote_url = remote_url.trim().trim_end_matches('/');
+    let path = remote_url
+        .strip_prefix("git@github.com:")
+        .or_else(|| remote_url.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| remote_url.strip_prefix("ssh://github.com/"))
+        .or_else(|| remote_url.strip_prefix("https://github.com/"))
+        .or_else(|| remote_url.strip_prefix("http://github.com/"))
+        .or_else(|| remote_url.strip_prefix("git://github.com/"))
+        .ok_or_else(|| format!("unsupported GitHub remote URL: {remote_url}"))?;
+    let path = path.trim_end_matches(".git").trim_end_matches('/');
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    let owner = segments
+        .next()
+        .filter(|owner| !owner.is_empty())
+        .ok_or_else(|| format!("invalid GitHub remote URL: {remote_url}"))?;
+    let repo = segments
+        .next()
+        .filter(|repo| !repo.is_empty())
+        .ok_or_else(|| format!("invalid GitHub remote URL: {remote_url}"))?;
+    if segments.next().is_some() {
+        return Err(format!("invalid GitHub remote URL: {remote_url}"));
+    }
+
+    let _ = repo;
+    Ok(owner.to_string())
+}
+
+fn historical_pull_request_cache_key(
+    context: &BranchWorkspaceContext,
+    branch: &str,
+) -> HistoricalPullRequestCacheKey {
+    HistoricalPullRequestCacheKey {
+        workspace: context.lookup.workspace.name().to_string(),
+        account: context.lookup.account.clone(),
+        gcloud_project: context.lookup.gcloud_project.clone(),
+        branch: branch.to_string(),
+        target_branch: context.target_branch.clone(),
+    }
+}
+
+fn cached_historical_pull_request(
+    key: &HistoricalPullRequestCacheKey,
+) -> Option<Option<PullRequestSummary>> {
+    let Ok(mut cache) = HISTORICAL_PULL_REQUEST_CACHE.lock() else {
+        log::warn!(
+            "failed to lock historical pull request cache for workspace {}",
+            key.workspace
+        );
+        return None;
+    };
+
+    match cache.get(key).cloned() {
+        Some(entry) if entry.cached_at.elapsed() < HISTORICAL_PULL_REQUEST_CACHE_TTL => {
+            log::trace!(
+                "historical pull request cache hit workspace={} branch={} target_branch={}",
+                key.workspace,
+                key.branch,
+                key.target_branch
+            );
+            Some(entry.pull_request)
+        }
+        Some(_) => {
+            cache.remove(key);
+            None
+        }
+        None => None,
+    }
+}
+
+fn cache_historical_pull_request(
+    key: HistoricalPullRequestCacheKey,
+    pull_request: Option<PullRequestSummary>,
+) {
+    let Ok(mut cache) = HISTORICAL_PULL_REQUEST_CACHE.lock() else {
+        log::warn!(
+            "failed to lock historical pull request cache for workspace {}",
+            key.workspace
+        );
+        return;
+    };
+
+    cache.insert(
+        key,
+        CachedHistoricalPullRequest {
+            pull_request,
+            cached_at: Instant::now(),
+        },
+    );
+}
+
+fn clear_historical_pull_request_cache(key: &HistoricalPullRequestCacheKey) {
+    let Ok(mut cache) = HISTORICAL_PULL_REQUEST_CACHE.lock() else {
+        log::warn!(
+            "failed to lock historical pull request cache for workspace {}",
+            key.workspace
+        );
+        return;
+    };
+
+    cache.remove(key);
+}
+
+fn current_pull_request_cache_key(
+    context: &BranchWorkspaceContext,
+    branch: &str,
+) -> CurrentPullRequestCacheKey {
+    CurrentPullRequestCacheKey {
+        workspace: context.lookup.workspace.name().to_string(),
+        account: context.lookup.account.clone(),
+        gcloud_project: context.lookup.gcloud_project.clone(),
+        branch: branch.to_string(),
+        target_branch: context.target_branch.clone(),
+    }
+}
+
+fn cached_current_pull_request(key: &CurrentPullRequestCacheKey) -> Option<PullRequestSummary> {
+    let Ok(mut cache) = CURRENT_PULL_REQUEST_CACHE.lock() else {
+        log::warn!(
+            "failed to lock current pull request cache for workspace {}",
+            key.workspace
+        );
+        return None;
+    };
+
+    match cache.get(key).cloned() {
+        Some(entry) if entry.cached_at.elapsed() < CURRENT_PULL_REQUEST_CACHE_TTL => {
+            log::trace!(
+                "current pull request cache hit workspace={} branch={} target_branch={}",
+                key.workspace,
+                key.branch,
+                key.target_branch
+            );
+            Some(entry.pull_request)
+        }
+        Some(_) => {
+            cache.remove(key);
+            None
+        }
+        None => None,
+    }
+}
+
+fn cache_current_pull_request(key: CurrentPullRequestCacheKey, pull_request: PullRequestSummary) {
+    let Ok(mut cache) = CURRENT_PULL_REQUEST_CACHE.lock() else {
+        log::warn!(
+            "failed to lock current pull request cache for workspace {}",
+            key.workspace
+        );
+        return;
+    };
+
+    cache.insert(
+        key,
+        CachedCurrentPullRequest {
+            pull_request,
+            cached_at: Instant::now(),
+        },
+    );
+}
+
+fn clear_current_pull_request_cache(key: &CurrentPullRequestCacheKey) {
+    let Ok(mut cache) = CURRENT_PULL_REQUEST_CACHE.lock() else {
+        log::warn!(
+            "failed to lock current pull request cache for workspace {}",
+            key.workspace
+        );
+        return;
+    };
+
+    cache.remove(key);
+}
+
+fn clear_current_pull_request_cache_for_workspace(context: &BranchWorkspaceContext) {
+    let workspace = context.lookup.workspace.name().to_string();
+    let account = context.lookup.account.clone();
+    let gcloud_project = context.lookup.gcloud_project.clone();
+    let Ok(mut cache) = CURRENT_PULL_REQUEST_CACHE.lock() else {
+        log::warn!(
+            "failed to lock current pull request cache for workspace {}",
+            workspace
+        );
+        return;
+    };
+
+    cache.retain(|key, _| {
+        key.workspace != workspace || key.account != account || key.gcloud_project != gcloud_project
+    });
+}
+
+fn pull_request_head_cache_key(
+    context: &BranchWorkspaceContext,
+    pr: &PullRequestSummary,
+) -> PullRequestHeadCacheKey {
+    PullRequestHeadCacheKey {
+        workspace: context.lookup.workspace.name().to_string(),
+        account: context.lookup.account.clone(),
+        gcloud_project: context.lookup.gcloud_project.clone(),
+        pr_number: pr.number,
+        head_ref_oid: pr.head_ref_oid.clone(),
+    }
+}
+
+fn is_terminal_pull_request_checks_summary(summary: &PullRequestChecksSummary) -> bool {
+    summary.total > 0 && !summary.has_pending
+}
+
+fn is_terminal_pull_request_checks(checks: &[Check]) -> bool {
+    is_terminal_pull_request_checks_summary(&summarize_check_states(
+        checks.iter().map(|check| check.state),
+    ))
+}
+
+fn is_terminal_deployment_state(state: &str) -> bool {
+    matches!(
+        state
+            .trim()
+            .to_ascii_lowercase()
+            .replace([' ', '-'], "_")
+            .as_str(),
+        "success" | "failure" | "error" | "inactive"
+    )
+}
+
+fn is_terminal_pull_request_deployments(deployments: &[Deployment]) -> bool {
+    !deployments.is_empty()
+        && deployments
+            .iter()
+            .all(|deployment| is_terminal_deployment_state(&deployment.state))
+}
+
+fn cached_pull_request_data<T: Clone>(
+    cache: &LazyLock<Mutex<HashMap<PullRequestHeadCacheKey, CachedPullRequestData<T>>>>,
+    key: &PullRequestHeadCacheKey,
+    cache_name: &str,
+) -> Option<T> {
+    let Ok(mut cache) = cache.lock() else {
+        log::warn!(
+            "failed to lock {cache_name} cache for workspace {} pr {}",
+            key.workspace,
+            key.pr_number
+        );
+        return None;
+    };
+
+    match cache.get(key).cloned() {
+        Some(entry)
+            if entry.terminal
+                && entry.verified_at.elapsed() < TERMINAL_PULL_REQUEST_DATA_REFRESH_INTERVAL =>
+        {
+            log::trace!(
+                "{cache_name} cache hit workspace={} pr={} head_ref_oid={}",
+                key.workspace,
+                key.pr_number,
+                key.head_ref_oid
+            );
+            Some(entry.value)
+        }
+        Some(entry) if !entry.terminal => None,
+        Some(_) => {
+            cache.remove(key);
+            None
+        }
+        None => None,
+    }
+}
+
+fn cache_pull_request_data<T>(
+    cache: &LazyLock<Mutex<HashMap<PullRequestHeadCacheKey, CachedPullRequestData<T>>>>,
+    key: PullRequestHeadCacheKey,
+    value: T,
+    terminal: bool,
+    cache_name: &str,
+) {
+    let Ok(mut cache) = cache.lock() else {
+        log::warn!(
+            "failed to lock {cache_name} cache for workspace {} pr {}",
+            key.workspace,
+            key.pr_number
+        );
+        return;
+    };
+
+    cache.insert(
+        key,
+        CachedPullRequestData {
+            value,
+            terminal,
+            verified_at: Instant::now(),
+        },
+    );
+}
+
+fn clear_pull_request_data_cache<T>(
+    cache: &LazyLock<Mutex<HashMap<PullRequestHeadCacheKey, CachedPullRequestData<T>>>>,
+    key: &PullRequestHeadCacheKey,
+    cache_name: &str,
+) {
+    let Ok(mut cache) = cache.lock() else {
+        log::warn!(
+            "failed to lock {cache_name} cache for workspace {} pr {}",
+            key.workspace,
+            key.pr_number
+        );
+        return;
+    };
+
+    cache.remove(key);
+}
+
+fn retain_pull_request_data_cache<T, F>(
+    cache: &LazyLock<Mutex<HashMap<PullRequestHeadCacheKey, CachedPullRequestData<T>>>>,
+    cache_name: &str,
+    mut predicate: F,
+) where
+    F: FnMut(&PullRequestHeadCacheKey) -> bool,
+{
+    let Ok(mut cache) = cache.lock() else {
+        log::warn!("failed to lock {cache_name} cache for retain");
+        return;
+    };
+
+    cache.retain(|key, _| predicate(key));
+}
+
+fn retain_current_pull_request_data_cache<T>(
+    cache: &LazyLock<Mutex<HashMap<PullRequestHeadCacheKey, CachedPullRequestData<T>>>>,
+    cache_name: &str,
+    context: &BranchWorkspaceContext,
+    pr: &PullRequestSummary,
+) {
+    let workspace = context.lookup.workspace.name().to_string();
+    let account = context.lookup.account.clone();
+    let gcloud_project = context.lookup.gcloud_project.clone();
+    let pr_number = pr.number;
+    let head_ref_oid = pr.head_ref_oid.clone();
+
+    retain_pull_request_data_cache(cache, cache_name, |key| {
+        key.workspace != workspace
+            || key.account != account
+            || key.gcloud_project != gcloud_project
+            || (key.pr_number == pr_number && key.head_ref_oid == head_ref_oid)
+    });
+}
+
+fn clear_pull_request_data_cache_for_workspace<T>(
+    cache: &LazyLock<Mutex<HashMap<PullRequestHeadCacheKey, CachedPullRequestData<T>>>>,
+    cache_name: &str,
+    context: &BranchWorkspaceContext,
+) {
+    let workspace = context.lookup.workspace.name().to_string();
+    let account = context.lookup.account.clone();
+    let gcloud_project = context.lookup.gcloud_project.clone();
+
+    retain_pull_request_data_cache(cache, cache_name, |key| {
+        key.workspace != workspace || key.account != account || key.gcloud_project != gcloud_project
+    });
+}
+
+fn clear_pull_request_caches(key: &PullRequestHeadCacheKey) {
+    clear_pull_request_data_cache(
+        &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+        key,
+        "pull request checks summary",
+    );
+    clear_pull_request_data_cache(&PULL_REQUEST_CHECKS_CACHE, key, "pull request checks");
+    clear_pull_request_data_cache(
+        &PULL_REQUEST_DEPLOYMENTS_CACHE,
+        key,
+        "pull request deployments",
+    );
+}
+
+fn retain_current_pull_request_caches(context: &BranchWorkspaceContext, pr: &PullRequestSummary) {
+    retain_current_pull_request_data_cache(
+        &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+        "pull request checks summary",
+        context,
+        pr,
+    );
+    retain_current_pull_request_data_cache(
+        &PULL_REQUEST_CHECKS_CACHE,
+        "pull request checks",
+        context,
+        pr,
+    );
+    retain_current_pull_request_data_cache(
+        &PULL_REQUEST_DEPLOYMENTS_CACHE,
+        "pull request deployments",
+        context,
+        pr,
+    );
+}
+
+fn clear_pull_request_caches_for_workspace(context: &BranchWorkspaceContext) {
+    clear_current_pull_request_cache_for_workspace(context);
+    clear_pull_request_data_cache_for_workspace(
+        &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+        "pull request checks summary",
+        context,
+    );
+    clear_pull_request_data_cache_for_workspace(
+        &PULL_REQUEST_CHECKS_CACHE,
+        "pull request checks",
+        context,
+    );
+    clear_pull_request_data_cache_for_workspace(
+        &PULL_REQUEST_DEPLOYMENTS_CACHE,
+        "pull request deployments",
+        context,
+    );
+}
+
 async fn find_open_pull_request(
     context: &BranchWorkspaceContext,
 ) -> Result<Option<PullRequestSummary>, String> {
-    Ok(find_pull_request(context)
+    let branch = current_workspace_branch(context).await?;
+    let cache_key = current_pull_request_cache_key(context, &branch);
+    if let Some(pull_request) = cached_current_pull_request(&cache_key) {
+        return Ok(Some(pull_request));
+    }
+
+    let pull_request = find_current_pull_request(context, &branch)
         .await?
-        .filter(|pull_request| pull_request.status == "open"))
+        .filter(|pull_request| pull_request.status == "open");
+    if let Some(pull_request) = pull_request.as_ref() {
+        cache_current_pull_request(cache_key, pull_request.clone());
+    } else {
+        clear_current_pull_request_cache(&cache_key);
+    }
+    Ok(pull_request)
 }
 
 async fn find_pull_request(
     context: &BranchWorkspaceContext,
 ) -> Result<Option<PullRequestSummary>, String> {
     let branch = current_workspace_branch(context).await?;
+    let cache_key = historical_pull_request_cache_key(context, &branch);
+    let current_cache_key = current_pull_request_cache_key(context, &branch);
 
+    // Always resolve the current PR live so opening a PR shows up on the next poll.
     if let Some(pull_request) = find_current_pull_request(context, &branch).await? {
+        clear_historical_pull_request_cache(&cache_key);
+        if pull_request.status == "open" {
+            cache_current_pull_request(current_cache_key, pull_request.clone());
+        } else {
+            clear_current_pull_request_cache(&current_cache_key);
+        }
         return Ok(Some(pull_request));
     }
 
-    find_historical_pull_request(context, &branch).await
+    clear_current_pull_request_cache(&current_cache_key);
+
+    if let Some(pull_request) = cached_historical_pull_request(&cache_key) {
+        return Ok(pull_request);
+    }
+
+    let pull_request = find_historical_pull_request(context, &branch).await?;
+    cache_historical_pull_request(cache_key, pull_request.clone());
+    Ok(pull_request)
 }
 
 async fn find_current_pull_request(
@@ -662,10 +1254,11 @@ async fn find_historical_pull_request(
     let command = format!(
         "BRANCH={branch}\n\
 TARGET_BRANCH={target_branch}\n\
-REPO_OWNER=\"$(gh repo view --json owner --jq '.owner.login')\"\n\
+REPO_OWNER={repo_owner}\n\
 gh api --method GET repos/{{owner}}/{{repo}}/pulls -f state=closed -f head=\"$REPO_OWNER:$BRANCH\" -f base=\"$TARGET_BRANCH\" -f per_page=100 --jq 'map({{number, headRefName: .head.ref, baseRefName: .base.ref, headRefOid: .head.sha, state: .state, mergedAt: .merged_at, updatedAt: .updated_at, url: .html_url, title, body}})'",
         branch = shell_quote(branch),
         target_branch = shell_quote(&context.target_branch),
+        repo_owner = shell_quote(&context.repo_owner),
     );
     let result = run_workspace_command(context, &command).await?;
     if !result.success {
@@ -691,43 +1284,74 @@ async fn fetch_pr_checks(
         ));
     }
 
-    let checks = parse_checks_json(&result.stdout)?;
-    let mut observed = Vec::with_capacity(checks.len());
-    for check in checks {
-        observed.push(enrich_check_with_logs(context, check).await);
-    }
-    Ok(observed)
+    parse_checks_json(&result.stdout)
 }
 
-async fn enrich_check_with_logs(context: &BranchWorkspaceContext, mut check: Check) -> Check {
-    let Some(link) = check.link.as_deref() else {
-        return check;
-    };
-    let Some(job_id) = github_actions_job_id(link) else {
-        return check;
-    };
-
-    let command = format!("gh run view --log --job {}", shell_quote(&job_id));
-    match run_workspace_command(context, &command).await {
-        Ok(result) if result.success => {
-            let (excerpt, truncated) = truncate_log_excerpt(&result.stdout);
-            check.log_excerpt = excerpt;
-            check.log_truncated = truncated;
-            check.log_available = true;
-        }
-        Ok(result) => {
-            log::warn!(
-                "failed to collect check logs for job {}: {}",
-                job_id,
-                result.stderr.trim()
-            );
-        }
-        Err(error) => {
-            log::warn!("failed to collect check logs for job {}: {}", job_id, error);
-        }
+async fn fetch_pr_checks_summary(
+    context: &BranchWorkspaceContext,
+    pr: &PullRequestSummary,
+) -> Result<PullRequestChecksSummary, String> {
+    let command = format!(
+        "gh pr checks {} --json state || status=$?; if [ \"${{status:-0}}\" -ne 0 ] && [ \"${{status:-0}}\" -ne 8 ]; then exit \"${{status}}\"; fi",
+        pr.number
+    );
+    let result = run_workspace_command(context, &command).await?;
+    if !result.success {
+        return Err(git_error(
+            "failed to summarize pull request checks",
+            &result.stderr,
+        ));
     }
 
-    check
+    parse_checks_summary_json(&result.stdout)
+}
+
+async fn fetch_or_cached_pr_checks_summary(
+    context: &BranchWorkspaceContext,
+    pr: &PullRequestSummary,
+) -> Result<PullRequestChecksSummary, String> {
+    let cache_key = pull_request_head_cache_key(context, pr);
+    if let Some(summary) = cached_pull_request_data(
+        &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+        &cache_key,
+        "pull request checks summary",
+    ) {
+        return Ok(summary);
+    }
+
+    let summary = fetch_pr_checks_summary(context, pr).await?;
+    cache_pull_request_data(
+        &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+        cache_key,
+        summary.clone(),
+        is_terminal_pull_request_checks_summary(&summary),
+        "pull request checks summary",
+    );
+    Ok(summary)
+}
+
+async fn fetch_or_cached_pr_checks(
+    context: &BranchWorkspaceContext,
+    pr: &PullRequestSummary,
+) -> Result<Vec<Check>, String> {
+    let cache_key = pull_request_head_cache_key(context, pr);
+    if let Some(checks) = cached_pull_request_data(
+        &PULL_REQUEST_CHECKS_CACHE,
+        &cache_key,
+        "pull request checks",
+    ) {
+        return Ok(checks);
+    }
+
+    let checks = fetch_pr_checks(context, pr).await?;
+    cache_pull_request_data(
+        &PULL_REQUEST_CHECKS_CACHE,
+        cache_key,
+        checks.clone(),
+        is_terminal_pull_request_checks(&checks),
+        "pull request checks",
+    );
+    Ok(checks)
 }
 
 async fn fetch_pr_deployments(
@@ -758,6 +1382,30 @@ async fn fetch_pr_deployments(
             .then_with(|| left.environment.cmp(&right.environment))
             .then_with(|| left.id.cmp(&right.id))
     });
+    Ok(deployments)
+}
+
+async fn fetch_or_cached_pr_deployments(
+    context: &BranchWorkspaceContext,
+    pr: &PullRequestSummary,
+) -> Result<Vec<Deployment>, String> {
+    let cache_key = pull_request_head_cache_key(context, pr);
+    if let Some(deployments) = cached_pull_request_data(
+        &PULL_REQUEST_DEPLOYMENTS_CACHE,
+        &cache_key,
+        "pull request deployments",
+    ) {
+        return Ok(deployments);
+    }
+
+    let deployments = fetch_pr_deployments(context, pr).await?;
+    cache_pull_request_data(
+        &PULL_REQUEST_DEPLOYMENTS_CACHE,
+        cache_key,
+        deployments.clone(),
+        is_terminal_pull_request_deployments(&deployments),
+        "pull request deployments",
+    );
     Ok(deployments)
 }
 
@@ -1225,11 +1873,20 @@ fn parse_checks_json(stdout: &str) -> Result<Vec<Check>, String> {
             link: string_field(check, "link").filter(|value| !value.is_empty()),
             started_at: string_field(check, "startedAt"),
             completed_at: string_field(check, "completedAt"),
-            log_excerpt: String::new(),
-            log_truncated: false,
-            log_available: false,
         })
         .collect())
+}
+
+fn parse_checks_summary_json(stdout: &str) -> Result<PullRequestChecksSummary, String> {
+    let value: Value = serde_json::from_str(stdout)
+        .map_err(|error| format!("failed to parse check response: {error}"))?;
+    let checks = value
+        .as_array()
+        .ok_or_else(|| "check response was not an array".to_string())?;
+
+    Ok(summarize_check_states(checks.iter().map(|check| {
+        parse_check_state(string_field(check, "state").as_deref())
+    })))
 }
 
 fn parse_deployments_json(stdout: &str) -> Result<Vec<Deployment>, String> {
@@ -1339,18 +1996,6 @@ fn strip_diff_prefix(path: &str) -> String {
         .to_string()
 }
 
-fn github_actions_job_id(link: &str) -> Option<String> {
-    let (_, tail) = link
-        .split_once("/jobs/")
-        .or_else(|| link.split_once("/job/"))?;
-    let id: String = tail.chars().take_while(|ch| ch.is_ascii_digit()).collect();
-    if id.is_empty() {
-        None
-    } else {
-        Some(id)
-    }
-}
-
 fn github_actions_run_id(link: &str) -> Option<String> {
     let (_, tail) = link.split_once("/actions/runs/")?;
     let id: String = tail.chars().take_while(|ch| ch.is_ascii_digit()).collect();
@@ -1394,16 +2039,35 @@ fn parse_check_state(value: Option<&str>) -> CheckState {
     }
 }
 
-fn truncate_log_excerpt(log: &str) -> (String, bool) {
-    if log.len() <= MAX_CHECK_LOG_BYTES {
-        return (log.to_string(), false);
+fn summarize_check_states<I>(states: I) -> PullRequestChecksSummary
+where
+    I: IntoIterator<Item = CheckState>,
+{
+    let mut total = 0_usize;
+    let mut has_pending = false;
+    let mut has_failing = false;
+    let mut has_cancelled = false;
+
+    for state in states {
+        total += 1;
+        has_pending |= matches!(
+            state,
+            CheckState::InProgress
+                | CheckState::Pending
+                | CheckState::Queued
+                | CheckState::Waiting
+                | CheckState::Requested
+        );
+        has_failing |= is_rerunnable_failed_check_state(state);
+        has_cancelled |= state == CheckState::Cancelled;
     }
 
-    let mut start = log.len() - MAX_CHECK_LOG_BYTES;
-    while !log.is_char_boundary(start) {
-        start += 1;
+    PullRequestChecksSummary {
+        total,
+        has_pending,
+        has_failing,
+        has_cancelled,
     }
-    (log[start..].to_string(), true)
 }
 
 fn string_field(value: &Value, field: &str) -> Option<String> {
@@ -1461,6 +2125,93 @@ mod tests {
     use super::*;
     use crate::config::{ClaudeConfig, CodexConfig, GcloudConfig, GitConfig, SiloConfig};
     use indexmap::IndexMap;
+
+    fn test_historical_pull_request_cache_key(name: &str) -> HistoricalPullRequestCacheKey {
+        HistoricalPullRequestCacheKey {
+            workspace: name.to_string(),
+            account: "account@example.com".to_string(),
+            gcloud_project: "example-project".to_string(),
+            branch: "feature/test".to_string(),
+            target_branch: "main".to_string(),
+        }
+    }
+
+    fn test_current_pull_request_cache_key(name: &str) -> CurrentPullRequestCacheKey {
+        CurrentPullRequestCacheKey {
+            workspace: name.to_string(),
+            account: "account@example.com".to_string(),
+            gcloud_project: "example-project".to_string(),
+            branch: "feature/test".to_string(),
+            target_branch: "main".to_string(),
+        }
+    }
+
+    fn test_pull_request_summary(number: u64) -> PullRequestSummary {
+        PullRequestSummary {
+            number,
+            head_ref_oid: format!("head-{number}"),
+            status: "merged".to_string(),
+            updated_at: Some("2026-03-23T12:00:00Z".to_string()),
+            url: format!("https://github.com/example/repo/pull/{number}"),
+            title: format!("PR {number}"),
+            body: format!("body {number}"),
+        }
+    }
+
+    fn test_pull_request_head_cache_key(
+        workspace: &str,
+        pr_number: u64,
+        head_ref_oid: &str,
+    ) -> PullRequestHeadCacheKey {
+        PullRequestHeadCacheKey {
+            workspace: workspace.to_string(),
+            account: "account@example.com".to_string(),
+            gcloud_project: "example-project".to_string(),
+            pr_number,
+            head_ref_oid: head_ref_oid.to_string(),
+        }
+    }
+
+    fn test_pull_request_checks_summary(
+        total: usize,
+        has_pending: bool,
+        has_failing: bool,
+        has_cancelled: bool,
+    ) -> PullRequestChecksSummary {
+        PullRequestChecksSummary {
+            total,
+            has_pending,
+            has_failing,
+            has_cancelled,
+        }
+    }
+
+    fn test_check(name: &str, state: CheckState) -> Check {
+        Check {
+            id: name.to_string(),
+            name: name.to_string(),
+            workflow: None,
+            state,
+            bucket: None,
+            description: None,
+            link: None,
+            started_at: None,
+            completed_at: None,
+        }
+    }
+
+    fn test_deployment(id: &str, state: &str) -> Deployment {
+        Deployment {
+            id: id.to_string(),
+            environment: format!("env-{id}"),
+            state: state.to_string(),
+            description: String::new(),
+            url: None,
+            created_at: Some("2026-03-23T12:00:00Z".to_string()),
+            updated_at: Some("2026-03-23T12:00:00Z".to_string()),
+            icon_url: None,
+        }
+    }
 
     #[test]
     fn parse_output_lines_ignores_empty_entries() {
@@ -1661,6 +2412,403 @@ index 1111111..2222222 100644\n\
     }
 
     #[test]
+    fn historical_pull_request_cache_returns_fresh_entries() {
+        let key = test_historical_pull_request_cache_key(
+            "historical-pull-request-cache-returns-fresh-entries",
+        );
+        let pull_request = Some(test_pull_request_summary(42));
+        clear_historical_pull_request_cache(&key);
+
+        cache_historical_pull_request(key.clone(), pull_request.clone());
+
+        assert_eq!(
+            cached_historical_pull_request(&key),
+            Some(pull_request.clone())
+        );
+
+        clear_historical_pull_request_cache(&key);
+    }
+
+    #[test]
+    fn historical_pull_request_cache_expires_stale_entries() {
+        let key =
+            test_historical_pull_request_cache_key("historical-pull-request-cache-expires-stale");
+        clear_historical_pull_request_cache(&key);
+        HISTORICAL_PULL_REQUEST_CACHE
+            .lock()
+            .expect("cache lock should succeed")
+            .insert(
+                key.clone(),
+                CachedHistoricalPullRequest {
+                    pull_request: Some(test_pull_request_summary(77)),
+                    cached_at: Instant::now()
+                        - HISTORICAL_PULL_REQUEST_CACHE_TTL
+                        - Duration::from_millis(1),
+                },
+            );
+
+        assert_eq!(cached_historical_pull_request(&key), None);
+        assert!(!HISTORICAL_PULL_REQUEST_CACHE
+            .lock()
+            .expect("cache lock should succeed")
+            .contains_key(&key));
+    }
+
+    #[test]
+    fn current_pull_request_cache_returns_fresh_entries() {
+        let key = test_current_pull_request_cache_key("current-pull-request-cache-returns-fresh");
+        let pull_request = test_pull_request_summary(81);
+        clear_current_pull_request_cache(&key);
+
+        cache_current_pull_request(key.clone(), pull_request.clone());
+
+        assert_eq!(cached_current_pull_request(&key), Some(pull_request));
+
+        clear_current_pull_request_cache(&key);
+    }
+
+    #[test]
+    fn current_pull_request_cache_expires_stale_entries() {
+        let key = test_current_pull_request_cache_key("current-pull-request-cache-expires-stale");
+        clear_current_pull_request_cache(&key);
+        CURRENT_PULL_REQUEST_CACHE
+            .lock()
+            .expect("cache lock should succeed")
+            .insert(
+                key.clone(),
+                CachedCurrentPullRequest {
+                    pull_request: test_pull_request_summary(82),
+                    cached_at: Instant::now()
+                        - CURRENT_PULL_REQUEST_CACHE_TTL
+                        - Duration::from_millis(1),
+                },
+            );
+
+        assert_eq!(cached_current_pull_request(&key), None);
+        assert!(!CURRENT_PULL_REQUEST_CACHE
+            .lock()
+            .expect("cache lock should succeed")
+            .contains_key(&key));
+    }
+
+    #[test]
+    fn pull_request_checks_summary_cache_returns_terminal_entries() {
+        let key = test_pull_request_head_cache_key("terminal-checks", 41, "head-terminal");
+        let summary = test_pull_request_checks_summary(4, false, false, false);
+        clear_pull_request_data_cache(
+            &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+            &key,
+            "pull request checks summary",
+        );
+
+        cache_pull_request_data(
+            &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+            key.clone(),
+            summary.clone(),
+            is_terminal_pull_request_checks_summary(&summary),
+            "pull request checks summary",
+        );
+
+        assert_eq!(
+            cached_pull_request_data(
+                &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+                &key,
+                "pull request checks summary",
+            ),
+            Some(summary)
+        );
+
+        clear_pull_request_data_cache(
+            &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+            &key,
+            "pull request checks summary",
+        );
+    }
+
+    #[test]
+    fn pull_request_checks_summary_cache_skips_non_terminal_entries() {
+        let key = test_pull_request_head_cache_key("pending-checks", 42, "head-pending");
+        clear_pull_request_data_cache(
+            &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+            &key,
+            "pull request checks summary",
+        );
+        let summary = test_pull_request_checks_summary(3, true, false, false);
+        cache_pull_request_data(
+            &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+            key.clone(),
+            summary,
+            false,
+            "pull request checks summary",
+        );
+
+        assert_eq!(
+            cached_pull_request_data(
+                &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+                &key,
+                "pull request checks summary",
+            ),
+            None
+        );
+
+        clear_pull_request_data_cache(
+            &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+            &key,
+            "pull request checks summary",
+        );
+    }
+
+    #[test]
+    fn pull_request_checks_summary_cache_expires_terminal_entries() {
+        let key = test_pull_request_head_cache_key("expired-checks", 43, "head-expired");
+        clear_pull_request_data_cache(
+            &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+            &key,
+            "pull request checks summary",
+        );
+        PULL_REQUEST_CHECKS_SUMMARY_CACHE
+            .lock()
+            .expect("cache lock should succeed")
+            .insert(
+                key.clone(),
+                CachedPullRequestData {
+                    value: test_pull_request_checks_summary(2, false, true, false),
+                    terminal: true,
+                    verified_at: Instant::now()
+                        - TERMINAL_PULL_REQUEST_DATA_REFRESH_INTERVAL
+                        - Duration::from_millis(1),
+                },
+            );
+
+        assert_eq!(
+            cached_pull_request_data(
+                &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+                &key,
+                "pull request checks summary",
+            ),
+            None
+        );
+        assert!(!PULL_REQUEST_CHECKS_SUMMARY_CACHE
+            .lock()
+            .expect("cache lock should succeed")
+            .contains_key(&key));
+    }
+
+    #[test]
+    fn pull_request_checks_summary_cache_misses_for_different_sha() {
+        let cached_key = test_pull_request_head_cache_key("sha-miss", 44, "head-before");
+        let requested_key = test_pull_request_head_cache_key("sha-miss", 44, "head-after");
+        clear_pull_request_data_cache(
+            &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+            &cached_key,
+            "pull request checks summary",
+        );
+        clear_pull_request_data_cache(
+            &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+            &requested_key,
+            "pull request checks summary",
+        );
+        let summary = test_pull_request_checks_summary(5, false, false, false);
+        cache_pull_request_data(
+            &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+            cached_key.clone(),
+            summary,
+            true,
+            "pull request checks summary",
+        );
+
+        assert_eq!(
+            cached_pull_request_data(
+                &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+                &requested_key,
+                "pull request checks summary",
+            ),
+            None
+        );
+
+        clear_pull_request_data_cache(
+            &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+            &cached_key,
+            "pull request checks summary",
+        );
+        clear_pull_request_data_cache(
+            &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+            &requested_key,
+            "pull request checks summary",
+        );
+    }
+
+    #[test]
+    fn clear_pull_request_checks_summary_cache_removes_entry() {
+        let key = test_pull_request_head_cache_key("clear-checks", 45, "head-clear");
+        let summary = test_pull_request_checks_summary(1, false, true, false);
+        cache_pull_request_data(
+            &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+            key.clone(),
+            summary,
+            true,
+            "pull request checks summary",
+        );
+
+        clear_pull_request_data_cache(
+            &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+            &key,
+            "pull request checks summary",
+        );
+
+        assert_eq!(
+            cached_pull_request_data(
+                &PULL_REQUEST_CHECKS_SUMMARY_CACHE,
+                &key,
+                "pull request checks summary",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn pull_request_checks_cache_returns_terminal_entries() {
+        let key = test_pull_request_head_cache_key("terminal-details", 46, "head-terminal");
+        let checks = vec![test_check("build", CheckState::Success)];
+        clear_pull_request_data_cache(&PULL_REQUEST_CHECKS_CACHE, &key, "pull request checks");
+
+        cache_pull_request_data(
+            &PULL_REQUEST_CHECKS_CACHE,
+            key.clone(),
+            checks.clone(),
+            is_terminal_pull_request_checks(&checks),
+            "pull request checks",
+        );
+
+        assert_eq!(
+            cached_pull_request_data(&PULL_REQUEST_CHECKS_CACHE, &key, "pull request checks"),
+            Some(checks)
+        );
+
+        clear_pull_request_data_cache(&PULL_REQUEST_CHECKS_CACHE, &key, "pull request checks");
+    }
+
+    #[test]
+    fn pull_request_checks_cache_skips_non_terminal_entries() {
+        let key = test_pull_request_head_cache_key("pending-details", 47, "head-pending");
+        let checks = vec![test_check("build", CheckState::Pending)];
+        clear_pull_request_data_cache(&PULL_REQUEST_CHECKS_CACHE, &key, "pull request checks");
+
+        cache_pull_request_data(
+            &PULL_REQUEST_CHECKS_CACHE,
+            key.clone(),
+            checks,
+            false,
+            "pull request checks",
+        );
+
+        assert_eq!(
+            cached_pull_request_data(&PULL_REQUEST_CHECKS_CACHE, &key, "pull request checks"),
+            None
+        );
+
+        clear_pull_request_data_cache(&PULL_REQUEST_CHECKS_CACHE, &key, "pull request checks");
+    }
+
+    #[test]
+    fn pull_request_deployments_cache_returns_terminal_entries() {
+        let key = test_pull_request_head_cache_key("terminal-deployments", 48, "head-success");
+        let deployments = vec![
+            test_deployment("1", "success"),
+            test_deployment("2", "inactive"),
+        ];
+        clear_pull_request_data_cache(
+            &PULL_REQUEST_DEPLOYMENTS_CACHE,
+            &key,
+            "pull request deployments",
+        );
+
+        cache_pull_request_data(
+            &PULL_REQUEST_DEPLOYMENTS_CACHE,
+            key.clone(),
+            deployments.clone(),
+            is_terminal_pull_request_deployments(&deployments),
+            "pull request deployments",
+        );
+
+        assert_eq!(
+            cached_pull_request_data(
+                &PULL_REQUEST_DEPLOYMENTS_CACHE,
+                &key,
+                "pull request deployments",
+            ),
+            Some(deployments)
+        );
+
+        clear_pull_request_data_cache(
+            &PULL_REQUEST_DEPLOYMENTS_CACHE,
+            &key,
+            "pull request deployments",
+        );
+    }
+
+    #[test]
+    fn pull_request_deployments_cache_skips_pending_entries_and_empty_lists() {
+        let pending_key =
+            test_pull_request_head_cache_key("pending-deployments", 49, "head-pending");
+        let empty_key = test_pull_request_head_cache_key("empty-deployments", 50, "head-empty");
+        let pending_deployments = vec![test_deployment("1", "queued")];
+        clear_pull_request_data_cache(
+            &PULL_REQUEST_DEPLOYMENTS_CACHE,
+            &pending_key,
+            "pull request deployments",
+        );
+        clear_pull_request_data_cache(
+            &PULL_REQUEST_DEPLOYMENTS_CACHE,
+            &empty_key,
+            "pull request deployments",
+        );
+
+        cache_pull_request_data(
+            &PULL_REQUEST_DEPLOYMENTS_CACHE,
+            pending_key.clone(),
+            pending_deployments,
+            false,
+            "pull request deployments",
+        );
+        cache_pull_request_data(
+            &PULL_REQUEST_DEPLOYMENTS_CACHE,
+            empty_key.clone(),
+            Vec::<Deployment>::new(),
+            false,
+            "pull request deployments",
+        );
+
+        assert_eq!(
+            cached_pull_request_data(
+                &PULL_REQUEST_DEPLOYMENTS_CACHE,
+                &pending_key,
+                "pull request deployments",
+            ),
+            None
+        );
+        assert_eq!(
+            cached_pull_request_data(
+                &PULL_REQUEST_DEPLOYMENTS_CACHE,
+                &empty_key,
+                "pull request deployments",
+            ),
+            None
+        );
+
+        clear_pull_request_data_cache(
+            &PULL_REQUEST_DEPLOYMENTS_CACHE,
+            &pending_key,
+            "pull request deployments",
+        );
+        clear_pull_request_data_cache(
+            &PULL_REQUEST_DEPLOYMENTS_CACHE,
+            &empty_key,
+            "pull request deployments",
+        );
+    }
+
+    #[test]
     fn tree_dirty_remote_command_checks_index_worktree_and_untracked_files() {
         let command = tree_dirty_remote_command();
         assert!(command.contains("git diff --quiet --ignore-submodules --"));
@@ -1712,15 +2860,6 @@ index 1111111..2222222 100644\n\
     }
 
     #[test]
-    fn github_actions_job_id_extracts_job_segment() {
-        assert_eq!(
-            github_actions_job_id("https://github.com/example/repo/actions/runs/1/job/987654321"),
-            Some("987654321".to_string())
-        );
-        assert_eq!(github_actions_job_id("https://example.com"), None);
-    }
-
-    #[test]
     fn github_actions_run_id_extracts_run_segment() {
         assert_eq!(
             github_actions_run_id(
@@ -1746,14 +2885,6 @@ index 1111111..2222222 100644\n\
     }
 
     #[test]
-    fn truncate_log_excerpt_marks_large_logs() {
-        let log = "a".repeat(MAX_CHECK_LOG_BYTES + 32);
-        let (excerpt, truncated) = truncate_log_excerpt(&log);
-        assert!(truncated);
-        assert_eq!(excerpt.len(), MAX_CHECK_LOG_BYTES);
-    }
-
-    #[test]
     fn parse_check_state_normalizes_known_values() {
         assert_eq!(parse_check_state(Some("SUCCESS")), CheckState::Success);
         assert_eq!(
@@ -1770,5 +2901,50 @@ index 1111111..2222222 100644\n\
             CheckState::Unknown
         );
         assert_eq!(parse_check_state(None), CheckState::Unknown);
+    }
+
+    #[test]
+    fn summarize_check_states_tracks_pending_failures_and_cancellations() {
+        let summary = summarize_check_states([
+            CheckState::Success,
+            CheckState::Queued,
+            CheckState::Cancelled,
+            CheckState::Failure,
+        ]);
+
+        assert_eq!(
+            summary,
+            PullRequestChecksSummary {
+                total: 4,
+                has_pending: true,
+                has_failing: true,
+                has_cancelled: true,
+            }
+        );
+    }
+
+    #[test]
+    fn github_repo_owner_from_remote_url_parses_supported_formats() {
+        assert_eq!(
+            github_repo_owner_from_remote_url("git@github.com:example/demo.git")
+                .expect("scp-style remote should parse"),
+            "example"
+        );
+        assert_eq!(
+            github_repo_owner_from_remote_url("https://github.com/example/demo.git")
+                .expect("https remote should parse"),
+            "example"
+        );
+        assert_eq!(
+            github_repo_owner_from_remote_url("ssh://git@github.com/example/demo.git")
+                .expect("ssh remote should parse"),
+            "example"
+        );
+    }
+
+    #[test]
+    fn github_repo_owner_from_remote_url_rejects_invalid_inputs() {
+        assert!(github_repo_owner_from_remote_url("git@example.com:example/demo.git").is_err());
+        assert!(github_repo_owner_from_remote_url("https://github.com/example").is_err());
     }
 }

@@ -2,8 +2,8 @@ use crate::bootstrap;
 use crate::emit_workspace_lifecycle_changed;
 use crate::templates::{TemplateOperationStatus, TemplateState};
 use crate::workspaces::{
-    self, TemplateOperationState, Workspace, WorkspaceActiveSession, WorkspaceLifecycle,
-    WorkspaceLookup, WorkspaceSession,
+    self, GcloudResourceErrorKind, TemplateOperationState, Workspace, WorkspaceActiveSession,
+    WorkspaceLifecycle, WorkspaceLookup, WorkspaceSession,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -49,8 +49,8 @@ pub struct WorkspaceMetadataManager {
 }
 
 const WORKSPACE_METADATA_FLUSH_DELAY: Duration = Duration::from_millis(40);
-const WORKSPACE_METADATA_BACKGROUND_RETRY_ATTEMPTS: usize = 2;
-const WORKSPACE_METADATA_BACKGROUND_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const WORKSPACE_METADATA_BACKGROUND_RETRY_ATTEMPTS: usize = 4;
+const WORKSPACE_METADATA_BACKGROUND_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const TEMPLATE_TRANSIENT_STATE_TTL: Duration = Duration::from_secs(6);
 pub(crate) const BROWSER_LAST_ACTIVE_METADATA_KEY: &str = "browser-last-active";
 pub(crate) const BROWSER_SESSION_METADATA_PREFIX: &str = "browser-session-";
@@ -297,25 +297,40 @@ impl WorkspaceMetadataManager {
                 .collect::<Vec<_>>()
                 .join(", ");
             if let Err(error) = update_result {
-                if should_drop_workspace_metadata_retry(&error) {
-                    log::info!(
-                        "dropping background metadata update for missing workspace {} keys=[{}]: {}",
-                        workspace,
-                        entry_keys,
-                        error
-                    );
-                    self.clear_workspace_state_overlays(&workspace);
-                    if let Ok(mut pending) = self.metadata.lock() {
-                        pending.remove(&workspace);
+                match workspace_metadata_retry_disposition(&error) {
+                    WorkspaceMetadataRetryDisposition::DropMissingWorkspace => {
+                        log::info!(
+                            "dropping background metadata update for missing workspace {} keys=[{}]: {}",
+                            workspace,
+                            entry_keys,
+                            error
+                        );
+                        self.clear_workspace_state_overlays(&workspace);
+                        if let Ok(mut pending) = self.metadata.lock() {
+                            pending.remove(&workspace);
+                        }
+                        return;
                     }
-                    return;
+                    WorkspaceMetadataRetryDisposition::RetryFingerprintConflict => {
+                        log::info!(
+                            "background metadata update hit metadata fingerprint conflict for workspace {} keys=[{}], retrying: {}",
+                            workspace,
+                            entry_keys,
+                            error
+                        );
+                        if let Ok(refreshed) = workspaces::find_workspace(&workspace).await {
+                            current_lookup = refreshed;
+                        }
+                    }
+                    WorkspaceMetadataRetryDisposition::RetryOther => {
+                        log::warn!(
+                            "background metadata update failed for workspace {} keys=[{}]: {}",
+                            workspace,
+                            entry_keys,
+                            error
+                        );
+                    }
                 }
-                log::warn!(
-                    "background metadata update failed for workspace {} keys=[{}]: {}",
-                    workspace,
-                    entry_keys,
-                    error
-                );
                 if let Ok(mut pending) = self.metadata.lock() {
                     let state = pending.entry(workspace.clone()).or_insert_with(|| {
                         PendingWorkspaceMetadata {
@@ -794,8 +809,23 @@ fn requeue_workspace_metadata_entries(
     }
 }
 
-fn should_drop_workspace_metadata_retry(error: &str) -> bool {
-    workspaces::gcloud_resource_was_not_found(error)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkspaceMetadataRetryDisposition {
+    DropMissingWorkspace,
+    RetryFingerprintConflict,
+    RetryOther,
+}
+
+fn workspace_metadata_retry_disposition(error: &str) -> WorkspaceMetadataRetryDisposition {
+    match workspaces::classify_gcloud_resource_error(error) {
+        GcloudResourceErrorKind::NotFound => {
+            WorkspaceMetadataRetryDisposition::DropMissingWorkspace
+        }
+        GcloudResourceErrorKind::MetadataFingerprintConflict => {
+            WorkspaceMetadataRetryDisposition::RetryFingerprintConflict
+        }
+        GcloudResourceErrorKind::Other => WorkspaceMetadataRetryDisposition::RetryOther,
+    }
 }
 
 fn should_drop_pending_lifecycle(
@@ -978,12 +1008,24 @@ mod tests {
     }
 
     #[test]
-    fn should_drop_workspace_metadata_retry_for_missing_instance_errors() {
-        assert!(should_drop_workspace_metadata_retry(
+    fn workspace_metadata_retry_disposition_only_drops_missing_instances() {
+        assert_eq!(
+            workspace_metadata_retry_disposition(
             "failed to remove metadata for workspace demo-silo-template: The resource 'projects/demo/zones/us-east4-c/instances/demo-silo-template' was not found"
-        ));
-        assert!(!should_drop_workspace_metadata_retry(
-            "failed to update metadata for workspace demo-silo: permission denied"
-        ));
+            ),
+            WorkspaceMetadataRetryDisposition::DropMissingWorkspace
+        );
+        assert_eq!(
+            workspace_metadata_retry_disposition(
+                "failed to update metadata for workspace demo-silo-template: Could not fetch resource: Supplied fingerprint does not match current metadata fingerprint."
+            ),
+            WorkspaceMetadataRetryDisposition::RetryFingerprintConflict
+        );
+        assert_eq!(
+            workspace_metadata_retry_disposition(
+                "failed to update metadata for workspace demo-silo: permission denied"
+            ),
+            WorkspaceMetadataRetryDisposition::RetryOther
+        );
     }
 }

@@ -960,9 +960,36 @@ pub(crate) fn template_operation_metadata_entries_with_updated_at(
     ]
 }
 
-pub(crate) fn gcloud_resource_was_not_found(error: &str) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GcloudResourceErrorKind {
+    NotFound,
+    MetadataFingerprintConflict,
+    Other,
+}
+
+pub(crate) fn classify_gcloud_resource_error(error: &str) -> GcloudResourceErrorKind {
     let lower = error.to_ascii_lowercase();
-    lower.contains("was not found") || lower.contains("could not fetch resource")
+    if lower.contains("supplied fingerprint does not match current metadata fingerprint")
+        || (lower.contains("metadata fingerprint") && lower.contains("does not match"))
+    {
+        GcloudResourceErrorKind::MetadataFingerprintConflict
+    } else if lower.contains("was not found")
+        || (lower.contains("not found")
+            && (lower.contains("resource")
+                || lower.contains("httperror 404")
+                || lower.contains("http error 404")))
+    {
+        GcloudResourceErrorKind::NotFound
+    } else {
+        GcloudResourceErrorKind::Other
+    }
+}
+
+pub(crate) fn gcloud_resource_was_not_found(error: &str) -> bool {
+    matches!(
+        classify_gcloud_resource_error(error),
+        GcloudResourceErrorKind::NotFound
+    )
 }
 
 pub(crate) async fn apply_workspace_metadata_entries_in_lookup(
@@ -2882,6 +2909,32 @@ mod tests {
     use crate::config::{GcloudConfig, ProjectGcloudConfig, DEFAULT_GCLOUD_DISK_SIZE_GB};
     use indexmap::IndexMap;
     use serde_json::json;
+
+    #[test]
+    fn classify_gcloud_resource_error_distinguishes_missing_resources() {
+        assert_eq!(
+            classify_gcloud_resource_error(
+                "failed to describe workspace: The resource 'projects/demo/zones/us-east4-c/instances/demo-silo' was not found"
+            ),
+            GcloudResourceErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn classify_gcloud_resource_error_distinguishes_metadata_fingerprint_conflicts() {
+        assert_eq!(
+            classify_gcloud_resource_error(
+                "failed to update metadata for workspace demo-silo: Could not fetch resource: Supplied fingerprint does not match current metadata fingerprint."
+            ),
+            GcloudResourceErrorKind::MetadataFingerprintConflict
+        );
+        assert_eq!(
+            classify_gcloud_resource_error(
+                "failed to update metadata for workspace demo-silo: permission denied"
+            ),
+            GcloudResourceErrorKind::Other
+        );
+    }
 
     fn test_workspace_base(name: &str, last_active: Option<&str>) -> WorkspaceBase {
         WorkspaceBase {

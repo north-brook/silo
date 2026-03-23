@@ -6,7 +6,8 @@ use std::thread;
 use tauri::webview::Url;
 
 const WORKSPACE_FILE_LOGICAL_HOST: &str = "workspace-file.silo";
-const WORKSPACE_FILE_ROUTE_PATH: &str = "/workspace-file";
+const WORKSPACE_FILE_RESOLVED_HOST: &str = "workspace-file.localhost";
+const WORKSPACE_FILE_ROUTE_SEGMENT: &str = "w";
 
 #[derive(Clone)]
 pub struct BrowserFileServerManager {
@@ -70,14 +71,14 @@ impl BrowserFileServerManager {
             return Ok(None);
         };
 
-        Url::parse_with_params(
-            &format!("http://127.0.0.1:{}{WORKSPACE_FILE_ROUTE_PATH}", self.port),
-            [
-                ("workspace", request.workspace.as_str()),
-                ("path", request.path.as_str()),
-            ],
+        build_workspace_file_url(
+            "http",
+            WORKSPACE_FILE_RESOLVED_HOST,
+            Some(self.port),
+            &request.workspace,
+            &request.path,
         )
-        .map(|url| Some(url.to_string()))
+        .map(Some)
         .map_err(|error| format!("failed to build workspace file url: {error}"))
     }
 
@@ -88,12 +89,8 @@ impl BrowserFileServerManager {
 }
 
 pub fn workspace_file_logical_url(workspace: &str, path: &str) -> Result<String, String> {
-    Url::parse_with_params(
-        &format!("https://{WORKSPACE_FILE_LOGICAL_HOST}{WORKSPACE_FILE_ROUTE_PATH}"),
-        [("workspace", workspace), ("path", path)],
-    )
-    .map(|url| url.to_string())
-    .map_err(|error| format!("failed to build logical workspace file url: {error}"))
+    build_workspace_file_url("https", WORKSPACE_FILE_LOGICAL_HOST, None, workspace, path)
+        .map_err(|error| format!("failed to build logical workspace file url: {error}"))
 }
 
 pub fn workspace_file_display_name_from_url(url: &str) -> Option<String> {
@@ -340,49 +337,72 @@ fn text_response(status: u16, reason: &'static str, body: &str) -> HttpResponse 
     }
 }
 
+fn build_workspace_file_url(
+    scheme: &str,
+    host: &str,
+    port: Option<u16>,
+    workspace: &str,
+    path: &str,
+) -> Result<String, String> {
+    let path = files::normalize_repo_relative_path(path)?;
+    let authority = match port {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    };
+    let mut url = Url::parse(&format!("{scheme}://{authority}"))
+        .map_err(|error| format!("failed to create workspace file url: {error}"))?;
+    let mut segments = url
+        .path_segments_mut()
+        .map_err(|_| "workspace file url cannot be a base".to_string())?;
+    segments.push(WORKSPACE_FILE_ROUTE_SEGMENT);
+    segments.push(workspace);
+    for segment in path.split('/') {
+        segments.push(segment);
+    }
+    drop(segments);
+    Ok(url.to_string())
+}
+
 fn parse_workspace_file_logical_url(url: &str) -> Option<WorkspaceFileRequest> {
     let parsed = Url::parse(url).ok()?;
-    if parsed.host_str()? != WORKSPACE_FILE_LOGICAL_HOST
-        || parsed.path() != WORKSPACE_FILE_ROUTE_PATH
-    {
+    if parsed.host_str()? != WORKSPACE_FILE_LOGICAL_HOST {
         return None;
     }
-    parse_workspace_file_query(&parsed)
+    parse_workspace_file_path(&parsed)
 }
 
 fn parse_workspace_file_resolved_url(port: u16, url: &str) -> Option<WorkspaceFileRequest> {
     let parsed = Url::parse(url).ok()?;
-    let host = parsed.host_str()?;
-    if !matches!(host, "127.0.0.1" | "localhost") {
+    if parsed.host_str()? != WORKSPACE_FILE_RESOLVED_HOST {
         return None;
     }
-    if parsed.port() != Some(port) || parsed.path() != WORKSPACE_FILE_ROUTE_PATH {
+    if parsed.port() != Some(port) {
         return None;
     }
-    parse_workspace_file_query(&parsed)
+    parse_workspace_file_path(&parsed)
 }
 
 fn parse_workspace_file_resolved_target(target: &str) -> Option<WorkspaceFileRequest> {
-    let parsed = Url::parse(&format!("http://127.0.0.1{target}")).ok()?;
-    if parsed.path() != WORKSPACE_FILE_ROUTE_PATH {
-        return None;
-    }
-    parse_workspace_file_query(&parsed)
+    let parsed = Url::parse(&format!("http://{WORKSPACE_FILE_RESOLVED_HOST}{target}")).ok()?;
+    parse_workspace_file_path(&parsed)
 }
 
-fn parse_workspace_file_query(url: &Url) -> Option<WorkspaceFileRequest> {
-    let mut workspace = None;
-    let mut path = None;
-    for (key, value) in url.query_pairs() {
-        match key.as_ref() {
-            "workspace" => workspace = Some(value.into_owned()),
-            "path" => path = Some(value.into_owned()),
-            _ => {}
-        }
+fn parse_workspace_file_path(url: &Url) -> Option<WorkspaceFileRequest> {
+    let mut segments = url.path_segments()?;
+    if segments.next()? != WORKSPACE_FILE_ROUTE_SEGMENT {
+        return None;
     }
 
-    let workspace = workspace?;
-    let path = files::normalize_repo_relative_path(path?.as_str()).ok()?;
+    let workspace = segments.next()?.to_string();
+    if workspace.is_empty() {
+        return None;
+    }
+
+    let path = segments.collect::<Vec<_>>().join("/");
+    if path.is_empty() {
+        return None;
+    }
+    let path = files::normalize_repo_relative_path(&path).ok()?;
     Some(WorkspaceFileRequest { workspace, path })
 }
 
@@ -394,9 +414,42 @@ mod tests {
     fn workspace_file_logical_url_round_trips() {
         let logical =
             workspace_file_logical_url("demo-workspace", "images/diagram.png").expect("url");
+        assert_eq!(
+            logical,
+            "https://workspace-file.silo/w/demo-workspace/images/diagram.png"
+        );
         let parsed = parse_workspace_file_logical_url(&logical).expect("request");
         assert_eq!(parsed.workspace, "demo-workspace");
         assert_eq!(parsed.path, "images/diagram.png");
+    }
+
+    #[test]
+    fn workspace_file_resolved_url_round_trips() {
+        let manager = BrowserFileServerManager { port: 64601 };
+        let logical =
+            workspace_file_logical_url("demo-workspace", "docs/report.final.pdf").expect("url");
+        let resolved = manager
+            .rewrite_workspace_file_url(&logical)
+            .expect("resolved url")
+            .expect("workspace file url");
+        assert_eq!(
+            resolved,
+            "http://workspace-file.localhost:64601/w/demo-workspace/docs/report.final.pdf"
+        );
+        assert_eq!(
+            manager.logical_url_for_resolved_url(&resolved).as_deref(),
+            Some(logical.as_str())
+        );
+    }
+
+    #[test]
+    fn workspace_file_resolved_target_round_trips() {
+        let parsed = parse_workspace_file_resolved_target(
+            "/w/demo-workspace/specs/act/docs/ACT_Technical_Manual.pdf",
+        )
+        .expect("request");
+        assert_eq!(parsed.workspace, "demo-workspace");
+        assert_eq!(parsed.path, "specs/act/docs/ACT_Technical_Manual.pdf");
     }
 
     #[test]
