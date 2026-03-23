@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fs;
 use std::thread;
 use std::time::Duration;
 
@@ -14,6 +15,8 @@ pub(crate) const TERMINAL_SESSION_METADATA_PREFIX: &str = "terminal-session-";
 pub(crate) const TERMINAL_UNREAD_METADATA_KEY: &str = "terminal-unread";
 pub(crate) const TERMINAL_WORKING_METADATA_KEY: &str = "terminal-working";
 pub(crate) const WORKSPACE_AGENT_HEARTBEAT_METADATA_KEY: &str = "workspace-agent-heartbeat-at";
+pub(crate) const WORKSPACE_AGENT_FINGERPRINT_METADATA_KEY: &str = "workspace-agent-fingerprint";
+const WORKSPACE_AGENT_FINGERPRINT_FILE: &str = "/home/silo/.silo/workspace-agent/fingerprint";
 
 const METADATA_PUBLISH_ATTEMPTS: usize = 5;
 const METADATA_PUBLISH_RETRY_BASE_DELAY: Duration = Duration::from_millis(100);
@@ -220,6 +223,11 @@ pub(crate) fn flat_metadata_items(
         WORKSPACE_AGENT_HEARTBEAT_METADATA_KEY,
         Some(published.heartbeat_at.as_str()),
     );
+    update_metadata_item(
+        &mut items,
+        WORKSPACE_AGENT_FINGERPRINT_METADATA_KEY,
+        current_agent_fingerprint().as_deref(),
+    );
     for terminal in &published.terminals {
         let key = format!(
             "{TERMINAL_SESSION_METADATA_PREFIX}{}",
@@ -230,6 +238,13 @@ pub(crate) fn flat_metadata_items(
         items.insert(key, value);
     }
     Ok(items)
+}
+
+fn current_agent_fingerprint() -> Option<String> {
+    fs::read_to_string(WORKSPACE_AGENT_FINGERPRINT_FILE)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 pub(crate) fn update_metadata_item(

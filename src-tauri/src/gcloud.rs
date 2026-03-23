@@ -1,4 +1,5 @@
 use crate::config::ConfigStore;
+use crate::gcp;
 use crate::state_paths;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,6 +8,10 @@ use std::time::Instant;
 
 const SERVICE_ACCOUNT_ID: &str = "silo-workspaces";
 const SERVICE_ACCOUNT_DISPLAY_NAME: &str = "Silo Workspaces";
+const PROJECT_IAM_ROLES: &[&str] = &[
+    "roles/compute.instanceAdmin.v1",
+    "roles/compute.osAdminLogin",
+];
 
 struct CommandResult {
     success: bool,
@@ -48,6 +53,20 @@ where
     .await
     .ok()
     .flatten()
+}
+
+async fn run_gcloud_as<I, S>(account: &str, args: I) -> Option<CommandResult>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut prefixed = Vec::new();
+    let account = account.trim();
+    if !account.is_empty() {
+        prefixed.push(format!("--account={account}"));
+    }
+    prefixed.extend(args.into_iter().map(Into::into));
+    run_gcloud(prefixed).await
 }
 
 fn build_auth_login_args() -> [&'static str; 3] {
@@ -214,27 +233,40 @@ async fn ensure_service_account(project: &str) -> Result<String, String> {
     Ok(service_account)
 }
 
-async fn ensure_project_iam_binding(project: &str, service_account: &str) -> Result<(), String> {
-    let result = run_gcloud([
-        "projects".to_string(),
-        "add-iam-policy-binding".to_string(),
-        project.to_string(),
-        "--member".to_string(),
-        format!("serviceAccount:{service_account}"),
-        "--role".to_string(),
-        "roles/compute.instanceAdmin.v1".to_string(),
-        "--quiet".to_string(),
-    ])
-    .await
-    .ok_or_else(|| "failed to execute gcloud projects add-iam-policy-binding".to_string())?;
+async fn ensure_project_iam_bindings(project: &str, service_account: &str) -> Result<(), String> {
+    ensure_project_iam_bindings_as("", project, service_account).await
+}
 
-    if !result.success {
-        let stderr = result.stderr.trim();
-        return Err(if stderr.is_empty() {
-            "failed to grant service account project permissions".to_string()
-        } else {
-            stderr.to_string()
-        });
+async fn ensure_project_iam_bindings_as(
+    operator_account: &str,
+    project: &str,
+    service_account: &str,
+) -> Result<(), String> {
+    for role in PROJECT_IAM_ROLES {
+        let result = run_gcloud_as(
+            operator_account,
+            [
+            "projects".to_string(),
+            "add-iam-policy-binding".to_string(),
+            project.to_string(),
+            "--member".to_string(),
+            format!("serviceAccount:{service_account}"),
+            "--role".to_string(),
+            (*role).to_string(),
+            "--quiet".to_string(),
+        ],
+        )
+        .await
+        .ok_or_else(|| "failed to execute gcloud projects add-iam-policy-binding".to_string())?;
+
+        if !result.success {
+            let stderr = result.stderr.trim();
+            return Err(if stderr.is_empty() {
+                format!("failed to grant service account project role {role}")
+            } else {
+                stderr.to_string()
+            });
+        }
     }
 
     Ok(())
@@ -244,7 +276,17 @@ async fn ensure_service_account_user_binding(
     project: &str,
     service_account: &str,
 ) -> Result<(), String> {
-    let result = run_gcloud([
+    ensure_service_account_user_binding_as("", project, service_account).await
+}
+
+async fn ensure_service_account_user_binding_as(
+    operator_account: &str,
+    project: &str,
+    service_account: &str,
+) -> Result<(), String> {
+    let result = run_gcloud_as(
+        operator_account,
+        [
         "iam".to_string(),
         "service-accounts".to_string(),
         "add-iam-policy-binding".to_string(),
@@ -256,7 +298,8 @@ async fn ensure_service_account_user_binding(
         "--role".to_string(),
         "roles/iam.serviceAccountUser".to_string(),
         "--quiet".to_string(),
-    ])
+    ],
+    )
     .await
     .ok_or_else(|| {
         "failed to execute gcloud iam service-accounts add-iam-policy-binding".to_string()
@@ -422,7 +465,7 @@ pub async fn gcloud_authenticate() -> Result<(), String> {
     log::info!("gcloud auth completed for account {account} project {project}");
 
     let service_account = ensure_service_account(&project).await?;
-    ensure_project_iam_binding(&project, &service_account).await?;
+    ensure_project_iam_bindings(&project, &service_account).await?;
     ensure_service_account_user_binding(&project, &service_account).await?;
     let key_path = ensure_service_account_key(&service_account, &project).await?;
     let key_path_string = key_path.to_string_lossy().into_owned();
@@ -435,11 +478,72 @@ pub async fn gcloud_authenticate() -> Result<(), String> {
             format!("service account key was provisioned and saved, but activation failed: {error}")
         })?;
 
+    gcp::ensure_runtime_oslogin_ready(&project)
+        .await
+        .map_err(|error| {
+            format!(
+                "service account was provisioned and activated, but OS Login is not ready yet: {error}"
+            )
+        })?;
+
     gcloud_service_account_usable(&service_account, &project)
         .await
         .map_err(|error| {
             format!("service account was provisioned and saved, but it is not usable yet: {error}")
         })
+}
+
+pub(crate) async fn repair_runtime_identity_if_needed() -> Result<(), String> {
+    let config = ConfigStore::new()
+        .and_then(|store| store.load())
+        .map_err(|error| error.to_string())?;
+    if !has_local_gcloud_identity(&config.gcloud) {
+        return Ok(());
+    }
+
+    let project = config.gcloud.project.trim().to_string();
+    let service_account = config.gcloud.service_account.trim().to_string();
+    if project.is_empty() || service_account.is_empty() {
+        return Ok(());
+    }
+
+    match gcp::ensure_runtime_oslogin_ready(&project).await {
+        Ok(username) => {
+            log::info!(
+                "runtime service account {} is OS Login ready as {}",
+                service_account,
+                username
+            );
+            return Ok(());
+        }
+        Err(error) => {
+            log::warn!(
+                "runtime service account {} needs OS Login repair in project {}: {}",
+                service_account,
+                project,
+                error
+            );
+        }
+    }
+
+    let operator_account = config.gcloud.account.trim().to_string();
+    if operator_account.is_empty() {
+        return Err(
+            "runtime service account needs OS Login repair but no operator gcloud account is configured"
+                .to_string(),
+        );
+    }
+
+    ensure_project_iam_bindings_as(&operator_account, &project, &service_account).await?;
+    ensure_service_account_user_binding_as(&operator_account, &project, &service_account).await?;
+    let username = gcp::ensure_runtime_oslogin_ready(&project).await?;
+    log::info!(
+        "runtime service account {} repaired for project {} as OS Login user {}",
+        service_account,
+        project,
+        username
+    );
+    Ok(())
 }
 
 #[tauri::command]
@@ -585,6 +689,12 @@ mod tests {
             service_account_email("demo-project"),
             "silo-workspaces@demo-project.iam.gserviceaccount.com"
         );
+    }
+
+    #[test]
+    fn project_iam_roles_include_os_admin_login() {
+        assert!(PROJECT_IAM_ROLES.contains(&"roles/compute.instanceAdmin.v1"));
+        assert!(PROJECT_IAM_ROLES.contains(&"roles/compute.osAdminLogin"));
     }
 
     #[test]

@@ -41,6 +41,9 @@ sha2 = "0.10"
 urlencoding = "2"
 url = "2"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+jsonwebtoken = { version = "10.3.0", default-features = false, features = ["use_pem", "aws_lc_rs"] }
+tokio = { version = "1", features = ["sync"] }
 
 [patch.crates-io]
 tauri = { git = "https://github.com/tauri-apps/tauri", branch = "feat/cef" }

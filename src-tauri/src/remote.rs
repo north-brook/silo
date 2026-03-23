@@ -1,13 +1,43 @@
+use crate::gcp;
 use crate::workspaces::WorkspaceLookup;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use portable_pty::CommandBuilder;
+use std::collections::HashMap;
 use std::io::Write;
-use std::process::{Command, Output, Stdio};
+use std::path::PathBuf;
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex as AsyncMutex;
 
 const TERMINAL_USER: &str = "silo";
 pub(crate) const TERMINAL_WORKSPACE_DIR: &str = "/home/silo/workspace";
 const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
 pub(crate) const REMOTE_WORKSPACE_AGENT_BIN: &str = "/home/silo/.silo/bin/workspace-agent";
+const SSH_CONTROL_PERSIST: &str = "600";
+const SSH_SESSION_REFRESH_BEFORE: Duration = Duration::from_secs(30);
+const SSH_SESSION_FAILURE_RETRY_AFTER: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Clone)]
+struct SshSession {
+    username: String,
+    host: String,
+    key_path: PathBuf,
+    known_hosts_path: PathBuf,
+    control_path: PathBuf,
+    expires_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct CachedSshFailure {
+    error: String,
+    retry_after: Instant,
+}
+
+static SSH_SESSIONS: OnceLock<Mutex<HashMap<String, SshSession>>> = OnceLock::new();
+static SSH_SESSION_FAILURES: OnceLock<Mutex<HashMap<String, CachedSshFailure>>> = OnceLock::new();
+static SSH_SESSION_GATES: OnceLock<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> = OnceLock::new();
 
 #[derive(Debug)]
 pub(crate) struct CommandResult {
@@ -37,7 +67,7 @@ pub(crate) async fn run_remote_command(
     lookup: &WorkspaceLookup,
     remote_command: &str,
 ) -> Result<CommandResult, String> {
-    run_gcloud_ssh_command(lookup, Some(remote_command.to_string()), None).await
+    run_ssh_command(lookup, remote_command.to_string(), None).await
 }
 
 pub(crate) async fn run_remote_command_with_stdin(
@@ -45,38 +75,275 @@ pub(crate) async fn run_remote_command_with_stdin(
     remote_command: &str,
     stdin_bytes: Vec<u8>,
 ) -> Result<CommandResult, String> {
-    run_gcloud_ssh_command(lookup, Some(remote_command.to_string()), Some(stdin_bytes)).await
+    run_ssh_command(lookup, remote_command.to_string(), Some(stdin_bytes)).await
 }
 
-async fn run_gcloud_ssh_command(
+fn ssh_sessions() -> &'static Mutex<HashMap<String, SshSession>> {
+    SSH_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn ssh_session_failures() -> &'static Mutex<HashMap<String, CachedSshFailure>> {
+    SSH_SESSION_FAILURES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn ssh_session_gates() -> &'static Mutex<HashMap<String, Arc<AsyncMutex<()>>>> {
+    SSH_SESSION_GATES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn session_key(lookup: &WorkspaceLookup) -> String {
+    format!(
+        "{}:{}:{}",
+        lookup.gcloud_project,
+        lookup.workspace.zone(),
+        lookup.workspace.name()
+    )
+}
+
+fn session_gate(cache_key: &str) -> Result<Arc<AsyncMutex<()>>, String> {
+    let mut guard = ssh_session_gates()
+        .lock()
+        .map_err(|_| "ssh session gate cache lock poisoned".to_string())?;
+    Ok(guard
+        .entry(cache_key.to_string())
+        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+        .clone())
+}
+
+fn cached_session_failure(cache_key: &str) -> Result<Option<String>, String> {
+    let mut guard = ssh_session_failures()
+        .lock()
+        .map_err(|_| "ssh session failure cache lock poisoned".to_string())?;
+    if let Some(cached) = guard.get(cache_key) {
+        if Instant::now() < cached.retry_after {
+            return Ok(Some(cached.error.clone()));
+        }
+    }
+    guard.remove(cache_key);
+    Ok(None)
+}
+
+fn store_session_failure(cache_key: &str, error: &str) -> Result<(), String> {
+    ssh_session_failures()
+        .lock()
+        .map_err(|_| "ssh session failure cache lock poisoned".to_string())?
+        .insert(
+            cache_key.to_string(),
+            CachedSshFailure {
+                error: error.to_string(),
+                retry_after: Instant::now() + SSH_SESSION_FAILURE_RETRY_AFTER,
+            },
+        );
+    Ok(())
+}
+
+fn clear_session_failure(cache_key: &str) -> Result<(), String> {
+    ssh_session_failures()
+        .lock()
+        .map_err(|_| "ssh session failure cache lock poisoned".to_string())?
+        .remove(cache_key);
+    Ok(())
+}
+
+fn ssh_destination(session: &SshSession) -> String {
+    format!("{}@{}", session.username, session.host)
+}
+
+fn ssh_common_args(session: &SshSession) -> Vec<String> {
+    vec![
+        "-i".to_string(),
+        session.key_path.to_string_lossy().into_owned(),
+        "-o".to_string(),
+        "IdentitiesOnly=yes".to_string(),
+        "-o".to_string(),
+        format!(
+            "UserKnownHostsFile={}",
+            session.known_hosts_path.to_string_lossy()
+        ),
+        "-o".to_string(),
+        "StrictHostKeyChecking=accept-new".to_string(),
+        "-o".to_string(),
+        "LogLevel=ERROR".to_string(),
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+        "-o".to_string(),
+        "ServerAliveInterval=15".to_string(),
+        "-o".to_string(),
+        format!("ControlPath={}", session.control_path.to_string_lossy()),
+        "-o".to_string(),
+        format!("ControlPersist={SSH_CONTROL_PERSIST}"),
+    ]
+}
+
+fn start_master_connection(session: &SshSession) -> Result<(), String> {
+    if let Some(parent) = session.control_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create ssh control directory: {error}"))?;
+    }
+    let _ = std::fs::remove_file(&session.control_path);
+    let mut command = Command::new("ssh");
+    command.args(ssh_common_args(session));
+    command.arg("-M");
+    command.arg("-f");
+    command.arg("-N");
+    command.arg(ssh_destination(session));
+    command.env("SSH_AUTH_SOCK", "");
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to start ssh control master: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(remote_command_error(
+            "failed to start ssh control master",
+            &String::from_utf8_lossy(&output.stderr),
+        ))
+    }
+}
+
+fn control_master_alive(session: &SshSession) -> bool {
+    if !session.control_path.exists() {
+        return false;
+    }
+    let mut command = Command::new("ssh");
+    command.args(ssh_common_args(session));
+    command.arg("-O");
+    command.arg("check");
+    command.arg(ssh_destination(session));
+    command.env("SSH_AUTH_SOCK", "");
+    command
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+async fn ensure_ssh_session(lookup: &WorkspaceLookup) -> Result<SshSession, String> {
+    let cache_key = session_key(lookup);
+    let gate = session_gate(&cache_key)?;
+    if let Some(existing) = reusable_ssh_session(&cache_key).await? {
+        return Ok(existing);
+    }
+    if let Some(error) = cached_session_failure(&cache_key)? {
+        return Err(error);
+    }
+    let _guard = gate.lock().await;
+    if let Some(existing) = reusable_ssh_session(&cache_key).await? {
+        return Ok(existing);
+    }
+    if let Some(error) = cached_session_failure(&cache_key)? {
+        return Err(error);
+    }
+
+    let result: Result<SshSession, String> = async {
+        let endpoint = gcp::instance_endpoint(
+            &lookup.gcloud_project,
+            lookup.workspace.zone(),
+            lookup.workspace.name(),
+        )
+        .await?;
+        let login = gcp::prepare_oslogin_session(
+            &lookup.gcloud_project,
+            &endpoint.zone,
+            lookup.workspace.name(),
+        )
+        .await?;
+        let session = SshSession {
+            username: login.username,
+            host: endpoint.host,
+            key_path: login.key_path,
+            known_hosts_path: gcp::ssh_known_hosts_path()?,
+            control_path: gcp::ssh_control_path(
+                &lookup.gcloud_project,
+                lookup.workspace.zone(),
+                lookup.workspace.name(),
+            )?,
+            expires_at: Instant::now() + Duration::from_secs(600),
+        };
+        tauri::async_runtime::spawn_blocking({
+            let session = session.clone();
+            move || start_master_connection(&session)
+        })
+        .await
+        .map_err(|error| format!("ssh control master task failed: {error}"))??;
+        Ok(session)
+    }
+    .await;
+
+    match result {
+        Ok(session) => {
+            clear_session_failure(&cache_key)?;
+            ssh_sessions()
+                .lock()
+                .map_err(|_| "ssh session cache lock poisoned".to_string())?
+                .insert(cache_key, session.clone());
+            Ok(session)
+        }
+        Err(error) => {
+            store_session_failure(&cache_key, &error)?;
+            Err(error)
+        }
+    }
+}
+
+async fn reusable_ssh_session(cache_key: &str) -> Result<Option<SshSession>, String> {
+    let existing = {
+        let guard = ssh_sessions()
+            .lock()
+            .map_err(|_| "ssh session cache lock poisoned".to_string())?;
+        guard.get(cache_key).cloned()
+    };
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+    let reusable = Instant::now() + SSH_SESSION_REFRESH_BEFORE < existing.expires_at
+        && tauri::async_runtime::spawn_blocking({
+            let existing = existing.clone();
+            move || control_master_alive(&existing)
+        })
+        .await
+        .map_err(|error| format!("ssh control check task failed: {error}"))?;
+    if reusable {
+        Ok(Some(existing))
+    } else {
+        Ok(None)
+    }
+}
+
+fn ensure_ssh_session_blocking(lookup: &WorkspaceLookup) -> Result<SshSession, String> {
+    tauri::async_runtime::block_on(ensure_ssh_session(lookup))
+}
+
+async fn run_ssh_command(
     lookup: &WorkspaceLookup,
-    remote_command: Option<String>,
+    remote_command: String,
     stdin_bytes: Option<Vec<u8>>,
 ) -> Result<CommandResult, String> {
-    let account = lookup.account.clone();
-    let project = lookup.gcloud_project.clone();
-    let workspace = lookup.workspace.name().to_string();
-    let zone = lookup.workspace.zone().to_string();
+    let session = ensure_ssh_session(lookup).await?;
+    let destination = ssh_destination(&session);
+    let mut args = ssh_common_args(&session);
+    args.push("-T".to_string());
+    args.push(destination);
+    args.push(remote_command);
 
     tauri::async_runtime::spawn_blocking(move || {
-        let mut command =
-            build_gcloud_ssh_command(&account, &project, &workspace, &zone, remote_command);
+        let mut command = Command::new("ssh");
+        command.args(&args);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         if stdin_bytes.is_some() {
             command.stdin(Stdio::piped());
         }
+        command.env("SSH_AUTH_SOCK", "");
 
         let mut child = command
             .spawn()
-            .map_err(|error| format!("failed to execute gcloud ssh: {error}"))?;
+            .map_err(|error| format!("failed to execute ssh: {error}"))?;
 
         if let Some(stdin_bytes) = stdin_bytes {
             if let Some(mut stdin) = child.stdin.take() {
                 if let Err(error) = stdin.write_all(&stdin_bytes) {
                     drop(stdin);
-                    let output = child.wait_with_output().map_err(|wait_error| {
-                        format!("failed to read gcloud ssh output: {wait_error}")
-                    })?;
+                    let output = child
+                        .wait_with_output()
+                        .map_err(|wait_error| format!("failed to read ssh output: {wait_error}"))?;
                     return Ok(command_result_with_stdin_write_error(output, &error));
                 }
             }
@@ -84,12 +351,12 @@ async fn run_gcloud_ssh_command(
 
         let output = child
             .wait_with_output()
-            .map_err(|error| format!("failed to read gcloud ssh output: {error}"))?;
+            .map_err(|error| format!("failed to read ssh output: {error}"))?;
 
         Ok(command_result_from_output(output))
     })
     .await
-    .map_err(|error| format!("gcloud ssh task failed: {error}"))?
+    .map_err(|error| format!("ssh task failed: {error}"))?
 }
 
 fn command_result_from_output(output: Output) -> CommandResult {
@@ -108,7 +375,7 @@ pub(crate) fn command_result_with_stdin_write_error(
     if result.success {
         return result;
     }
-    let write_error = format!("failed to write gcloud ssh stdin: {error}");
+    let write_error = format!("failed to write ssh stdin: {error}");
     result.stderr = if result.stderr.trim().is_empty() {
         write_error
     } else {
@@ -117,29 +384,41 @@ pub(crate) fn command_result_with_stdin_write_error(
     result
 }
 
-fn build_gcloud_ssh_command(
-    account: &str,
-    project: &str,
-    workspace: &str,
-    zone: &str,
-    remote_command: Option<String>,
-) -> Command {
-    let mut command = Command::new("gcloud");
-    command.arg(format!("--account={account}"));
-    command.arg(format!("--project={project}"));
-    command.arg("compute");
-    command.arg("ssh");
-    command.arg(workspace);
-    command.arg(format!("--zone={zone}"));
-
-    if let Some(remote_command) = remote_command {
-        command.arg(format!(
-            "--command={}",
-            wrap_remote_shell_command(&remote_command)
-        ));
-    }
-
+pub(crate) fn spawn_remote_port_forward(
+    lookup: &WorkspaceLookup,
+    local_port: u16,
+    remote_port: u16,
+) -> Result<Child, String> {
+    let session = ensure_ssh_session_blocking(lookup)?;
+    let mut command = Command::new("ssh");
+    command.args(ssh_common_args(&session));
+    command.arg("-N");
+    command.arg("-L");
+    command.arg(format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}"));
+    command.arg(ssh_destination(&session));
     command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.env("SSH_AUTH_SOCK", "");
+    command
+        .spawn()
+        .map_err(|error| format!("failed to start ssh port forward: {error}"))
+}
+
+pub(crate) fn build_terminal_attach_command(
+    lookup: &WorkspaceLookup,
+    remote_command: &str,
+) -> Result<CommandBuilder, String> {
+    let session = ensure_ssh_session_blocking(lookup)?;
+    let mut command = CommandBuilder::new("ssh");
+    command.args(ssh_common_args(&session));
+    command.args([
+        "-tt".to_string(),
+        ssh_destination(&session),
+        wrap_remote_shell_command(remote_command),
+    ]);
+    Ok(command)
 }
 
 pub(crate) fn wrap_remote_shell_command(command: &str) -> String {
@@ -307,5 +586,23 @@ mod tests {
         assert_eq!(result.stdout, "done\n");
         assert_eq!(result.stderr, "bootstrap state already up to date\n");
         assert!(!result.stderr.contains("Broken pipe"));
+    }
+
+    #[test]
+    fn cached_session_failure_expires_after_retry_window() {
+        let key = "demo:us-east4-c:workspace";
+        {
+            let mut guard = ssh_session_failures().lock().unwrap();
+            guard.insert(
+                key.to_string(),
+                CachedSshFailure {
+                    error: "boom".to_string(),
+                    retry_after: Instant::now() - Duration::from_secs(1),
+                },
+            );
+        }
+
+        assert_eq!(cached_session_failure(key).unwrap(), None);
+        assert!(ssh_session_failures().lock().unwrap().get(key).is_none());
     }
 }

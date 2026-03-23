@@ -1,5 +1,6 @@
 use crate::bootstrap;
 use crate::config::{ConfigStore, ProjectConfig, SiloConfig};
+use crate::gcp;
 use crate::river_names::DEFAULT_RIVER_NAMES;
 use crate::state::{
     active_session_metadata_entries, workspace_last_active_metadata_key, WorkspaceMetadataEntry,
@@ -12,10 +13,9 @@ use crate::state::{
 use crate::terminal;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tauri::State;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use uuid::Uuid;
@@ -26,6 +26,7 @@ pub(crate) const WORKSPACE_LIFECYCLE_ERROR_METADATA_KEY: &str = "workspace-lifec
 pub(crate) const WORKSPACE_LIFECYCLE_UPDATED_AT_METADATA_KEY: &str =
     "workspace-lifecycle-updated-at";
 pub(crate) const WORKSPACE_AGENT_HEARTBEAT_METADATA_KEY: &str = "workspace-agent-heartbeat-at";
+pub(crate) const WORKSPACE_AGENT_FINGERPRINT_METADATA_KEY: &str = "workspace-agent-fingerprint";
 pub(crate) const TEMPLATE_OPERATION_KIND_METADATA_KEY: &str = "template-operation-kind";
 pub(crate) const TEMPLATE_OPERATION_PHASE_METADATA_KEY: &str = "template-operation-phase";
 pub(crate) const TEMPLATE_OPERATION_DETAIL_METADATA_KEY: &str = "template-operation-detail";
@@ -117,6 +118,8 @@ struct WorkspaceBase {
     lifecycle: WorkspaceLifecycle,
     #[serde(skip_serializing)]
     agent_heartbeat_at: Option<String>,
+    #[serde(skip_serializing)]
+    agent_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -241,6 +244,10 @@ impl Workspace {
 
     pub(crate) fn agent_heartbeat_at(&self) -> Option<&str> {
         self.base().agent_heartbeat_at.as_deref()
+    }
+
+    pub(crate) fn agent_fingerprint(&self) -> Option<&str> {
+        self.base().agent_fingerprint.as_deref()
     }
 
     pub(crate) fn branch_name(&self) -> Option<&str> {
@@ -526,13 +533,6 @@ pub(crate) struct ResolvedGcloudConfig {
     pub(crate) image_project: String,
 }
 
-#[derive(Debug)]
-pub(crate) struct CommandResult {
-    pub(crate) success: bool,
-    pub(crate) stdout: String,
-    pub(crate) stderr: String,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct WorkspaceLookup {
     pub(crate) workspace: Workspace,
@@ -575,6 +575,17 @@ const TEMPLATE_SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 pub async fn workspaces_list_workspaces(
     state: State<'_, crate::state::WorkspaceMetadataManager>,
 ) -> Result<Vec<Workspace>, String> {
+    let workspaces = list_all_workspaces().await?;
+    let workspaces = state.apply_workspace_states(workspaces);
+    for workspace in &workspaces {
+        bootstrap::start_workspace_startup_reconcile_if_needed(workspace.clone());
+        bootstrap::start_workspace_agent_update_reconcile_if_needed(workspace.clone());
+    }
+
+    Ok(state.apply_workspace_states(workspaces))
+}
+
+pub(crate) async fn list_all_workspaces() -> Result<Vec<Workspace>, String> {
     let config = ConfigStore::new()
         .and_then(|store| store.load())
         .map_err(|error| error.to_string())?;
@@ -589,11 +600,6 @@ pub async fn workspaces_list_workspaces(
         workspaces.extend(list_workspaces_in_project(&gcloud.account, &gcloud.project).await?);
     }
     workspaces.sort_by(compare_workspaces_by_last_active_desc);
-
-    let workspaces = state.apply_workspace_states(workspaces);
-    for workspace in &workspaces {
-        bootstrap::start_workspace_startup_reconcile_if_needed(workspace.clone());
-    }
 
     Ok(workspaces)
 }
@@ -617,24 +623,16 @@ pub async fn workspaces_create_workspace(project: String) -> Result<Workspace, S
         .await?
         .map(WorkspaceBootSource::Snapshot)
         .unwrap_or(WorkspaceBootSource::ImageFamily);
-
-    let result = run_gcloud(
-        &gcloud.account,
-        &gcloud.project,
-        create_workspace_args(
-            &workspace_name,
-            &project,
-            &branch_name,
-            &project_config.target_branch,
-            &boot_source,
-            &gcloud,
-        ),
+    let request = create_workspace_request_body(
+        &workspace_name,
+        &project,
+        &branch_name,
+        &project_config.target_branch,
+        &boot_source,
+        &gcloud,
     )
     .await?;
-
-    if !result.success {
-        return Err(gcloud_error("failed to create workspace", &result.stderr));
-    }
+    gcp::create_instance(&gcloud.project, &gcloud.zone, request).await?;
 
     bootstrap::cache_workspace_bootstrap(
         &workspace_name,
@@ -669,23 +667,14 @@ pub async fn workspaces_create_workspace(project: String) -> Result<Workspace, S
 pub async fn workspaces_start_workspace(workspace: String) -> Result<(), String> {
     log::info!("starting workspace {workspace}");
     let lookup = find_workspace(&workspace).await?;
-
-    let result = run_gcloud(
-        &lookup.account,
+    gcp::post_instance_action(
         &lookup.gcloud_project,
-        [
-            "compute".to_string(),
-            "instances".to_string(),
-            "start".to_string(),
-            workspace.clone(),
-            format!("--zone={}", lookup.workspace.zone()),
-        ],
+        lookup.workspace.zone(),
+        &workspace,
+        "start",
+        "failed to start workspace",
     )
     .await?;
-
-    if !result.success {
-        return Err(gcloud_error("failed to start workspace", &result.stderr));
-    }
 
     bootstrap::start_workspace_startup_reconcile(workspace.clone());
 
@@ -697,17 +686,14 @@ pub async fn workspaces_start_workspace(workspace: String) -> Result<(), String>
 pub async fn workspaces_resume_workspace(workspace: String) -> Result<(), String> {
     log::info!("resuming workspace {workspace}");
     let lookup = find_workspace(&workspace).await?;
-
-    let result = run_gcloud(
-        &lookup.account,
+    gcp::post_instance_action(
         &lookup.gcloud_project,
-        resume_workspace_args(&workspace, lookup.workspace.zone()),
+        lookup.workspace.zone(),
+        &workspace,
+        "resume",
+        "failed to resume workspace",
     )
     .await?;
-
-    if !result.success {
-        return Err(gcloud_error("failed to resume workspace", &result.stderr));
-    }
 
     bootstrap::start_workspace_startup_reconcile(workspace.clone());
 
@@ -719,17 +705,14 @@ pub async fn workspaces_resume_workspace(workspace: String) -> Result<(), String
 pub async fn workspaces_stop_workspace(workspace: String) -> Result<(), String> {
     log::info!("stopping workspace {workspace}");
     let lookup = find_workspace(&workspace).await?;
-
-    let result = run_gcloud(
-        &lookup.account,
+    gcp::post_instance_action(
         &lookup.gcloud_project,
-        stop_workspace_args(&workspace, lookup.workspace.zone()),
+        lookup.workspace.zone(),
+        &workspace,
+        "stop",
+        "failed to stop workspace",
     )
     .await?;
-
-    if !result.success {
-        return Err(gcloud_error("failed to stop workspace", &result.stderr));
-    }
 
     log::info!("workspace {} stop initiated", lookup.workspace.name());
     Ok(())
@@ -739,17 +722,14 @@ pub async fn workspaces_stop_workspace(workspace: String) -> Result<(), String> 
 pub async fn workspaces_suspend_workspace(workspace: String) -> Result<(), String> {
     log::info!("suspending workspace {workspace}");
     let lookup = find_workspace(&workspace).await?;
-
-    let result = run_gcloud(
-        &lookup.account,
+    gcp::post_instance_action(
         &lookup.gcloud_project,
-        suspend_workspace_args(&workspace, lookup.workspace.zone()),
+        lookup.workspace.zone(),
+        &workspace,
+        "suspend",
+        "failed to suspend workspace",
     )
     .await?;
-
-    if !result.success {
-        return Err(gcloud_error("failed to suspend workspace", &result.stderr));
-    }
 
     log::info!("workspace {} suspend initiated", lookup.workspace.name());
     Ok(())
@@ -766,7 +746,8 @@ pub async fn workspaces_get_workspace(
     let workspace = replace_workspace_terminals(lookup.workspace, terminals);
     let workspace = state.apply_workspace_state(workspace);
     bootstrap::start_workspace_startup_reconcile_if_needed(workspace.clone());
-    Ok(workspace)
+    bootstrap::start_workspace_agent_update_reconcile_if_needed(workspace.clone());
+    Ok(state.apply_workspace_state(workspace))
 }
 
 #[tauri::command]
@@ -834,13 +815,7 @@ pub async fn workspaces_submit_prompt(
 pub async fn workspaces_delete_workspace(workspace: String) -> Result<(), String> {
     log::info!("deleting workspace {workspace}");
     let lookup = find_workspace(&workspace).await?;
-
-    run_gcloud_detached(
-        &lookup.account,
-        &lookup.gcloud_project,
-        delete_workspace_args(&workspace, lookup.workspace.zone()),
-    )
-    .await?;
+    gcp::delete_instance(&lookup.gcloud_project, lookup.workspace.zone(), &workspace).await?;
 
     log::info!("workspace {} delete initiated", lookup.workspace.name());
     Ok(())
@@ -971,13 +946,16 @@ pub(crate) fn classify_gcloud_resource_error(error: &str) -> GcloudResourceError
     let lower = error.to_ascii_lowercase();
     if lower.contains("supplied fingerprint does not match current metadata fingerprint")
         || (lower.contains("metadata fingerprint") && lower.contains("does not match"))
+        || lower.contains("status 412")
+        || lower.contains("conditionnotmet")
     {
         GcloudResourceErrorKind::MetadataFingerprintConflict
     } else if lower.contains("was not found")
         || (lower.contains("not found")
             && (lower.contains("resource")
                 || lower.contains("httperror 404")
-                || lower.contains("http error 404")))
+                || lower.contains("http error 404")
+                || lower.contains("status 404")))
     {
         GcloudResourceErrorKind::NotFound
     } else {
@@ -1000,61 +978,17 @@ pub(crate) async fn apply_workspace_metadata_entries_in_lookup(
         return Err("workspace metadata update did not include any values".to_string());
     }
 
-    let removals = entries
+    let updates = entries
         .iter()
-        .filter(|entry| {
-            entry
-                .value
-                .as_deref()
-                .map(str::trim)
-                .unwrap_or("")
-                .is_empty()
-        })
-        .map(|entry| entry.key.as_str())
+        .map(|entry| (entry.key.as_str(), entry.value.as_deref()))
         .collect::<Vec<_>>();
-    let additions = entries
-        .iter()
-        .filter_map(|entry| {
-            let value = entry.value.as_deref()?.trim();
-            (!value.is_empty()).then_some((entry.key.as_str(), value))
-        })
-        .collect::<Vec<_>>();
-
-    if !removals.is_empty() {
-        let result = run_gcloud(
-            &lookup.account,
-            &lookup.gcloud_project,
-            remove_workspace_metadata_args(&lookup.workspace, &removals),
-        )
-        .await?;
-        if !result.success {
-            return Err(gcloud_error(
-                &format!(
-                    "failed to remove metadata for workspace {}",
-                    lookup.workspace.name()
-                ),
-                &result.stderr,
-            ));
-        }
-    }
-
-    if !additions.is_empty() {
-        let result = run_gcloud(
-            &lookup.account,
-            &lookup.gcloud_project,
-            add_workspace_metadata_args(&lookup.workspace, &additions)?,
-        )
-        .await?;
-        if !result.success {
-            return Err(gcloud_error(
-                &format!(
-                    "failed to update metadata for workspace {}",
-                    lookup.workspace.name()
-                ),
-                &result.stderr,
-            ));
-        }
-    }
+    gcp::set_instance_metadata(
+        &lookup.gcloud_project,
+        lookup.workspace.zone(),
+        lookup.workspace.name(),
+        &updates,
+    )
+    .await?;
 
     log::info!(
         "updated metadata keys [{}] for workspace {}",
@@ -1091,23 +1025,8 @@ async fn list_workspaces_in_project(
     account: &str,
     project: &str,
 ) -> Result<Vec<Workspace>, String> {
-    let result = run_gcloud(
-        account,
-        project,
-        [
-            "compute".to_string(),
-            "instances".to_string(),
-            "list".to_string(),
-            "--format=json(name,zone,status,labels,metadata,creationTimestamp)".to_string(),
-        ],
-    )
-    .await?;
-
-    if !result.success {
-        return Err(gcloud_error("failed to list workspaces", &result.stderr));
-    }
-
-    parse_workspaces(&result.stdout)
+    let _ = account;
+    parse_workspaces_from_values(gcp::list_instances(project).await?)
 }
 
 fn pending_workspace(
@@ -1133,6 +1052,7 @@ fn pending_workspace(
             zone: zone.to_string(),
             lifecycle: lifecycle_for_status("PROVISIONING", None, None, None),
             agent_heartbeat_at: None,
+            agent_fingerprint: None,
         },
         branch_label.to_string(),
         target_branch.to_string(),
@@ -1161,6 +1081,7 @@ fn pending_template_workspace(name: &str, project_label: &str, zone: &str) -> Te
             zone: zone.to_string(),
             lifecycle: lifecycle_for_status("PROVISIONING", None, None, None),
             agent_heartbeat_at: None,
+            agent_fingerprint: None,
         },
         unread: false,
         working: None,
@@ -1212,19 +1133,14 @@ pub(crate) async fn create_template_workspace_for_project(
         };
     }
 
-    let result = run_gcloud(
-        &gcloud.account,
-        &gcloud.project,
-        create_template_workspace_args(&workspace_name, project, boot_source.as_deref(), &gcloud),
+    let request = create_template_workspace_request_body(
+        &workspace_name,
+        project,
+        boot_source.as_deref(),
+        &gcloud,
     )
     .await?;
-
-    if !result.success {
-        return Err(gcloud_error(
-            "failed to create template workspace",
-            &result.stderr,
-        ));
-    }
+    gcp::create_instance(&gcloud.project, &gcloud.zone, request).await?;
 
     bootstrap::cache_workspace_bootstrap(
         &workspace_name,
@@ -1366,6 +1282,172 @@ fn validate_required_gcloud_fields(
     }
 
     Ok(gcloud.clone())
+}
+
+async fn create_workspace_request_body(
+    workspace_name: &str,
+    project_label: &str,
+    branch_label: &str,
+    target_branch: &str,
+    boot_source: &WorkspaceBootSource,
+    gcloud: &ResolvedGcloudConfig,
+) -> Result<Value, String> {
+    let labels = json!({
+        "project": sanitize_label_value(project_label),
+    });
+    let lifecycle_updated_at = current_rfc3339_timestamp();
+    let source_image = match boot_source {
+        WorkspaceBootSource::ImageFamily => {
+            Some(gcp::get_image_from_family(&gcloud.image_project, &gcloud.image_family).await?)
+        }
+        WorkspaceBootSource::Snapshot(_) => None,
+    };
+    let source_snapshot = match boot_source {
+        WorkspaceBootSource::ImageFamily => None,
+        WorkspaceBootSource::Snapshot(snapshot) => Some(format!(
+            "projects/{}/global/snapshots/{snapshot}",
+            gcloud.project
+        )),
+    };
+
+    Ok(instance_insert_body(
+        workspace_name,
+        &gcloud.zone,
+        &gcloud.machine_type,
+        gcloud.disk_size_gb,
+        &gcloud.disk_type,
+        labels,
+        vec![
+            ("branch".to_string(), branch_label.to_string()),
+            ("target_branch".to_string(), target_branch.to_string()),
+            (
+                WORKSPACE_LIFECYCLE_PHASE_METADATA_KEY.to_string(),
+                "provisioning".to_string(),
+            ),
+            (
+                WORKSPACE_LIFECYCLE_DETAIL_METADATA_KEY.to_string(),
+                "Provisioning virtual machine".to_string(),
+            ),
+            (
+                WORKSPACE_LIFECYCLE_UPDATED_AT_METADATA_KEY.to_string(),
+                lifecycle_updated_at,
+            ),
+            ("enable-oslogin".to_string(), "TRUE".to_string()),
+        ],
+        source_image,
+        source_snapshot,
+        gcloud.service_account.trim(),
+    ))
+}
+
+async fn create_template_workspace_request_body(
+    workspace_name: &str,
+    project_label: &str,
+    source_snapshot: Option<&str>,
+    gcloud: &ResolvedGcloudConfig,
+) -> Result<Value, String> {
+    let lifecycle_updated_at = current_rfc3339_timestamp();
+    let source_image = match source_snapshot {
+        Some(_) => None,
+        None => {
+            Some(gcp::get_image_from_family(&gcloud.image_project, &gcloud.image_family).await?)
+        }
+    };
+    let source_snapshot = source_snapshot
+        .map(|snapshot| format!("projects/{}/global/snapshots/{snapshot}", gcloud.project));
+    Ok(instance_insert_body(
+        workspace_name,
+        &gcloud.zone,
+        &gcloud.machine_type,
+        gcloud.disk_size_gb,
+        &gcloud.disk_type,
+        json!({
+            "project": sanitize_label_value(project_label),
+            "template": "true",
+        }),
+        vec![
+            (
+                WORKSPACE_LIFECYCLE_PHASE_METADATA_KEY.to_string(),
+                "provisioning".to_string(),
+            ),
+            (
+                WORKSPACE_LIFECYCLE_DETAIL_METADATA_KEY.to_string(),
+                "Provisioning virtual machine".to_string(),
+            ),
+            (
+                WORKSPACE_LIFECYCLE_UPDATED_AT_METADATA_KEY.to_string(),
+                lifecycle_updated_at,
+            ),
+            ("enable-oslogin".to_string(), "TRUE".to_string()),
+        ],
+        source_image,
+        source_snapshot,
+        gcloud.service_account.trim(),
+    ))
+}
+
+fn instance_insert_body(
+    workspace_name: &str,
+    zone: &str,
+    machine_type: &str,
+    disk_size_gb: u32,
+    disk_type: &str,
+    labels: Value,
+    metadata_entries: Vec<(String, String)>,
+    source_image: Option<String>,
+    source_snapshot: Option<String>,
+    service_account: &str,
+) -> Value {
+    let mut initialize_params = Map::new();
+    initialize_params.insert("diskSizeGb".to_string(), json!(disk_size_gb));
+    initialize_params.insert(
+        "diskType".to_string(),
+        Value::String(format!("zones/{zone}/diskTypes/{disk_type}")),
+    );
+    if let Some(source_image) = source_image {
+        initialize_params.insert("sourceImage".to_string(), Value::String(source_image));
+    }
+    if let Some(source_snapshot) = source_snapshot {
+        initialize_params.insert("sourceSnapshot".to_string(), Value::String(source_snapshot));
+    }
+    let metadata = metadata_entries
+        .into_iter()
+        .map(|(key, value)| {
+            json!({
+                "key": key,
+                "value": value,
+            })
+        })
+        .collect::<Vec<_>>();
+    let service_accounts = if service_account.trim().is_empty() {
+        Value::Array(Vec::new())
+    } else {
+        json!([{
+            "email": service_account,
+            "scopes": ["https://www.googleapis.com/auth/compute"],
+        }])
+    };
+    json!({
+        "name": workspace_name,
+        "machineType": format!("zones/{zone}/machineTypes/{machine_type}"),
+        "labels": labels,
+        "metadata": {
+            "items": metadata,
+        },
+        "disks": [{
+            "boot": true,
+            "autoDelete": true,
+            "initializeParams": Value::Object(initialize_params),
+        }],
+        "networkInterfaces": [{
+            "network": "global/networks/default",
+            "accessConfigs": [{
+                "name": "External NAT",
+                "type": "ONE_TO_ONE_NAT",
+            }],
+        }],
+        "serviceAccounts": service_accounts,
+    })
 }
 
 fn create_workspace_args(
@@ -1601,97 +1683,6 @@ pub(crate) fn delete_snapshot_args(snapshot_name: &str) -> Vec<String> {
     ]
 }
 
-pub(crate) async fn run_gcloud<I, S>(
-    account: &str,
-    project: &str,
-    args: I,
-) -> Result<CommandResult, String>
-where
-    I: IntoIterator<Item = S>,
-    S: Into<String>,
-{
-    let account = account.to_string();
-    let project = project.to_string();
-    let args: Vec<String> = args.into_iter().map(Into::into).collect();
-    let command_line = args.join(" ");
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let started = Instant::now();
-        let mut command = Command::new("gcloud");
-        if !account.trim().is_empty() {
-            command.arg(format!("--account={account}"));
-        }
-        if !project.trim().is_empty() {
-            command.arg(format!("--project={project}"));
-        }
-        let output = command
-            .args(&args)
-            .output()
-            .map_err(|error| format!("failed to execute gcloud: {error}"))?;
-        if output.status.success() {
-            log::trace!(
-                "workspace gcloud command completed duration_ms={} project={} args={command_line}",
-                started.elapsed().as_millis(),
-                project
-            );
-        } else {
-            log::warn!(
-                "workspace gcloud command failed duration_ms={} project={} args={} stderr={}",
-                started.elapsed().as_millis(),
-                project,
-                command_line,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-
-        Ok(CommandResult {
-            success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
-    })
-    .await
-    .map_err(|error| format!("gcloud task failed: {error}"))?
-}
-
-async fn run_gcloud_detached<I, S>(account: &str, project: &str, args: I) -> Result<(), String>
-where
-    I: IntoIterator<Item = S>,
-    S: Into<String>,
-{
-    let account = account.to_string();
-    let project = project.to_string();
-    let args: Vec<String> = args.into_iter().map(Into::into).collect();
-    let command_line = args.join(" ");
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let started = Instant::now();
-        let mut command = Command::new("gcloud");
-        if !account.trim().is_empty() {
-            command.arg(format!("--account={account}"));
-        }
-        if !project.trim().is_empty() {
-            command.arg(format!("--project={project}"));
-        }
-        command
-            .args(&args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .stdin(Stdio::null())
-            .spawn()
-            .map_err(|error| format!("failed to execute gcloud: {error}"))?;
-
-        log::trace!(
-            "workspace gcloud command detached duration_ms={} project={} args={command_line}",
-            started.elapsed().as_millis(),
-            project
-        );
-        Ok(())
-    })
-    .await
-    .map_err(|error| format!("gcloud task failed: {error}"))?
-}
-
 pub(crate) async fn ensure_template_workspace_terminated(
     account: &str,
     gcloud_project: &str,
@@ -1703,19 +1694,14 @@ pub(crate) async fn ensure_template_workspace_terminated(
     let instance = if instance.status == INSTANCE_STATUS_TERMINATED {
         instance
     } else {
-        let stop_result = run_gcloud(
-            account,
+        gcp::post_instance_action(
             gcloud_project,
-            stop_workspace_args(workspace_name, zone),
+            zone,
+            workspace_name,
+            "stop",
+            "failed to stop template workspace",
         )
         .await?;
-
-        if !stop_result.success {
-            return Err(gcloud_error(
-                "failed to stop template workspace",
-                &stop_result.stderr,
-            ));
-        }
 
         wait_for_instance_terminated(account, gcloud_project, workspace_name, zone).await?
     };
@@ -1733,19 +1719,7 @@ pub(crate) async fn delete_template_workspace_if_exists(
     let Some(workspace) = workspace else {
         return Ok(());
     };
-
-    let delete_result = run_gcloud(
-        account,
-        gcloud_project,
-        delete_workspace_args(workspace_name, workspace.zone()),
-    )
-    .await?;
-    if !delete_result.success {
-        return Err(gcloud_error(
-            "failed to delete template workspace",
-            &delete_result.stderr,
-        ));
-    }
+    gcp::delete_instance(gcloud_project, workspace.zone(), workspace_name).await?;
 
     Ok(())
 }
@@ -1758,20 +1732,19 @@ pub(crate) async fn create_template_snapshot_for_disk_named(
     source_disk: &str,
     zone: &str,
 ) -> Result<(), String> {
-    let snapshot_result = run_gcloud(
-        account,
+    let _ = account;
+    gcp::create_snapshot(
         gcloud_project,
-        create_template_snapshot_args(snapshot_name, source_disk, zone, project),
+        json!({
+            "name": snapshot_name,
+            "sourceDisk": format!("projects/{gcloud_project}/zones/{zone}/disks/{source_disk}"),
+            "labels": {
+                "project": sanitize_label_value(project),
+                "template": "true",
+            },
+        }),
     )
     .await?;
-
-    if !snapshot_result.success {
-        return Err(gcloud_error(
-            "failed to create template snapshot",
-            &snapshot_result.stderr,
-        ));
-    }
-
     Ok(())
 }
 
@@ -1786,13 +1759,10 @@ pub(crate) async fn delete_old_template_snapshots(
         .into_iter()
         .filter(|snapshot| snapshot.name != keep_snapshot_name)
     {
-        let delete_result = run_gcloud(
-            account,
-            gcloud_project,
-            delete_snapshot_args(&snapshot.name),
-        )
-        .await?;
-        if delete_result.success {
+        if gcp::delete_snapshot(gcloud_project, &snapshot.name)
+            .await
+            .is_ok()
+        {
             log::info!(
                 "deleted older template snapshot {} for project {}",
                 snapshot.name,
@@ -1800,10 +1770,9 @@ pub(crate) async fn delete_old_template_snapshots(
             );
         } else {
             log::warn!(
-                "failed to delete older template snapshot {} for project {}: {}",
+                "failed to delete older template snapshot {} for project {}",
                 snapshot.name,
-                project,
-                delete_result.stderr.trim()
+                project
             );
         }
     }
@@ -1818,18 +1787,7 @@ pub(crate) async fn delete_template_snapshots(
 ) -> Result<(), String> {
     let snapshots = list_template_snapshots_in_project(account, gcloud_project, project).await?;
     for snapshot in snapshots {
-        let delete_result = run_gcloud(
-            account,
-            gcloud_project,
-            delete_snapshot_args(&snapshot.name),
-        )
-        .await?;
-        if !delete_result.success {
-            return Err(gcloud_error(
-                "failed to delete template snapshot",
-                &delete_result.stderr,
-            ));
-        }
+        gcp::delete_snapshot(gcloud_project, &snapshot.name).await?;
     }
 
     Ok(())
@@ -1865,25 +1823,8 @@ pub(crate) async fn describe_instance_in_project(
     project: &str,
     zone: &str,
 ) -> Result<InstanceState, String> {
-    let result = run_gcloud(
-        account,
-        project,
-        [
-            "compute".to_string(),
-            "instances".to_string(),
-            "describe".to_string(),
-            name.to_string(),
-            format!("--zone={zone}"),
-            "--format=json(status,disks)".to_string(),
-        ],
-    )
-    .await?;
-
-    if !result.success {
-        return Err(gcloud_error("failed to describe workspace", &result.stderr));
-    }
-
-    parse_instance_state(&result.stdout)
+    let _ = account;
+    parse_instance_state_value(&gcp::get_instance(project, zone, name).await?)
 }
 
 pub(crate) async fn latest_template_snapshot_name(
@@ -1927,32 +1868,14 @@ pub(crate) async fn describe_snapshot_if_exists_in_project(
     account: &str,
     project: &str,
 ) -> Result<Option<Snapshot>, String> {
-    let result = run_gcloud(
-        account,
-        project,
-        [
-            "compute".to_string(),
-            "snapshots".to_string(),
-            "describe".to_string(),
-            snapshot_name.to_string(),
-            "--format=json(name,status,creationTimestamp,labels)".to_string(),
-        ],
-    )
-    .await?;
-
-    if !result.success {
-        if gcloud_resource_was_not_found(&result.stderr) {
+    let _ = account;
+    match gcp::get_snapshot(project, snapshot_name).await {
+        Ok(value) => Ok(Some(parse_snapshot(&value)?)),
+        Err(error) if gcloud_resource_was_not_found(&error) => {
             return Ok(None);
         }
-        return Err(gcloud_error(
-            "failed to describe template snapshot",
-            &result.stderr,
-        ));
+        Err(error) => Err(error),
     }
-
-    let value: Value = serde_json::from_str(&result.stdout)
-        .map_err(|error| format!("invalid gcloud json: {error}"))?;
-    Ok(Some(parse_snapshot(&value)?))
 }
 
 pub(crate) async fn update_template_snapshot_labels(
@@ -1962,35 +1885,27 @@ pub(crate) async fn update_template_snapshot_labels(
     updates: &[(&str, &str)],
     removals: &[&str],
 ) -> Result<(), String> {
-    let mut args = vec![
-        "compute".to_string(),
-        "snapshots".to_string(),
-        "update".to_string(),
-        snapshot_name.to_string(),
-    ];
-
-    if !updates.is_empty() {
-        args.push(format!(
-            "--update-labels={}",
-            updates
-                .iter()
-                .map(|(key, value)| format!("{key}={}", sanitize_label_value(value)))
-                .collect::<Vec<_>>()
-                .join(",")
-        ));
+    let _ = account;
+    let snapshot = gcp::get_snapshot(project, snapshot_name).await?;
+    let fingerprint = snapshot
+        .get("labelFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "snapshot is missing label fingerprint".to_string())?;
+    let mut labels = snapshot
+        .get("labels")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for (key, value) in updates {
+        labels.insert(
+            (*key).to_string(),
+            Value::String(sanitize_label_value(value)),
+        );
     }
-    if !removals.is_empty() {
-        args.push(format!("--remove-labels={}", removals.join(",")));
+    for key in removals {
+        labels.remove(*key);
     }
-
-    let result = run_gcloud(account, project, args).await?;
-    if !result.success {
-        return Err(gcloud_error(
-            "failed to update template snapshot labels",
-            &result.stderr,
-        ));
-    }
-
+    gcp::set_snapshot_labels(project, snapshot_name, labels, fingerprint).await?;
     Ok(())
 }
 
@@ -1999,29 +1914,8 @@ async fn describe_snapshot_in_project(
     account: &str,
     project: &str,
 ) -> Result<Snapshot, String> {
-    let result = run_gcloud(
-        account,
-        project,
-        [
-            "compute".to_string(),
-            "snapshots".to_string(),
-            "describe".to_string(),
-            snapshot_name.to_string(),
-            "--format=json(name,status,creationTimestamp,labels)".to_string(),
-        ],
-    )
-    .await?;
-
-    if !result.success {
-        return Err(gcloud_error(
-            "failed to describe template snapshot",
-            &result.stderr,
-        ));
-    }
-
-    let value: Value = serde_json::from_str(&result.stdout)
-        .map_err(|error| format!("invalid gcloud json: {error}"))?;
-    parse_snapshot(&value)
+    let _ = account;
+    parse_snapshot(&gcp::get_snapshot(project, snapshot_name).await?)
 }
 
 pub(crate) async fn list_template_snapshots_in_project(
@@ -2029,26 +1923,8 @@ pub(crate) async fn list_template_snapshots_in_project(
     project: &str,
     project_label: &str,
 ) -> Result<Vec<Snapshot>, String> {
-    let result = run_gcloud(
-        account,
-        project,
-        [
-            "compute".to_string(),
-            "snapshots".to_string(),
-            "list".to_string(),
-            "--format=json(name,status,creationTimestamp,labels)".to_string(),
-        ],
-    )
-    .await?;
-
-    if !result.success {
-        return Err(gcloud_error(
-            "failed to list template snapshots",
-            &result.stderr,
-        ));
-    }
-
-    let mut snapshots = parse_snapshots(&result.stdout)?
+    let _ = account;
+    let mut snapshots = parse_snapshots_from_values(gcp::list_snapshots(project).await?)?
         .into_iter()
         .filter(|snapshot| snapshot_matches_project(snapshot, project_label))
         .collect::<Vec<_>>();
@@ -2095,38 +1971,16 @@ async fn list_all_template_snapshots_in_gcloud_project(
     account: &str,
     project: &str,
 ) -> Result<Vec<Snapshot>, String> {
-    let result = run_gcloud(
-        account,
-        project,
-        [
-            "compute".to_string(),
-            "snapshots".to_string(),
-            "list".to_string(),
-            "--format=json(name,status,creationTimestamp,labels)".to_string(),
-        ],
+    let _ = account;
+    Ok(
+        parse_snapshots_from_values(gcp::list_snapshots(project).await?)?
+            .into_iter()
+            .filter(|snapshot| snapshot.template && snapshot.project.is_some())
+            .collect(),
     )
-    .await?;
-
-    if !result.success {
-        return Err(gcloud_error(
-            "failed to list template snapshots",
-            &result.stderr,
-        ));
-    }
-
-    Ok(parse_snapshots(&result.stdout)?
-        .into_iter()
-        .filter(|snapshot| snapshot.template && snapshot.project.is_some())
-        .collect())
 }
 
-fn parse_workspaces(stdout: &str) -> Result<Vec<Workspace>, String> {
-    let value: Value =
-        serde_json::from_str(stdout).map_err(|error| format!("invalid gcloud json: {error}"))?;
-    let entries = value
-        .as_array()
-        .ok_or_else(|| "gcloud did not return a JSON array".to_string())?;
-
+fn parse_workspaces_from_values(entries: Vec<Value>) -> Result<Vec<Workspace>, String> {
     entries.iter().map(parse_workspace).collect()
 }
 
@@ -2137,6 +1991,10 @@ fn parse_snapshots(stdout: &str) -> Result<Vec<Snapshot>, String> {
         .as_array()
         .ok_or_else(|| "gcloud did not return a JSON array".to_string())?;
 
+    entries.iter().map(parse_snapshot).collect()
+}
+
+fn parse_snapshots_from_values(entries: Vec<Value>) -> Result<Vec<Snapshot>, String> {
     entries.iter().map(parse_snapshot).collect()
 }
 
@@ -2167,6 +2025,7 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
     let last_working = resolve_workspace_last_working(&metadata);
     let active_session = resolve_workspace_active_session(&metadata);
     let agent_heartbeat_at = resolve_workspace_agent_heartbeat(&metadata);
+    let agent_fingerprint = resolve_workspace_agent_fingerprint(&metadata);
     let lifecycle = resolve_workspace_lifecycle(&status, &metadata, agent_heartbeat_at.as_deref());
 
     let base = WorkspaceBase {
@@ -2180,6 +2039,7 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         zone,
         lifecycle,
         agent_heartbeat_at,
+        agent_fingerprint,
     };
 
     let unread =
@@ -2270,6 +2130,10 @@ fn snapshot_into_template(snapshot: Snapshot) -> Option<SnapshotTemplate> {
 fn parse_instance_state(stdout: &str) -> Result<InstanceState, String> {
     let value: Value =
         serde_json::from_str(stdout).map_err(|error| format!("invalid gcloud json: {error}"))?;
+    parse_instance_state_value(&value)
+}
+
+fn parse_instance_state_value(value: &Value) -> Result<InstanceState, String> {
     let status = required_string_field(&value, "status")?;
     let disks = value
         .get("disks")
@@ -2425,6 +2289,13 @@ fn resolve_workspace_lifecycle(
 fn resolve_workspace_agent_heartbeat(metadata: &HashMap<String, String>) -> Option<String> {
     metadata
         .get(WORKSPACE_AGENT_HEARTBEAT_METADATA_KEY)
+        .cloned()
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn resolve_workspace_agent_fingerprint(metadata: &HashMap<String, String>) -> Option<String> {
+    metadata
+        .get(WORKSPACE_AGENT_FINGERPRINT_METADATA_KEY)
         .cloned()
         .filter(|value| !value.trim().is_empty())
 }
@@ -2890,15 +2761,6 @@ fn sanitize_label_value(value: &str) -> String {
     sanitized.trim_matches('-').to_string()
 }
 
-pub(crate) fn gcloud_error(context: &str, stderr: &str) -> String {
-    let stderr = stderr.trim();
-    if stderr.is_empty() {
-        context.to_string()
-    } else {
-        format!("{context}: {stderr}")
-    }
-}
-
 async fn sleep_for(duration: Duration) {
     let _ = tauri::async_runtime::spawn_blocking(move || std::thread::sleep(duration)).await;
 }
@@ -2948,6 +2810,7 @@ mod tests {
             zone: "us-east1-b".to_string(),
             lifecycle: WorkspaceLifecycle::new("ready", None, None, None),
             agent_heartbeat_at: None,
+            agent_fingerprint: None,
         }
     }
 

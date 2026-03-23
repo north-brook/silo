@@ -1,13 +1,14 @@
 use crate::bootstrap;
 use crate::bootstrap::is_retryable_terminal_transport_error;
 use crate::remote::{
-    assistant_prompt_command, remote_command_error, run_remote_command, run_terminal_user_command,
-    shell_quote, terminal_shell_command, wrap_remote_shell_command, REMOTE_WORKSPACE_AGENT_BIN,
+    assistant_prompt_command, build_terminal_attach_command, remote_command_error,
+    run_remote_command, run_terminal_user_command, shell_quote, terminal_shell_command,
+    REMOTE_WORKSPACE_AGENT_BIN,
 };
 use crate::state::{active_session_metadata_entries, WorkspaceMetadataManager};
 use crate::workspaces::{self, WorkspaceActiveSession, WorkspaceLookup, WorkspaceSession};
 use crate::{emit_workspace_state_changed, AppRuntime};
-use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, ChildKiller, MasterPty, PtySize};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
@@ -660,20 +661,8 @@ fn spawn_terminal_attachment(
             pixel_height: 0,
         })
         .map_err(|error| format!("failed to create terminal pty: {error}"))?;
-    let mut command = CommandBuilder::new("gcloud");
-    command.args([
-        format!("--account={}", lookup.account),
-        format!("--project={}", lookup.gcloud_project),
-        "compute".to_string(),
-        "ssh".to_string(),
-        lookup.workspace.name().to_string(),
-        format!("--zone={}", lookup.workspace.zone()),
-        "--ssh-flag=-tt".to_string(),
-        format!(
-            "--command={}",
-            wrap_remote_shell_command(&terminal_attach_remote_command(&key.name))
-        ),
-    ]);
+    let command =
+        build_terminal_attach_command(&lookup, &terminal_attach_remote_command(&key.name))?;
 
     let child = pair
         .slave

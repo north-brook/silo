@@ -1,8 +1,9 @@
+use crate::remote::spawn_remote_port_forward;
 use crate::tls;
 use crate::workspaces::{WorkspaceLookup, WorkspaceSession};
 use std::collections::{HashMap, HashSet};
 use std::net::{TcpListener, TcpStream};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::webview::Url;
@@ -182,29 +183,7 @@ fn spawn_loopback_route(
     local_port: u16,
     remote_port: u16,
 ) -> Result<Child, String> {
-    let mut command = Command::new("gcloud");
-    command.arg(format!("--account={}", lookup.account));
-    command.arg(format!("--project={}", lookup.gcloud_project));
-    command.arg("compute");
-    command.arg("ssh");
-    command.arg(lookup.workspace.name());
-    command.arg(format!("--zone={}", lookup.workspace.zone()));
-    command.arg("--ssh-flag=-N");
-    command.arg("--ssh-flag=-o");
-    command.arg("--ssh-flag=ExitOnForwardFailure=yes");
-    command.arg("--ssh-flag=-o");
-    command.arg("--ssh-flag=ServerAliveInterval=15");
-    command.arg("--ssh-flag=-L");
-    command.arg(format!(
-        "--ssh-flag=127.0.0.1:{local_port}:127.0.0.1:{remote_port}"
-    ));
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    command
-        .spawn()
-        .map_err(|error| format!("failed to start browser loopback route: {error}"))
+    spawn_remote_port_forward(lookup, local_port, remote_port)
 }
 
 fn wait_for_local_route(local_port: u16, child: &mut Child) -> Result<(), String> {

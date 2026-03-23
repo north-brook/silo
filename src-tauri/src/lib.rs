@@ -8,6 +8,7 @@ mod codex;
 mod config;
 mod files;
 mod gcloud;
+mod gcp;
 mod git;
 mod logging;
 mod projects;
@@ -328,6 +329,22 @@ pub fn run() {
             workspace_state.set_app_handle(app.handle().clone());
             bootstrap::initialize_workspace_metadata_manager(workspace_state.clone());
             templates::resume_running_template_operations(workspace_state);
+            if build_info::is_production_build() {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    match gcloud::repair_runtime_identity_if_needed().await {
+                        Ok(()) => {
+                            bootstrap::start_release_workspace_agent_rollout_if_needed(handle)
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "skipping workspace agent release rollout because runtime identity repair failed: {}",
+                                error
+                            );
+                        }
+                    }
+                });
+            }
 
             // Native accelerators ensure app shortcuts still work when focus moves to child webviews.
             {

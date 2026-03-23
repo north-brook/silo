@@ -774,8 +774,7 @@ mod tests {
     fn detect_initial_config_seeds_service_account_key_file_when_present() {
         let temp_dir = TestDir::new_without_config();
         let key_path = temp_dir
-            .root
-            .join(SILO_DIR_NAME)
+            .silo_dir()
             .join("demo-project-silo-workspaces.json");
         write_file(&key_path, "{\"type\":\"service_account\"}")
             .expect("service account key file should be written");
@@ -957,7 +956,8 @@ mod tests {
                     .unwrap_or(0)
             );
             let root = env::temp_dir().join(unique);
-            fs::create_dir_all(root.join(SILO_DIR_NAME)).expect("test dir should be created");
+            fs::create_dir_all(state_paths::app_state_dir_for_home(&root))
+                .expect("test dir should be created");
 
             Self { root }
         }
@@ -967,7 +967,7 @@ mod tests {
         }
 
         fn silo_dir(&self) -> PathBuf {
-            self.root.join(SILO_DIR_NAME)
+            state_paths::app_state_dir_for_home(&self.root)
         }
 
         fn config_path(&self) -> PathBuf {

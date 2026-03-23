@@ -1,6 +1,7 @@
 use crate::bootstrap;
 use crate::config::ConfigStore;
 use crate::emit_workspace_state_changed;
+use crate::gcp;
 use crate::state::WorkspaceMetadataManager;
 use crate::workspaces::{
     self, ResolvedGcloudConfig, Snapshot, SnapshotTemplate, TemplateWorkspace, WorkspaceLookup,
@@ -688,19 +689,7 @@ async fn reconcile_template_delete_operation(
                 .collect::<Vec<_>>();
             if !delete_snapshots.is_empty() {
                 for snapshot_name in delete_snapshots {
-                    let result = workspaces::run_gcloud(
-                        &gcloud.account,
-                        &gcloud.project,
-                        workspaces::delete_snapshot_args(&snapshot_name),
-                    )
-                    .await?;
-                    if !result.success {
-                        return Err(format!(
-                            "failed to delete template snapshot {}: {}",
-                            snapshot_name,
-                            result.stderr.trim()
-                        ));
-                    }
+                    gcp::delete_snapshot(&gcloud.project, &snapshot_name).await?;
                 }
             }
         }

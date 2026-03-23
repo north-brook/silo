@@ -1,21 +1,29 @@
+use crate::build_info;
 use crate::codex::{codex_token_from_auth_json, normalize_codex_auth_json};
 use crate::config::{ConfigStore, ProjectConfig, SiloConfig};
+use crate::gcp;
 use crate::remote::{
     remote_command_error, run_remote_command, run_remote_command_with_stdin,
     run_terminal_user_command, shell_quote, workspace_shell_command_with_credentials,
     REMOTE_WORKSPACE_AGENT_BIN, TERMINAL_WORKSPACE_DIR,
 };
 use crate::state::WorkspaceMetadataManager;
+use crate::state_paths;
 use crate::terminal;
 use crate::workspaces::{self, Workspace, WorkspaceLookup};
+use crate::AppRuntime;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path};
-use std::sync::{LazyLock, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    LazyLock, Mutex, OnceLock,
+};
 use std::time::Instant;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
@@ -24,7 +32,11 @@ const REMOTE_BOOTSTRAP_LOCK_DIR: &str = "/home/silo/.silo/workspace-bootstrap.lo
 const REMOTE_BOOTSTRAP_LOG_FILE: &str = "/home/silo/.silo/bootstrap.log";
 const REMOTE_CREDENTIALS_FILE: &str = "/home/silo/.silo/credentials.sh";
 const REMOTE_WORKSPACE_AGENT_PIDFILE: &str = "/home/silo/.silo/workspace-agent/daemon.pid";
+pub(crate) const REMOTE_WORKSPACE_AGENT_FINGERPRINT_FILE: &str =
+    "/home/silo/.silo/workspace-agent/fingerprint";
 const REMOTE_WORKSPACE_AGENT_SHELL_FILE: &str = "/home/silo/.silo/workspace-agent-shell.sh";
+const WORKSPACE_AGENT_RELEASE_ROLLOUT_STATE_FILE_NAME: &str =
+    "workspace-agent-release-rollout.json";
 const WORKSPACE_BOOTSTRAP_VERSION: &str = "17";
 const STARTUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 const INSTANCE_RUNNING_POLL_ATTEMPTS: usize = 180;
@@ -32,12 +44,18 @@ const SSH_READY_POLL_ATTEMPTS: usize = 120;
 const BOOTSTRAP_RETRY_ATTEMPTS: usize = 60;
 const OBSERVER_READY_POLL_ATTEMPTS: usize = 30;
 const OBSERVER_HEARTBEAT_STALE_AFTER_SECS: i64 = 45;
+const WORKSPACE_AGENT_UPDATE_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(15);
 const WORKSPACE_AGENT_BIN_BYTES: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
     "/workspace-agent-x86_64-unknown-linux-musl"
 ));
 static WORKSPACE_STARTUP_RECONCILE_STATE: LazyLock<Mutex<HashMap<String, WorkspaceStartupState>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static WORKSPACE_AGENT_UPDATE_IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+static WORKSPACE_AGENT_UPDATE_RETRY_AT: LazyLock<Mutex<HashMap<String, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static WORKSPACE_AGENT_UPDATE_ATTEMPT_IDS: AtomicU64 = AtomicU64::new(1_000_000);
 static WORKSPACE_METADATA_MANAGER: OnceLock<WorkspaceMetadataManager> = OnceLock::new();
 
 #[derive(Debug, Clone)]
@@ -75,6 +93,13 @@ struct LifecycleReporter {
     phase: Option<String>,
     detail: Option<String>,
     last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct WorkspaceAgentReleaseRolloutState {
+    app_version: String,
+    fingerprint: String,
+    completed_at: String,
 }
 
 fn begin_workspace_startup_reconcile(workspace: &str) -> Option<u64> {
@@ -225,6 +250,84 @@ fn workspace_metadata_manager() -> Option<&'static WorkspaceMetadataManager> {
     WORKSPACE_METADATA_MANAGER.get()
 }
 
+fn next_workspace_agent_update_attempt_id() -> u64 {
+    WORKSPACE_AGENT_UPDATE_ATTEMPT_IDS.fetch_add(1, Ordering::Relaxed)
+}
+
+fn begin_workspace_agent_update_reconcile(workspace: &str) -> Option<u64> {
+    let now = Instant::now();
+    if let Ok(mut retry_at) = WORKSPACE_AGENT_UPDATE_RETRY_AT.lock() {
+        if let Some(deadline) = retry_at.get(workspace).copied() {
+            if now < deadline {
+                return None;
+            }
+        }
+        retry_at.remove(workspace);
+    }
+
+    let Ok(mut in_flight) = WORKSPACE_AGENT_UPDATE_IN_FLIGHT.lock() else {
+        return None;
+    };
+    if !in_flight.insert(workspace.to_string()) {
+        return None;
+    }
+
+    Some(next_workspace_agent_update_attempt_id())
+}
+
+fn finish_workspace_agent_update_reconcile(workspace: &str, success: bool) {
+    if let Ok(mut in_flight) = WORKSPACE_AGENT_UPDATE_IN_FLIGHT.lock() {
+        in_flight.remove(workspace);
+    }
+    if let Ok(mut retry_at) = WORKSPACE_AGENT_UPDATE_RETRY_AT.lock() {
+        if success {
+            retry_at.remove(workspace);
+        } else {
+            retry_at.insert(
+                workspace.to_string(),
+                Instant::now() + WORKSPACE_AGENT_UPDATE_RETRY_AFTER,
+            );
+        }
+    }
+}
+
+pub(crate) fn workspace_agent_fingerprint() -> String {
+    workspace_agent_source_signature()
+}
+
+fn workspace_agent_release_rollout_state_path() -> Result<std::path::PathBuf, String> {
+    Ok(state_paths::app_state_dir()?.join(WORKSPACE_AGENT_RELEASE_ROLLOUT_STATE_FILE_NAME))
+}
+
+fn load_workspace_agent_release_rollout_state(
+) -> Result<Option<WorkspaceAgentReleaseRolloutState>, String> {
+    let path = workspace_agent_release_rollout_state_path()?;
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    serde_json::from_str(&contents)
+        .map(Some)
+        .map_err(|error| format!("failed to parse {}: {error}", path.display()))
+}
+
+fn save_workspace_agent_release_rollout_state(
+    state: &WorkspaceAgentReleaseRolloutState,
+) -> Result<(), String> {
+    let path = workspace_agent_release_rollout_state_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create workspace agent rollout state directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    let contents = serde_json::to_string_pretty(state)
+        .map_err(|error| format!("failed to encode rollout state: {error}"))?;
+    fs::write(&path, contents)
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))
+}
+
 pub(crate) fn start_workspace_startup_reconcile_if_needed(workspace: Workspace) {
     if workspace.should_reconcile_startup() {
         if !workspace_has_local_bootstrap_context(&workspace) {
@@ -290,6 +393,192 @@ pub(crate) fn start_workspace_startup_reconcile(workspace: String) {
 
         finish_workspace_startup_reconcile(&workspace, attempt_id);
     });
+}
+
+fn workspace_agent_update_allowed_phase(phase: &str) -> bool {
+    matches!(phase, "ready" | "updating_workspace_agent")
+}
+
+fn workspace_needs_agent_update(workspace: &Workspace) -> bool {
+    if workspace.status() != "RUNNING" {
+        return false;
+    }
+    if !workspace_agent_update_allowed_phase(workspace.lifecycle().phase()) {
+        return false;
+    }
+
+    let expected = workspace_agent_fingerprint();
+    workspace.agent_fingerprint() != Some(expected.as_str())
+}
+
+pub(crate) fn start_release_workspace_agent_rollout_if_needed(
+    app_handle: tauri::AppHandle<AppRuntime>,
+) {
+    if !build_info::is_production_build() {
+        return;
+    }
+    if !gcp::runtime_identity_configured() {
+        log::info!(
+            "skipping workspace agent release rollout because runtime gcp identity is unavailable"
+        );
+        return;
+    }
+
+    let app_version = app_handle.package_info().version.to_string();
+    let fingerprint = workspace_agent_fingerprint();
+    match load_workspace_agent_release_rollout_state() {
+        Ok(Some(state)) if state.app_version == app_version && state.fingerprint == fingerprint => {
+            return;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            log::warn!("failed to load workspace agent rollout state: {error}");
+        }
+    }
+
+    tauri::async_runtime::spawn(async move {
+        match workspaces::list_all_workspaces().await {
+            Ok(workspaces) => {
+                let mut pending_updates = 0usize;
+                for workspace in workspaces {
+                    if workspace_needs_agent_update(&workspace) {
+                        pending_updates += 1;
+                    }
+                    start_workspace_agent_update_reconcile_if_needed(workspace);
+                }
+                if pending_updates == 0 {
+                    let state = WorkspaceAgentReleaseRolloutState {
+                        app_version,
+                        fingerprint,
+                        completed_at: workspaces::current_rfc3339_timestamp(),
+                    };
+                    if let Err(error) = save_workspace_agent_release_rollout_state(&state) {
+                        log::warn!("failed to save workspace agent rollout state: {error}");
+                    }
+                } else {
+                    log::info!(
+                        "workspace agent release rollout queued updates for {} running workspaces",
+                        pending_updates
+                    );
+                }
+            }
+            Err(error) => {
+                log::warn!(
+                    "failed to list workspaces for workspace agent release rollout: {error}"
+                );
+            }
+        }
+    });
+}
+
+pub(crate) fn start_workspace_agent_update_reconcile_if_needed(workspace: Workspace) {
+    if !build_info::is_production_build() || !gcp::runtime_identity_configured() {
+        return;
+    }
+    if !workspace_needs_agent_update(&workspace) {
+        return;
+    }
+
+    let workspace_name = workspace.name().to_string();
+    let Some(attempt_id) = begin_workspace_agent_update_reconcile(&workspace_name) else {
+        return;
+    };
+
+    if let Some(manager) = workspace_metadata_manager() {
+        manager.enqueue_workspace_lifecycle(
+            &workspace_name,
+            None,
+            attempt_id,
+            "updating_workspace_agent",
+            Some("Updating workspace observer"),
+            None,
+        );
+    }
+
+    tauri::async_runtime::spawn(async move {
+        let result = reconcile_workspace_agent_update(&workspace_name, attempt_id).await;
+        match result {
+            Ok(()) => finish_workspace_agent_update_reconcile(&workspace_name, true),
+            Err(error) => {
+                if let Some(manager) = workspace_metadata_manager() {
+                    manager.enqueue_workspace_lifecycle(
+                        &workspace_name,
+                        None,
+                        attempt_id,
+                        "updating_workspace_agent",
+                        Some("Updating workspace observer"),
+                        Some(&error),
+                    );
+                }
+                log::warn!(
+                    "workspace agent update reconcile failed for workspace {}: {}",
+                    workspace_name,
+                    error
+                );
+                finish_workspace_agent_update_reconcile(&workspace_name, false);
+            }
+        }
+    });
+}
+
+async fn reconcile_workspace_agent_update(workspace: &str, attempt_id: u64) -> Result<(), String> {
+    let lookup = workspaces::find_workspace(workspace).await?;
+    if lookup.workspace.status() != "RUNNING" {
+        return Ok(());
+    }
+    if !workspace_agent_update_allowed_phase(lookup.workspace.lifecycle().phase()) {
+        return Ok(());
+    }
+
+    let expected_fingerprint = workspace_agent_fingerprint();
+    if lookup.workspace.agent_fingerprint() == Some(expected_fingerprint.as_str()) {
+        if let Some(manager) = workspace_metadata_manager() {
+            manager.enqueue_workspace_lifecycle(
+                workspace,
+                Some(lookup),
+                attempt_id,
+                "ready",
+                None,
+                None,
+            );
+        }
+        return Ok(());
+    }
+
+    if let Some(manager) = workspace_metadata_manager() {
+        manager.enqueue_workspace_lifecycle(
+            workspace,
+            Some(lookup.clone()),
+            attempt_id,
+            "updating_workspace_agent",
+            Some("Updating workspace observer"),
+            None,
+        );
+    }
+
+    wait_for_workspace_ssh(&lookup).await?;
+
+    let install_script = workspace_agent_install_script(&lookup);
+    let install_result = run_remote_command_with_stdin(
+        &lookup,
+        &run_terminal_user_command("bash -se"),
+        install_script.into_bytes(),
+    )
+    .await?;
+    if !install_result.success {
+        return Err(remote_command_error(
+            "failed to update workspace agent",
+            &install_result.stderr,
+        ));
+    }
+
+    wait_for_workspace_agent(workspace, Some(expected_fingerprint.as_str())).await?;
+
+    if let Some(manager) = workspace_metadata_manager() {
+        manager.enqueue_workspace_lifecycle(workspace, None, attempt_id, "ready", None, None);
+    }
+
+    Ok(())
 }
 
 pub(crate) async fn wait_for_template_bootstrap(workspace: &str) -> Result<(), String> {
@@ -402,7 +691,8 @@ async fn reconcile_workspace_startup(workspace: &str, attempt_id: u64) -> Result
         )
         .await?;
     ensure_workspace_agent_running(&lookup).await?;
-    wait_for_workspace_agent(workspace).await?;
+    let expected_fingerprint = workspace_agent_fingerprint();
+    wait_for_workspace_agent(workspace, Some(expected_fingerprint.as_str())).await?;
 
     if lookup.workspace.is_template() {
         reporter
@@ -554,10 +844,16 @@ async fn ensure_workspace_agent_running(lookup: &WorkspaceLookup) -> Result<(), 
     Ok(())
 }
 
-async fn wait_for_workspace_agent(workspace: &str) -> Result<(), String> {
+async fn wait_for_workspace_agent(
+    workspace: &str,
+    expected_fingerprint: Option<&str>,
+) -> Result<(), String> {
     for attempt in 0..OBSERVER_READY_POLL_ATTEMPTS {
         let lookup = workspaces::find_workspace(workspace).await?;
-        if agent_heartbeat_is_fresh(&lookup.workspace) {
+        if agent_heartbeat_is_fresh(&lookup.workspace)
+            && expected_fingerprint
+                .is_none_or(|expected| lookup.workspace.agent_fingerprint() == Some(expected))
+        {
             return Ok(());
         }
         if attempt + 1 == OBSERVER_READY_POLL_ATTEMPTS {
@@ -566,9 +862,13 @@ async fn wait_for_workspace_agent(workspace: &str) -> Result<(), String> {
         std::thread::sleep(STARTUP_POLL_INTERVAL);
     }
 
-    Err(format!(
-        "workspace agent for {workspace} did not publish a recent heartbeat"
-    ))
+    Err(expected_fingerprint
+        .map(|_| {
+            format!("workspace agent for {workspace} did not publish the expected fingerprint")
+        })
+        .unwrap_or_else(|| {
+            format!("workspace agent for {workspace} did not publish a recent heartbeat")
+        }))
 }
 
 fn agent_heartbeat_is_fresh(workspace: &Workspace) -> bool {
@@ -1067,9 +1367,13 @@ fn workspace_agent_install_script(lookup: &WorkspaceLookup) -> String {
 fn workspace_agent_install_script_for_target(instance: &str, project: &str, zone: &str) -> String {
     let bin_path = shell_quote(REMOTE_WORKSPACE_AGENT_BIN);
     let bin_tmp_path = shell_quote(&format!("{REMOTE_WORKSPACE_AGENT_BIN}.new"));
+    let fingerprint_path = shell_quote(REMOTE_WORKSPACE_AGENT_FINGERPRINT_FILE);
+    let fingerprint_tmp_path =
+        shell_quote(&format!("{REMOTE_WORKSPACE_AGENT_FINGERPRINT_FILE}.new"));
     let shell_path = shell_quote(REMOTE_WORKSPACE_AGENT_SHELL_FILE);
     let shell_tmp_path = shell_quote(&format!("{REMOTE_WORKSPACE_AGENT_SHELL_FILE}.new"));
     let encoded_binary = BASE64_STANDARD.encode(WORKSPACE_AGENT_BIN_BYTES);
+    let fingerprint = workspace_agent_fingerprint();
     let shell_script = workspace_agent_shell_script();
     let encoded_shell = BASE64_STANDARD.encode(shell_script.as_bytes());
 
@@ -1084,9 +1388,15 @@ fn workspace_agent_install_script_for_target(instance: &str, project: &str, zone
     script.push_str(&format!(
         "chmod 0755 {bin_tmp_path}\n\
 mv {bin_tmp_path} {bin_path}\n\
+printf '%s\\n' {fingerprint} > {fingerprint_tmp_path}\n\
+chmod 0600 {fingerprint_tmp_path}\n\
+mv {fingerprint_tmp_path} {fingerprint_path}\n\
 cat <<'EOF_AGENT_SHELL' | base64 --decode > {shell_tmp_path}\n{encoded_shell}\nEOF_AGENT_SHELL\n",
         bin_tmp_path = bin_tmp_path,
         bin_path = bin_path,
+        fingerprint = shell_quote(&fingerprint),
+        fingerprint_tmp_path = fingerprint_tmp_path,
+        fingerprint_path = fingerprint_path,
         shell_tmp_path = shell_tmp_path,
     ));
     script.push_str(&format!(
@@ -1372,8 +1682,12 @@ pub(crate) fn clear_template_runtime_state_command() -> String {
 mod tests {
     use super::*;
     use indexmap::IndexMap;
+    use std::env;
     use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn workspace_agent_shell_script_emits_shell_session_lifecycle_events() {
@@ -1455,6 +1769,20 @@ mod tests {
     }
 
     #[test]
+    fn workspace_agent_install_script_writes_fingerprint_file() {
+        let script = workspace_agent_install_script_for_target(
+            "demo-silo-alpha",
+            "demo-project",
+            "us-east4-c",
+        );
+
+        assert!(script.contains(REMOTE_WORKSPACE_AGENT_FINGERPRINT_FILE));
+        assert!(script.contains("workspace-agent/fingerprint.new"));
+        assert!(script.contains("printf '%s\\n'"));
+        assert!(script.contains(&workspace_agent_fingerprint()));
+    }
+
+    #[test]
     fn workspace_agent_running_check_command_stays_small_and_only_checks_state() {
         let command = workspace_agent_running_check_command();
 
@@ -1482,6 +1810,40 @@ mod tests {
         assert!(command.contains("pgrep -x workspace-agent"));
         assert!(command.contains("rm -f '/home/silo/.silo/workspace-agent/daemon.pid'"));
         assert!(command.ends_with("rm -rf \"$HOME/.silo\""));
+    }
+
+    #[test]
+    fn workspace_agent_release_rollout_state_round_trips() {
+        let _guard = ENV_LOCK.lock().expect("env lock should be available");
+        let temp_state_dir = env::temp_dir().join(format!(
+            "silo-workspace-agent-rollout-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time should move forward")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_state_dir).expect("temp state dir should exist");
+        let previous = env::var_os(state_paths::SILO_STATE_DIR_ENV_VAR);
+        env::set_var(state_paths::SILO_STATE_DIR_ENV_VAR, &temp_state_dir);
+
+        let expected = WorkspaceAgentReleaseRolloutState {
+            app_version: "2026.83.1".to_string(),
+            fingerprint: "abc123".to_string(),
+            completed_at: "2026-03-23T00:00:00Z".to_string(),
+        };
+
+        save_workspace_agent_release_rollout_state(&expected).expect("rollout state should save");
+        let actual = load_workspace_agent_release_rollout_state()
+            .expect("rollout state should load")
+            .expect("rollout state should exist");
+        assert_eq!(actual, expected);
+
+        if let Some(previous) = previous {
+            env::set_var(state_paths::SILO_STATE_DIR_ENV_VAR, previous);
+        } else {
+            env::remove_var(state_paths::SILO_STATE_DIR_ENV_VAR);
+        }
+        let _ = fs::remove_dir_all(&temp_state_dir);
     }
 
     #[test]
