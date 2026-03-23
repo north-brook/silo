@@ -35,7 +35,7 @@ import { useOpenProject } from "@/projects/sidebar/open-project";
 import { invoke } from "@/shared/lib/invoke";
 import { shortcutEvents } from "@/shared/lib/shortcuts";
 import { useShortcut } from "@/shared/lib/use-shortcut";
-import { LogoIcon } from "@/shared/ui/icons/logo";
+import { SiloIcon } from "@/shared/ui/icons/silo";
 import Image from "@/shared/ui/image";
 import { Loader } from "@/shared/ui/loader";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
@@ -266,7 +266,7 @@ function ProjectRow({
 					onToggle();
 				}
 			}}
-			className="group flex items-center w-full px-3 py-2 text-sm text-text hover:bg-btn-hover hover:text-text-bright transition-colors cursor-pointer"
+			className="group flex items-center w-full px-3 py-1.5 text-sm text-text hover:bg-btn-hover hover:text-text-bright transition-colors cursor-pointer"
 		>
 			<span className="flex items-center gap-1.5 min-w-0 flex-1">
 				{project.image ? (
@@ -575,7 +575,7 @@ function WorkspaceRow({
 					}
 				}
 			}}
-			className={`group flex items-center w-full pl-5 pr-3 py-2 text-sm transition-colors cursor-pointer ${
+			className={`group flex items-center w-full pl-5 pr-3 py-1.5 text-sm transition-colors cursor-pointer ${
 				isDisabled
 					? "pointer-events-none"
 					: isActive
@@ -778,7 +778,7 @@ function BarFooter() {
 				type="button"
 				onClick={() => openProject.open()}
 				disabled={openProject.isPending}
-				className="flex items-center gap-1.5 w-full px-3 py-2.5 text-sm text-text-muted hover:bg-btn-hover hover:text-text-bright transition-colors disabled:opacity-50"
+				className="flex items-center gap-1.5 w-full px-3 py-2 text-sm text-text-muted hover:bg-btn-hover hover:text-text-bright transition-colors disabled:opacity-50"
 			>
 				{openProject.isPending ? (
 					<Loader className="text-text-muted" />
@@ -789,7 +789,7 @@ function BarFooter() {
 			</button>
 			<div className="px-3 py-2">
 				{memory.data !== undefined && (
-					<span className="flex items-center gap-1 text-xs text-text-muted">
+					<span className="flex items-center gap-1 text-xs text-text-placeholder">
 						<Cpu size={10} />
 						{memory.data.toFixed(1)} MB
 					</span>
@@ -1001,13 +1001,10 @@ export function ProjectsSidebar() {
 						navigate("/");
 					}
 				}}
-				className={`group flex items-center w-full px-3 py-2.5 text-sm transition-colors cursor-pointer ${isHome ? "bg-btn-hover text-text-bright" : "text-text hover:bg-btn-hover hover:text-text-bright"}`}
+				className={`group flex items-center w-full px-3 py-1.5 text-sm transition-colors cursor-pointer ${isHome ? "bg-btn-hover text-text-bright" : "text-text hover:bg-btn-hover hover:text-text-bright"}`}
 			>
-				<span className="flex items-center gap-1.5 min-w-0 flex-1">
-					<div className="w-4 h-4 flex items-center justify-center p-[2.5px]">
-						<LogoIcon height={11} />
-					</div>
-					Dashboard
+				<span className="flex items-center min-w-0 flex-1">
+					<SiloIcon height={12} />
 				</span>
 				{metaKeyHeld ? (
 					<span className="shrink-0 ml-auto -mr-1 w-5 h-5 flex items-center justify-center text-sm font-medium text-text-muted">

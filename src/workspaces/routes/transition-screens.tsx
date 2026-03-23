@@ -2,7 +2,7 @@ import { Check, HardDrive } from "lucide-react";
 import type { ReactNode } from "react";
 import type { TemplateOperation } from "@/projects/api";
 import { GCloudIcon } from "@/shared/ui/icons/gcloud";
-import { LogoIcon } from "@/shared/ui/icons/logo";
+import { Wrench } from "lucide-react";
 import { SiloIcon } from "@/shared/ui/icons/silo";
 import { Loader } from "@/shared/ui/loader";
 import type { WorkspaceLifecycle } from "@/workspaces/api";
@@ -49,7 +49,7 @@ function ScreenFrame({ steps }: { steps: Step[] }) {
 	return (
 		<div className="flex-1 flex flex-col items-center justify-center p-6">
 			<div className="flex flex-col items-center gap-5">
-				<SiloIcon height={24} />
+				<SiloIcon height={36} />
 
 				<div className="flex flex-col gap-1.5">
 					{steps.map((step) => (
@@ -109,7 +109,7 @@ export function WorkspaceResumingScreen({
 				},
 				{
 					label: "Preparing workspace",
-					icon: <LogoIcon height={ICON_SIZE} />,
+					icon: <Wrench size={ICON_SIZE} />,
 					state: prepareState,
 				},
 			]}
@@ -123,7 +123,7 @@ function buildSaveSteps(operation: TemplateOperation): Step[] {
 	return [
 		{
 			label: "Waiting for template workspace",
-			icon: <LogoIcon height={ICON_SIZE} />,
+			icon: <Wrench size={ICON_SIZE} />,
 			state: stepState(
 				operation,
 				["waiting_for_template_ready"],
@@ -133,7 +133,7 @@ function buildSaveSteps(operation: TemplateOperation): Step[] {
 		},
 		{
 			label: "Removing runtime state",
-			icon: <LogoIcon height={ICON_SIZE} />,
+			icon: <Wrench size={ICON_SIZE} />,
 			state: stepState(
 				operation,
 				["clearing_runtime_state"],

@@ -1,7 +1,7 @@
 import { Check } from "lucide-react";
 import type { ReactNode } from "react";
 import { GCloudIcon } from "@/shared/ui/icons/gcloud";
-import { LogoIcon } from "@/shared/ui/icons/logo";
+import { Wrench } from "lucide-react";
 import { SiloIcon } from "@/shared/ui/icons/silo";
 import { Loader } from "@/shared/ui/loader";
 import type { WorkspaceLifecycle } from "@/workspaces/api";
@@ -54,7 +54,7 @@ export function WorkspaceUpdatingScreen({
   return (
     <div className="flex-1 flex flex-col items-center justify-center p-6 gap-4">
       <div className="flex flex-col items-center gap-5">
-        <SiloIcon height={24} />
+        <SiloIcon height={36} />
         <div className="flex flex-col gap-1.5 min-w-64">
           <StepRow
             label="Connecting to workspace"
@@ -64,7 +64,7 @@ export function WorkspaceUpdatingScreen({
           />
           <StepRow
             label="Updating workspace observer"
-            icon={<LogoIcon height={12} />}
+            icon={<Wrench size={12} />}
             active={true}
             done={false}
           />

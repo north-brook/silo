@@ -166,7 +166,7 @@ export function Toaster() {
 						key={id}
 						duration={duration}
 						className={cn(
-							"group toast-root pointer-events-auto absolute bottom-0 right-0 flex w-full items-center gap-3 overflow-hidden rounded-lg border p-3 font-mono shadow-lg",
+							"group toast-root pointer-events-auto absolute bottom-0 right-0 flex w-full flex-col gap-2 overflow-hidden rounded-lg border p-3 font-mono shadow-lg",
 							`toast-stack-${Math.min(index, TOAST_LIMIT - 1)}`,
 							"data-[swipe=cancel]:translate-x-0 data-[swipe=end]:translate-x-[var(--radix-toast-swipe-end-x)] data-[swipe=move]:translate-x-[var(--radix-toast-swipe-move-x)] data-[swipe=move]:transition-none",
 							variantStyles[variant],
@@ -175,7 +175,7 @@ export function Toaster() {
 					>
 						<div className="flex flex-col gap-1">
 							{title && (
-								<ToastPrimitive.Title className="text-sm font-medium text-text-bright">
+								<ToastPrimitive.Title className="text-sm font-medium text-text">
 									{title}
 								</ToastPrimitive.Title>
 							)}
@@ -192,7 +192,7 @@ export function Toaster() {
 					</ToastPrimitive.Root>
 				),
 			)}
-			<ToastPrimitive.Viewport className="fixed bottom-3 right-3 z-[100] flex max-h-screen w-64" />
+			<ToastPrimitive.Viewport className="fixed bottom-3 left-3 z-[100] flex max-h-screen w-64" />
 		</ToastPrimitive.Provider>
 	);
 }

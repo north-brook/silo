@@ -153,7 +153,7 @@ export function TemplatingWorkspace({
 	return (
 		<div className="flex-1 flex flex-col items-center justify-center p-6">
 			<div className="flex flex-col items-center gap-5">
-				<SiloIcon height={24} />
+				<SiloIcon height={36} />
 
 				<div className="flex flex-col gap-1.5">
 					{steps.map((step) => (

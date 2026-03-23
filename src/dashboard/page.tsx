@@ -39,9 +39,9 @@ function ActionRow({
 			onClick={onClick}
 			disabled={disabled}
 			data-testid={`dashboard-action-${label.toLowerCase().replace(/\s+/g, "-")}`}
-			className="flex items-center gap-3 w-full px-1 py-2.5 text-sm text-text-muted hover:text-text-bright transition-colors disabled:opacity-50 cursor-pointer"
+			className="flex items-center gap-3 w-full px-1 py-2 text-sm text-text-muted hover:text-text-bright transition-colors disabled:opacity-50 cursor-pointer"
 		>
-			<Icon size={16} className="shrink-0" />
+			<Icon size={14} className="shrink-0" />
 			<span className="flex-1 text-left">{label}</span>
 			<span className="shrink-0 flex items-center gap-1">
 				{keys.map((key, i) => (
