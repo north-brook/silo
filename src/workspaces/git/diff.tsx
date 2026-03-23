@@ -52,6 +52,8 @@ const baseDiffOptions = {
 
 export function GitDiffTab() {
 	const { diff, diffLoading } = useGitSidebar();
+	const hasDiffFiles =
+		(diff?.local.files.length ?? 0) > 0 || (diff?.remote.files.length ?? 0) > 0;
 
 	if (diffLoading && !diff) {
 		return (
@@ -61,7 +63,13 @@ export function GitDiffTab() {
 		);
 	}
 
-	if (!diff) return null;
+	if (!diff || !hasDiffFiles) {
+		return (
+			<div className="flex h-full items-center justify-center px-6 text-center">
+				<p className="text-sm text-text-placeholder">No changes to show.</p>
+			</div>
+		);
+	}
 
 	return (
 		<div className="flex flex-col gap-2 pb-2">

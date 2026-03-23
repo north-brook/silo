@@ -1,6 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
+import { getVersion } from "@tauri-apps/api/app";
+import { isTauri } from "@tauri-apps/api/core";
 import type { LucideIcon } from "lucide-react";
-import { Cpu, FolderOpen, Plus } from "lucide-react";
+import { FolderOpen, Plus } from "lucide-react";
+import { useEffect, useState } from "react";
+import packageJson from "../../package.json";
 import { StatusIcons } from "@/dashboard/setup-status";
 import type { ListedProject } from "@/projects/api";
 import { useNewWorkspace } from "@/projects/sidebar/new-workspace";
@@ -58,17 +62,30 @@ export default function HomePage() {
 	});
 	const hasProjects = (projects.data ?? []).length > 0;
 
-	const memory = useQuery({
-		queryKey: ["system_memory_usage"],
-		queryFn: () =>
-			invoke<number>("system_memory_usage", {
-				log: "state_changes_only",
-				key: "poll:system_memory_usage",
-				stateChanged: (previous, next) =>
-					Math.round((previous ?? 0) / 50) !== Math.round(next / 50),
-			}),
-		refetchInterval: 5000,
-	});
+	const [appVersion, setAppVersion] = useState(packageJson.version);
+
+	useEffect(() => {
+		let cancelled = false;
+
+		void (async () => {
+			if (!isTauri()) {
+				return;
+			}
+
+			try {
+				const version = await getVersion();
+				if (!cancelled) {
+					setAppVersion(version);
+				}
+			} catch (error) {
+				console.error("failed to resolve app version", error);
+			}
+		})();
+
+		return () => {
+			cancelled = true;
+		};
+	}, []);
 
 	return (
 		<>
@@ -94,14 +111,7 @@ export default function HomePage() {
 				</div>
 			</div>
 			<div className="shrink-0 flex items-center justify-between px-3 py-2">
-				<span className="text-[11px] text-text-muted">
-					{memory.data !== undefined && (
-						<span className="flex items-center gap-1">
-							<Cpu size={10} />
-							{memory.data.toFixed(1)} MB
-						</span>
-					)}
-				</span>
+				<span className="text-[11px] text-text-placeholder">v{appVersion}</span>
 				<StatusIcons />
 			</div>
 		</>

@@ -146,7 +146,7 @@ export function GitTopBarActions() {
 	const isLoading =
 		prStatusLoading || (hasPr && treeDirty.isLoading);
 
-	const showCreatePr = !isLoading && !prStatus;
+	const showCreatePr = !isLoading && !prStatus && hasChanges;
 	const showMerge = !isLoading && hasPr && !dirty;
 	const showPush = !isLoading && hasPr && dirty;
 

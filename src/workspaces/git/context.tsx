@@ -95,12 +95,8 @@ export function GitSidebarProvider({ children }: { children: ReactNode }) {
 	const visibleTab = hasPr
 		? activeTab
 		: activeTab === "checks"
-			? hasChanges
-				? "diff"
-				: "files"
-			: activeTab === "diff" && !hasChanges
-				? "files"
-				: activeTab;
+			? "diff"
+			: activeTab;
 
 	useShortcut<void>({
 		event: shortcutEvents.toggleGitBar,
@@ -117,9 +113,6 @@ export function GitSidebarProvider({ children }: { children: ReactNode }) {
 
 	const openTab = (tab: GitSidebarTab) => {
 		if (tab === "checks" && !hasPr) {
-			return;
-		}
-		if (tab === "diff" && !hasChanges) {
 			return;
 		}
 

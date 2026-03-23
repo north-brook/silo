@@ -41,6 +41,7 @@ export function GitSidebarHeader() {
 		workspace,
 		project,
 		toggle,
+		hasChanges,
 		prStatus,
 		prStatusLoading,
 		observation,
@@ -139,7 +140,7 @@ export function GitSidebarHeader() {
 	const isLoading =
 		prStatusLoading || (prStatus?.status === "open" && treeDirty.isLoading);
 
-	const showCreatePr = !isLoading && !prStatus;
+	const showCreatePr = !isLoading && !prStatus && hasChanges;
 	const showMerge = !isLoading && prStatus?.status === "open" && !dirty;
 	const showPush = !isLoading && prStatus?.status === "open" && dirty;
 

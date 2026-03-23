@@ -1,6 +1,6 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "@/app/shell";
-import HomePage from "@/dashboard/page";
+import DashboardEntry from "@/dashboard/onboarding";
 import { WorkspaceShell } from "@/workspaces/layout/shell";
 import WorkspacePage from "@/workspaces/routes/page";
 import {
@@ -13,7 +13,7 @@ export function AppRouter() {
 	return (
 		<Routes>
 			<Route element={<AppShell />}>
-				<Route index element={<HomePage />} />
+				<Route index element={<DashboardEntry />} />
 				<Route
 					path="projects/:project/workspaces/:workspace"
 					element={<WorkspaceShell />}
