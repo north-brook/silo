@@ -132,3 +132,35 @@
 .toast-exit {
 	animation: toast-exit 300ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }
+
+.toast-root {
+	transition:
+		transform 400ms cubic-bezier(0.16, 1, 0.3, 1),
+		opacity 400ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.toast-root[data-state="open"] {
+	animation: toast-enter 400ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.toast-root[data-state="closed"] {
+	animation: toast-exit 300ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+.toast-stack-0 {
+	transform: translateY(0) scale(1);
+	opacity: 1;
+	z-index: 3;
+}
+
+.toast-stack-1 {
+	transform: translateY(-10px) scale(0.96);
+	opacity: 0.85;
+	z-index: 2;
+}
+
+.toast-stack-2 {
+	transform: translateY(-20px) scale(0.92);
+	opacity: 0.7;
+	z-index: 1;
+}

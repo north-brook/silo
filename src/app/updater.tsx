@@ -1,5 +1,5 @@
 import { getIdentifier } from "@tauri-apps/api/app";
-import { isTauri } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { check } from "@tauri-apps/plugin-updater";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { toast } from "@/shared/ui/toaster";
@@ -54,10 +54,18 @@ export function AppUpdater() {
 			await update.downloadAndInstall();
 			hasInstalledUpdateRef.current = true;
 			toast({
-				variant: "success",
 				title: "Update ready",
-				description:
-					"The latest production build will be used the next time you open Silo.",
+				description: "Restart to apply the latest version.",
+				duration: Infinity,
+				action: (
+					<button
+						type="button"
+						className="ml-auto shrink-0 rounded-md bg-btn px-2.5 py-1 text-[11px] font-medium text-text-bright transition-colors hover:bg-btn-hover"
+						onClick={() => invoke("system_restart_app")}
+					>
+						Restart
+					</button>
+				),
 			});
 		} catch (error) {
 			console.error("failed to check for updates", error);

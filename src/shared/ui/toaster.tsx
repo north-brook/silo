@@ -14,6 +14,7 @@ interface ToastData {
 	title?: React.ReactNode;
 	description?: React.ReactNode;
 	action?: React.ReactNode;
+	duration?: number;
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 }
@@ -101,6 +102,7 @@ interface ToastInput {
 	title?: React.ReactNode;
 	description?: React.ReactNode;
 	action?: React.ReactNode;
+	duration?: number;
 }
 
 export function toast(props: ToastInput) {
@@ -138,8 +140,8 @@ function useToastState() {
 
 const variantStyles: Record<Variant, string> = {
 	default: "border-border-light bg-surface text-text",
-	success: "border-success/20 bg-success/5 text-success",
-	error: "border-error/20 bg-error/5 text-error",
+	success: "border-[#1b2f24] bg-[#111a16] text-[#4ade80]",
+	error: "border-[#2f1b20] bg-[#1a1114] text-[#f87171]",
 };
 
 export function Toaster() {
@@ -149,25 +151,26 @@ export function Toaster() {
 		<ToastPrimitive.Provider>
 			{toasts.map(
 				(
-					{ id, title, description, action, variant = "default", ...props },
+					{
+						id,
+						title,
+						description,
+						action,
+						variant = "default",
+						duration = 2000,
+						...props
+					},
 					index,
 				) => (
 					<ToastPrimitive.Root
 						key={id}
-						duration={2000}
+						duration={duration}
 						className={cn(
-							"group pointer-events-auto absolute bottom-0 right-0 flex w-full items-center gap-3 overflow-hidden rounded-lg border p-3 font-mono shadow-lg",
-							"data-[state=open]:toast-enter data-[state=closed]:toast-exit",
+							"group toast-root pointer-events-auto absolute bottom-0 right-0 flex w-full items-center gap-3 overflow-hidden rounded-lg border p-3 font-mono shadow-lg",
+							`toast-stack-${Math.min(index, TOAST_LIMIT - 1)}`,
 							"data-[swipe=cancel]:translate-x-0 data-[swipe=end]:translate-x-[var(--radix-toast-swipe-end-x)] data-[swipe=move]:translate-x-[var(--radix-toast-swipe-move-x)] data-[swipe=move]:transition-none",
 							variantStyles[variant],
 						)}
-						style={{
-							transition:
-								"transform 400ms cubic-bezier(0.16, 1, 0.3, 1), opacity 400ms cubic-bezier(0.16, 1, 0.3, 1)",
-							transform: `translateY(${-index * 10}px) scale(${1 - index * 0.04})`,
-							opacity: 1 - index * 0.15,
-							zIndex: toasts.length - index,
-						}}
 						{...props}
 					>
 						<div className="flex flex-col gap-1">
