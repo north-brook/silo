@@ -148,7 +148,7 @@ fn ssh_destination(session: &SshSession) -> String {
     format!("{}@{}", session.username, session.host)
 }
 
-fn ssh_common_args(session: &SshSession) -> Vec<String> {
+fn ssh_base_args(session: &SshSession) -> Vec<String> {
     vec![
         "-i".to_string(),
         session.key_path.to_string_lossy().into_owned(),
@@ -167,11 +167,33 @@ fn ssh_common_args(session: &SshSession) -> Vec<String> {
         "BatchMode=yes".to_string(),
         "-o".to_string(),
         "ServerAliveInterval=15".to_string(),
+    ]
+}
+
+fn ssh_common_args(session: &SshSession) -> Vec<String> {
+    let mut args = ssh_base_args(session);
+    args.extend([
         "-o".to_string(),
         format!("ControlPath={}", session.control_path.to_string_lossy()),
         "-o".to_string(),
         format!("ControlPersist={SSH_CONTROL_PERSIST}"),
-    ]
+    ]);
+    args
+}
+
+fn ssh_port_forward_args(session: &SshSession, local_port: u16, remote_port: u16) -> Vec<String> {
+    let mut args = ssh_base_args(session);
+    args.extend([
+        "-o".to_string(),
+        "ControlMaster=no".to_string(),
+        "-o".to_string(),
+        "ExitOnForwardFailure=yes".to_string(),
+        "-N".to_string(),
+        "-L".to_string(),
+        format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}"),
+        ssh_destination(session),
+    ]);
+    args
 }
 
 fn start_master_connection(session: &SshSession) -> Result<(), String> {
@@ -391,11 +413,7 @@ pub(crate) fn spawn_remote_port_forward(
 ) -> Result<Child, String> {
     let session = ensure_ssh_session_blocking(lookup)?;
     let mut command = Command::new("ssh");
-    command.args(ssh_common_args(&session));
-    command.arg("-N");
-    command.arg("-L");
-    command.arg(format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}"));
-    command.arg(ssh_destination(&session));
+    command.args(ssh_port_forward_args(&session, local_port, remote_port));
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -551,6 +569,28 @@ mod tests {
         assert!(script.contains(". '/home/silo/.silo/credentials.sh'"));
         assert!(script.contains("cd '/home/silo/workspace'"));
         assert!(script.contains("git status --short"));
+    }
+
+    #[test]
+    fn ssh_port_forward_args_use_dedicated_connection() {
+        let session = SshSession {
+            username: "svc_user".to_string(),
+            host: "203.0.113.10".to_string(),
+            key_path: PathBuf::from("/tmp/test-key"),
+            known_hosts_path: PathBuf::from("/tmp/test-known-hosts"),
+            control_path: PathBuf::from("/tmp/test-control"),
+            expires_at: Instant::now(),
+        };
+
+        let args = ssh_port_forward_args(&session, 43123, 3000);
+        let joined = args.join(" ");
+
+        assert!(joined.contains("ControlMaster=no"));
+        assert!(joined.contains("ExitOnForwardFailure=yes"));
+        assert!(!joined.contains("ControlPath=/tmp/test-control"));
+        assert!(!joined.contains("ControlPersist=600"));
+        assert!(joined.contains("127.0.0.1:43123:127.0.0.1:3000"));
+        assert!(joined.ends_with("svc_user@203.0.113.10"));
     }
 
     #[cfg(unix)]

@@ -1,6 +1,6 @@
 use crate::browser_file_server::BrowserFileServerManager;
 use crate::router::RouterManager;
-use crate::workspaces::{self, WorkspaceLookup};
+use crate::workspaces::WorkspaceLookup;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -74,9 +74,9 @@ impl BrowserLoopbackManager {
             }
         }
 
-        let lookup = tauri::async_runtime::block_on(workspaces::find_workspace(workspace))?;
-        self.cache_workspace_lookup(&lookup);
-        Ok(lookup)
+        Err(format!(
+            "workspace lookup unavailable for browser loopback rewrite: {workspace}"
+        ))
     }
 }
 
@@ -109,5 +109,17 @@ mod tests {
             .expect("rewrite result");
 
         assert_eq!(rewritten, None);
+    }
+
+    #[test]
+    fn rewrite_loopback_url_requires_cached_workspace_lookup() {
+        let file_server = BrowserFileServerManager::new().expect("file server");
+        let manager = BrowserLoopbackManager::new(RouterManager::default(), file_server);
+
+        let error = manager
+            .rewrite_loopback_url("browser:demo-workspace:tab-1", "http://localhost:3000")
+            .expect_err("missing cached workspace should fail");
+
+        assert!(error.contains("workspace lookup unavailable"));
     }
 }

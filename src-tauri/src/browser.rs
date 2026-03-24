@@ -169,7 +169,7 @@ async fn create_browser_tab(
         )
         .collect::<HashSet<_>>();
     let attachment_id = generate_browser_attachment_id(&existing_names);
-    let initial_url = manager.resolve_browser_url(&lookup, url.as_deref())?;
+    let initial_url = manager.resolve_browser_url(&lookup, url.as_deref()).await?;
     let session = browser_session_for_url(
         &attachment_id,
         &initial_url.logical_url,
@@ -212,7 +212,8 @@ pub async fn browser_mount_tab(
             .as_deref()
             .or(session.url.as_deref())
             .or(session.resolved_url.as_deref()),
-    )?;
+    )
+    .await?;
     let resolved_url = resolved_target.resolved_url.clone();
 
     if session.resolved_url.as_deref() != Some(resolved_url.as_str()) {
@@ -363,7 +364,7 @@ pub async fn browser_go_to(
 ) -> Result<BrowserCommandResult, String> {
     let existing = find_existing_browser_session(state.inner(), &workspace, &attachment_id).await;
     let lookup = workspaces::find_workspace(&workspace).await?;
-    let normalized = state.resolve_browser_url(&lookup, Some(&url))?;
+    let normalized = state.resolve_browser_url(&lookup, Some(&url)).await?;
     let session = browser_session_for_url(
         &attachment_id,
         &normalized.logical_url,
@@ -617,7 +618,7 @@ impl BrowserManager {
         Ok(cached)
     }
 
-    fn resolve_browser_url(
+    async fn resolve_browser_url(
         &self,
         lookup: &WorkspaceLookup,
         value: Option<&str>,
@@ -642,7 +643,8 @@ impl BrowserManager {
 
         if let Some(resolved_url) = self
             .loopback_router
-            .rewrite_loopback_url(lookup, &normalized.logical_url)?
+            .rewrite_loopback_url_async(lookup, &normalized.logical_url)
+            .await?
         {
             return Ok(BrowserUrlTarget {
                 logical_url: normalized.logical_url,

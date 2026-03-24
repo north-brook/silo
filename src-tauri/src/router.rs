@@ -22,6 +22,45 @@ struct LoopbackRoute {
 }
 
 impl RouterManager {
+    pub(crate) async fn rewrite_loopback_url_async(
+        &self,
+        lookup: &WorkspaceLookup,
+        logical_url: &str,
+    ) -> Result<Option<String>, String> {
+        let mut parsed =
+            Url::parse(logical_url).map_err(|error| format!("invalid browser url: {error}"))?;
+        let Some(host) = parsed.host_str() else {
+            return Ok(None);
+        };
+        if !is_loopback_host(host) {
+            return Ok(None);
+        }
+
+        let scheme = parsed.scheme().to_string();
+        if scheme != "http" && scheme != "https" {
+            return Ok(None);
+        }
+
+        let remote_port = parsed
+            .port()
+            .unwrap_or_else(|| tls::default_port_for_scheme(&scheme));
+        let router = self.clone();
+        let lookup = lookup.clone();
+        let scheme_for_route = scheme.clone();
+        let local_port = tauri::async_runtime::spawn_blocking(move || {
+            router.ensure_loopback_route(&lookup, &scheme_for_route, remote_port)
+        })
+        .await
+        .map_err(|error| format!("browser loopback task failed: {error}"))??;
+        parsed
+            .set_host(Some("localhost"))
+            .map_err(|_| "failed to rewrite browser localhost route".to_string())?;
+        parsed
+            .set_port(Some(local_port))
+            .map_err(|_| "failed to rewrite browser localhost port".to_string())?;
+        Ok(Some(parsed.to_string()))
+    }
+
     pub(crate) fn ensure_loopback_route(
         &self,
         lookup: &WorkspaceLookup,
