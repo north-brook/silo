@@ -41,7 +41,6 @@ function WorkspaceSessionView({ kind }: { kind: "browser" | "terminal" }) {
   const location = useLocation();
   const navigate = useNavigate();
   const routeState = location.state as SessionRouteState | null;
-  const freshRef = useRef(routeState?.fresh === true);
   const { invalidateWorkspace, workspace: currentWorkspace } =
     useWorkspaceState();
   const sessions = useWorkspaceSessions();
@@ -51,9 +50,23 @@ function WorkspaceSessionView({ kind }: { kind: "browser" | "terminal" }) {
     project,
     workspaceName: workspace,
   } = useWorkspaceSessionRouteParams();
+  const freshRouteRef = useRef<{
+    routeKey: string;
+    fresh: boolean;
+  } | null>(null);
+  const routeKey = `${kind}:${attachmentId ?? ""}`;
+
+  if (freshRouteRef.current?.routeKey !== routeKey) {
+    freshRouteRef.current = {
+      routeKey,
+      fresh: routeState?.fresh === true,
+    };
+  }
+
+  const isFreshRoute = freshRouteRef.current?.fresh === true;
 
   useEffect(() => {
-    if (!freshRef.current) {
+    if (!isFreshRoute) {
       return;
     }
 
@@ -66,7 +79,7 @@ function WorkspaceSessionView({ kind }: { kind: "browser" | "terminal" }) {
       }),
       { replace: true, state: null },
     );
-  }, [attachmentId, kind, navigate, project, workspace]);
+  }, [attachmentId, isFreshRoute, kind, navigate, project, workspace]);
 
   const hasLiveSession = useMemo(
     () =>
@@ -87,7 +100,7 @@ function WorkspaceSessionView({ kind }: { kind: "browser" | "terminal" }) {
         (session) =>
           session.kind === kind && session.attachmentId === attachmentId,
       ) ??
-      (freshRef.current
+      (isFreshRoute
         ? {
             workspace,
             kind,
@@ -105,15 +118,15 @@ function WorkspaceSessionView({ kind }: { kind: "browser" | "terminal" }) {
           }
         : null)
     );
-  }, [attachmentId, cloudSessions, kind, workspace]);
+  }, [attachmentId, cloudSessions, isFreshRoute, kind, workspace]);
 
   useEffect(() => {
-    if (!workspace || !attachmentId || freshRef.current || hasLiveSession) {
+    if (!workspace || !attachmentId || isFreshRoute || hasLiveSession) {
       return;
     }
 
     navigate(workspaceHref({ project, workspace }), { replace: true });
-  }, [attachmentId, hasLiveSession, navigate, project, workspace]);
+  }, [attachmentId, hasLiveSession, isFreshRoute, navigate, project, workspace]);
 
   useEffect(() => {
     if (!workspace || !attachmentId || !hasLiveSession) {
@@ -124,7 +137,7 @@ function WorkspaceSessionView({ kind }: { kind: "browser" | "terminal" }) {
       workspace,
       kind,
       attachmentId,
-      fresh: freshRef.current,
+      fresh: isFreshRoute,
       ...domFocusSnapshot(),
     });
 
@@ -145,7 +158,7 @@ function WorkspaceSessionView({ kind }: { kind: "browser" | "terminal" }) {
     return () => {
       window.clearTimeout(timeout);
     };
-  }, [attachmentId, hasLiveSession, kind, workspace]);
+  }, [attachmentId, hasLiveSession, isFreshRoute, kind, workspace]);
 
   if (currentWorkspace?.lifecycle.phase === "updating_workspace_agent") {
     return <WorkspaceUpdatingScreen lifecycle={currentWorkspace.lifecycle} />;
@@ -159,7 +172,7 @@ function WorkspaceSessionView({ kind }: { kind: "browser" | "terminal" }) {
     return (
       <TerminalSessionView
         session={activeSession}
-        skipInitialScrollback={freshRef.current}
+        skipInitialScrollback={isFreshRoute}
       />
     );
   }
@@ -167,7 +180,7 @@ function WorkspaceSessionView({ kind }: { kind: "browser" | "terminal" }) {
   return (
     <BrowserSessionView
       session={activeSession}
-      autoFocusAddress={freshRef.current}
+      autoFocusAddress={isFreshRoute}
       onChanged={invalidateWorkspace}
     />
   );

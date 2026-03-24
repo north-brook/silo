@@ -646,7 +646,7 @@ pub async fn workspaces_list_workspaces(
         bootstrap::start_workspace_agent_update_reconcile_if_needed(workspace.clone());
     }
 
-    Ok(state.apply_workspace_states(workspaces))
+    Ok(workspaces)
 }
 
 pub(crate) async fn list_all_workspaces() -> Result<Vec<Workspace>, String> {
@@ -806,8 +806,9 @@ pub async fn workspaces_get_workspace(
 ) -> Result<Workspace, String> {
     log::trace!("getting workspace {workspace}");
     let lookup = hydrate_workspace_lookup(find_workspace(&workspace).await?).await;
-    let workspace = lookup.workspace;
-    let workspace = state.apply_workspace_state(workspace);
+    // Reapply local overlays after hydration because the runtime snapshot replaces session
+    // arrays with agent state, which can temporarily lag local optimistic session updates.
+    let workspace = state.apply_workspace_state(lookup.workspace);
     bootstrap::start_workspace_startup_reconcile_if_needed(workspace.clone());
     bootstrap::start_workspace_agent_update_reconcile_if_needed(workspace.clone());
     Ok(workspace)

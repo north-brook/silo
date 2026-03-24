@@ -35,6 +35,7 @@ interface WorkspaceStateContextValue {
 	workspaceName: string;
 	routeProject: string;
 	workspace: Workspace | null;
+	workspaceUpdatedAt: number;
 	isLoading: boolean;
 	isMissing: boolean;
 	invalidateWorkspace: () => void;
@@ -44,6 +45,7 @@ const WorkspaceStateContext = createContext<WorkspaceStateContextValue>({
 	workspaceName: "",
 	routeProject: "",
 	workspace: null,
+	workspaceUpdatedAt: 0,
 	isLoading: false,
 	isMissing: false,
 	invalidateWorkspace: () => {},
@@ -188,6 +190,7 @@ function WorkspaceStateProviderInner({
 			workspaceName,
 			routeProject: projectParam,
 			workspace,
+			workspaceUpdatedAt: workspaceQuery.dataUpdatedAt,
 			isLoading: workspaceQuery.isLoading,
 			isMissing,
 			invalidateWorkspace,
@@ -197,6 +200,7 @@ function WorkspaceStateProviderInner({
 			isMissing,
 			projectParam,
 			workspace,
+			workspaceQuery.dataUpdatedAt,
 			workspaceName,
 			workspaceQuery.isLoading,
 		],
@@ -238,6 +242,7 @@ export function useWorkspaceState() {
 	const {
 		workspaceName,
 		workspace,
+		workspaceUpdatedAt,
 		isLoading,
 		isMissing,
 		invalidateWorkspace,
@@ -246,6 +251,7 @@ export function useWorkspaceState() {
 	return {
 		workspaceName,
 		workspace,
+		workspaceUpdatedAt,
 		isLoading,
 		isMissing,
 		invalidateWorkspace,

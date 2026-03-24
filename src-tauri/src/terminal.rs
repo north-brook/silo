@@ -234,7 +234,9 @@ pub(crate) async fn ensure_template_startup_terminal_session(
 ) -> Result<String, String> {
     let lookup =
         workspaces::hydrate_workspace_lookup(workspaces::find_workspace(workspace).await?).await;
-    let workspace_with_state = workspace_state.apply_workspace_state(lookup.workspace);
+    // `find_workspace` already includes transient local overlays, so using the hydrated
+    // workspace directly avoids double-applying pending session state.
+    let workspace_with_state = lookup.workspace;
     let existing_attachment_id = workspace_with_state
         .active_session()
         .filter(|active| {

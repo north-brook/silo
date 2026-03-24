@@ -186,6 +186,29 @@ function findLiveNeighbor(
 	return null;
 }
 
+function sessionListKey(kind: string, attachmentId: string) {
+	return `${kind}:${attachmentId}`;
+}
+
+function sessionTimestamp(attachmentId: string) {
+	const [, rawTimestamp = "0"] = attachmentId.split("-", 2);
+	const timestamp = Number.parseInt(rawTimestamp, 10);
+	return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function sortDisplaySessionsOldestToNewest(
+	sessions: DisplayWorkspaceSession[],
+) {
+	return [...sessions].sort((left, right) => {
+		const leftTimestamp = sessionTimestamp(left.attachment_id);
+		const rightTimestamp = sessionTimestamp(right.attachment_id);
+		if (leftTimestamp !== rightTimestamp) {
+			return leftTimestamp - rightTimestamp;
+		}
+		return left.attachment_id.localeCompare(right.attachment_id);
+	});
+}
+
 function WorkspaceShellInner() {
 	const location = useLocation();
 	const pathname = location.pathname;
@@ -203,8 +226,13 @@ function WorkspaceShellInner() {
 	);
 	const { ensureWorkspaceSessions, removeSession } = useSessionHosts();
 	const { clearSession, getDisplaySessions } = useFileSessions();
-	const { invalidateWorkspace, isMissing, workspace, workspaceName } =
-		useWorkspaceState();
+	const {
+		invalidateWorkspace,
+		isMissing,
+		workspace,
+		workspaceName,
+		workspaceUpdatedAt,
+	} = useWorkspaceState();
 	const project = useWorkspaceProject();
 	const isWorkspaceReady = useWorkspaceReady();
 	const templateState = useTemplateState(
@@ -224,12 +252,47 @@ function WorkspaceShellInner() {
 		? (templateStateOperation ?? workspaceTemplateOperation)
 		: (workspaceTemplateOperation ?? templateStateOperation);
 	const workspaceSessions = useWorkspaceSessions();
-	const sessions = useMemo(
+	const [openingSessions, setOpeningSessions] = useState<
+		Record<
+			string,
+			{
+				session: DisplayWorkspaceSession;
+				createdAt: number;
+			}
+		>
+	>({});
+	const displayWorkspaceSessions = useMemo(
 		() => getDisplaySessions(workspaceSessions),
 		[getDisplaySessions, workspaceSessions],
 	);
+	const sessions = useMemo(() => {
+		const pendingOpenSessions = Object.values(openingSessions).map(
+			(entry) => entry.session,
+		);
+		if (pendingOpenSessions.length === 0) {
+			return displayWorkspaceSessions;
+		}
+
+		const seenKeys = new Set(
+			displayWorkspaceSessions.map((session) =>
+				sessionListKey(session.type, session.attachment_id),
+			),
+		);
+		const merged = [...displayWorkspaceSessions];
+		for (const session of pendingOpenSessions) {
+			const key = sessionListKey(session.type, session.attachment_id);
+			if (seenKeys.has(key)) {
+				continue;
+			}
+			seenKeys.add(key);
+			merged.push(session);
+		}
+		return sortDisplaySessionsOldestToNewest(merged);
+	}, [displayWorkspaceSessions, openingSessions]);
 	const cloudSessions = useCloudSessions();
 	const [newTabOpen, setNewTabOpen] = useState(false);
+	const [closingSessionRefreshDeadline, setClosingSessionRefreshDeadline] =
+		useState<Record<string, number | null>>({});
 	const activeKind = browserMatch
 		? "browser"
 		: fileMatch
@@ -281,12 +344,142 @@ function WorkspaceShellInner() {
 		ensureWorkspaceSessions(workspaceName, cloudSessions);
 	}, [cloudSessions, ensureWorkspaceSessions, isWorkspaceReady, workspaceName]);
 
+	useEffect(() => {
+		setClosingSessionRefreshDeadline({});
+		setOpeningSessions({});
+	}, [workspaceName]);
+
+	const markSessionClosing = useCallback((attachmentId: string) => {
+		setClosingSessionRefreshDeadline((previous) => {
+			if (attachmentId in previous) {
+				return previous;
+			}
+			return {
+				...previous,
+				[attachmentId]: null,
+			};
+		});
+	}, []);
+
+	const markSessionCloseSettled = useCallback((attachmentId: string) => {
+		setClosingSessionRefreshDeadline((previous) => {
+			if (!(attachmentId in previous)) {
+				return previous;
+			}
+			return {
+				...previous,
+				[attachmentId]: Date.now(),
+			};
+		});
+	}, []);
+
+	const clearClosingSession = useCallback((attachmentId: string) => {
+		setClosingSessionRefreshDeadline((previous) => {
+			if (!(attachmentId in previous)) {
+				return previous;
+			}
+			const next = { ...previous };
+			delete next[attachmentId];
+			return next;
+		});
+	}, []);
+
+	const markSessionOpening = useCallback((session: DisplayWorkspaceSession) => {
+		const key = sessionListKey(session.type, session.attachment_id);
+		setOpeningSessions((previous) => {
+			if (key in previous) {
+				return previous;
+			}
+			return {
+				...previous,
+				[key]: {
+					session,
+					createdAt: Date.now(),
+				},
+			};
+		});
+	}, []);
+
+	const clearOpeningSession = useCallback(
+		(kind: string, attachmentId: string) => {
+			const key = sessionListKey(kind, attachmentId);
+			setOpeningSessions((previous) => {
+				if (!(key in previous)) {
+					return previous;
+				}
+				const next = { ...previous };
+				delete next[key];
+				return next;
+			});
+		},
+		[],
+	);
+
+	useEffect(() => {
+		const trackedIds = Object.keys(closingSessionRefreshDeadline);
+		if (trackedIds.length === 0) {
+			return;
+		}
+
+		const visibleSessionIds = new Set(
+			sessions.map((session) => session.attachment_id),
+		);
+		setClosingSessionRefreshDeadline((previous) => {
+			let changed = false;
+			const next = { ...previous };
+			for (const [attachmentId, settledAt] of Object.entries(previous)) {
+				if (settledAt == null || workspaceUpdatedAt <= settledAt) {
+					continue;
+				}
+				if (!visibleSessionIds.has(attachmentId)) {
+					delete next[attachmentId];
+					changed = true;
+				}
+			}
+			return changed ? next : previous;
+		});
+	}, [closingSessionRefreshDeadline, sessions, workspaceUpdatedAt]);
+
+	useEffect(() => {
+		const trackedEntries = Object.entries(openingSessions);
+		if (trackedEntries.length === 0) {
+			return;
+		}
+
+		const visibleSessionKeys = new Set(
+			workspaceSessions.map((session) =>
+				sessionListKey(session.type, session.attachment_id),
+			),
+		);
+		setOpeningSessions((previous) => {
+			let changed = false;
+			const next = { ...previous };
+			for (const [key, entry] of Object.entries(previous)) {
+				if (workspaceUpdatedAt <= entry.createdAt) {
+					continue;
+				}
+				if (visibleSessionKeys.has(key)) {
+					delete next[key];
+					changed = true;
+				}
+			}
+			return changed ? next : previous;
+		});
+	}, [openingSessions, workspaceSessions, workspaceUpdatedAt]);
+
 	const createTerminal = useMutation({
 		mutationFn: () =>
 			invoke<{ attachment_id: string }>("terminal_create_terminal", {
 				workspace: workspaceName,
 			}),
 		onSuccess: (result) => {
+			markSessionOpening({
+				type: "terminal",
+				name: "shell",
+				attachment_id: result.attachment_id,
+				working: null,
+				unread: null,
+			});
 			setNewTabOpen(false);
 			invalidateWorkspace();
 			navigate(
@@ -314,7 +507,14 @@ function WorkspaceShellInner() {
 				workspace: workspaceName,
 				model,
 			}),
-		onSuccess: (result) => {
+		onSuccess: (result, model) => {
+			markSessionOpening({
+				type: "terminal",
+				name: model,
+				attachment_id: result.attachment_id,
+				working: false,
+				unread: false,
+			});
 			setNewTabOpen(false);
 			invalidateWorkspace();
 			navigate(
@@ -342,6 +542,14 @@ function WorkspaceShellInner() {
 				workspace: workspaceName,
 			}),
 		onSuccess: (result) => {
+			markSessionOpening({
+				type: "browser",
+				name: "browser",
+				attachment_id: result.attachment_id,
+				title: "browser",
+				working: null,
+				unread: null,
+			});
 			setNewTabOpen(false);
 			invalidateWorkspace();
 			navigate(
@@ -406,6 +614,8 @@ function WorkspaceShellInner() {
 			return { previousWorkspace };
 		},
 		onSuccess: (_, session) => {
+			markSessionCloseSettled(session.attachment_id);
+			clearOpeningSession(session.type, session.attachment_id);
 			invalidateWorkspace();
 			removeSession(
 				workspaceName,
@@ -417,6 +627,7 @@ function WorkspaceShellInner() {
 			clearSession(session.attachment_id);
 		},
 		onError: (error, session, context) => {
+			clearClosingSession(session.attachment_id);
 			queryClient.setQueryData<Workspace | null>(
 				["workspaces_get_workspace", workspaceName],
 				context?.previousWorkspace ?? null,
@@ -447,8 +658,12 @@ function WorkspaceShellInner() {
 				?.attachment_id,
 	});
 	const deletingIds = useMemo(
-		() => new Set(pendingKills.filter((id): id is string => !!id)),
-		[pendingKills],
+		() =>
+			new Set([
+				...Object.keys(closingSessionRefreshDeadline),
+				...pendingKills.filter((id): id is string => !!id),
+			]),
+		[closingSessionRefreshDeadline, pendingKills],
 	);
 
 	const closeTab = useCallback(
@@ -479,6 +694,7 @@ function WorkspaceShellInner() {
 				: null;
 
 			if (!session.preview && !isLocalOnly) {
+				markSessionClosing(session.attachment_id);
 				killSession.mutate(session);
 			}
 
@@ -501,7 +717,11 @@ function WorkspaceShellInner() {
 			workspaceName,
 			currentWorkspaceHref,
 			clearSession,
+			clearClosingSession,
+			clearOpeningSession,
 			killSession,
+			markSessionClosing,
+			markSessionCloseSettled,
 			workspaceSessions,
 		],
 	);

@@ -219,7 +219,9 @@ pub async fn files_open_session(
 ) -> Result<FileSessionResult, String> {
     let lookup = workspaces::hydrate_workspace_lookup(branch_workspace_lookup(&workspace).await?).await;
     let path = normalize_repo_relative_path(&path)?;
-    let workspace_state = state.apply_workspace_state(lookup.workspace.clone());
+    // `branch_workspace_lookup` already carries local transient overlays. Reapplying them
+    // after hydration can clear pending sessions before the agent snapshot stabilizes.
+    let workspace_state = lookup.workspace.clone();
 
     if let Some(existing) = workspace_state
         .files()
