@@ -1,9 +1,10 @@
+use crate::agent_sessions;
 use crate::bootstrap;
 use crate::remote::{
     run_remote_command, run_remote_command_with_stdin, shell_quote, workspace_shell_command,
     workspace_shell_command_preserving_stdin, REMOTE_WORKSPACE_AGENT_BIN,
 };
-use crate::state::{active_session_metadata_entries, WorkspaceMetadataManager};
+use crate::state::WorkspaceMetadataManager;
 use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
 use crate::{emit_workspace_state_changed, AppRuntime};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -216,7 +217,7 @@ pub async fn files_open_session(
     workspace: String,
     path: String,
 ) -> Result<FileSessionResult, String> {
-    let lookup = branch_workspace_lookup(&workspace).await?;
+    let lookup = workspaces::hydrate_workspace_lookup(branch_workspace_lookup(&workspace).await?).await;
     let path = normalize_repo_relative_path(&path)?;
     let workspace_state = state.apply_workspace_state(lookup.workspace.clone());
 
@@ -251,9 +252,8 @@ pub async fn files_open_session(
         unread: None,
     };
 
-    state
-        .inner()
-        .enqueue_workspace_session_upsert(&workspace, Some(lookup), session.clone());
+    state.inner().upsert_workspace_session(&workspace, session.clone());
+    agent_sessions::upsert_session(&lookup, &session).await?;
 
     Ok(FileSessionResult {
         attachment_id: session.attachment_id,
@@ -261,7 +261,7 @@ pub async fn files_open_session(
 }
 
 #[tauri::command]
-pub fn files_close_session(
+pub async fn files_close_session(
     app: AppHandle<AppRuntime>,
     state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
@@ -274,13 +274,22 @@ pub fn files_close_session(
 
     let cleared_active_session =
         state.clear_active_workspace_session_if_matches(&workspace, "file", &attachment_id, None);
-    if cleared_active_session {
-        state.enqueue(&workspace, None, active_session_metadata_entries(None));
-    }
-
     state
         .inner()
-        .enqueue_workspace_session_remove(&workspace, None, "file", &attachment_id);
+        .remove_workspace_session(&workspace, "file", &attachment_id);
+    if let Ok(lookup) = branch_workspace_lookup(&workspace).await {
+        if let Err(error) = agent_sessions::remove_session(&lookup, "file", &attachment_id).await {
+            log::warn!(
+                "failed to remove file session from agent workspace={} attachment_id={}: {}",
+                workspace,
+                attachment_id,
+                error
+            );
+        }
+        if cleared_active_session {
+            let _ = agent_sessions::set_active_session(&lookup, None).await;
+        }
+    }
     emit_workspace_state_changed(
         &app,
         &workspace,

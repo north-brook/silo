@@ -1,13 +1,11 @@
+use crate::agent_sessions::{self, WorkspaceSessionSnapshot};
 use crate::bootstrap;
 use crate::config::{ConfigStore, ProjectConfig, SiloConfig};
 use crate::gcp;
 use crate::river_names::DEFAULT_RIVER_NAMES;
 use crate::state::{
-    active_session_metadata_entries, workspace_last_active_metadata_key, WorkspaceMetadataEntry,
-    ACTIVE_SESSION_ATTACHMENT_ID_METADATA_KEY, ACTIVE_SESSION_KIND_METADATA_KEY,
-    BROWSER_LAST_ACTIVE_METADATA_KEY, BROWSER_SESSION_METADATA_PREFIX,
-    FILE_LAST_ACTIVE_METADATA_KEY, FILE_SESSION_METADATA_PREFIX, TERMINAL_LAST_ACTIVE_METADATA_KEY,
-    TERMINAL_LAST_WORKING_METADATA_KEY, TERMINAL_SESSION_METADATA_PREFIX,
+    WorkspaceMetadataEntry, BROWSER_LAST_ACTIVE_METADATA_KEY, FILE_LAST_ACTIVE_METADATA_KEY,
+    TERMINAL_LAST_ACTIVE_METADATA_KEY, TERMINAL_LAST_WORKING_METADATA_KEY,
     TERMINAL_UNREAD_METADATA_KEY, TERMINAL_WORKING_METADATA_KEY,
 };
 use crate::terminal;
@@ -463,6 +461,36 @@ pub(crate) fn replace_workspace_terminals(
     overlay_workspace_sessions(workspace, &overlay)
 }
 
+pub(crate) fn overlay_workspace_runtime_snapshot(
+    workspace: Workspace,
+    snapshot: WorkspaceSessionSnapshot,
+) -> Workspace {
+    match workspace {
+        Workspace::Branch(mut workspace) => {
+            workspace.base.last_active = snapshot.last_active.or(workspace.base.last_active);
+            workspace.base.last_working = snapshot.last_working.or(workspace.base.last_working);
+            workspace.base.active_session = snapshot.active_session;
+            workspace.unread = snapshot.unread;
+            workspace.working = Some(snapshot.working);
+            workspace.terminals = snapshot.terminals;
+            workspace.browsers = snapshot.browsers;
+            workspace.files = snapshot.files;
+            Workspace::Branch(workspace)
+        }
+        Workspace::Template(mut workspace) => {
+            workspace.base.last_active = snapshot.last_active.or(workspace.base.last_active);
+            workspace.base.last_working = snapshot.last_working.or(workspace.base.last_working);
+            workspace.base.active_session = snapshot.active_session;
+            workspace.unread = snapshot.unread;
+            workspace.working = Some(snapshot.working);
+            workspace.terminals = snapshot.terminals;
+            workspace.browsers = snapshot.browsers;
+            workspace.files = snapshot.files;
+            Workspace::Template(workspace)
+        }
+    }
+}
+
 pub(crate) fn overlay_workspace_active_session(
     workspace: Workspace,
     active_session: Option<WorkspaceActiveSession>,
@@ -538,6 +566,42 @@ pub(crate) struct WorkspaceLookup {
     pub(crate) workspace: Workspace,
     pub(crate) account: String,
     pub(crate) gcloud_project: String,
+}
+
+pub(crate) async fn hydrate_workspace_lookup(lookup: WorkspaceLookup) -> WorkspaceLookup {
+    if !lookup.workspace.is_ready() {
+        return lookup;
+    }
+
+    let WorkspaceLookup {
+        workspace,
+        account,
+        gcloud_project,
+    } = lookup;
+
+    let workspace = match agent_sessions::fetch_session_snapshot(&WorkspaceLookup {
+        workspace: workspace.clone(),
+        account: account.clone(),
+        gcloud_project: gcloud_project.clone(),
+    })
+    .await
+    {
+        Ok(snapshot) => overlay_workspace_runtime_snapshot(workspace, snapshot),
+        Err(error) => {
+            log::warn!(
+                "failed to hydrate workspace runtime sessions workspace={}: {}",
+                workspace.name(),
+                error
+            );
+            workspace
+        }
+    };
+
+    WorkspaceLookup {
+        workspace,
+        account,
+        gcloud_project,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -741,17 +805,16 @@ pub async fn workspaces_get_workspace(
     workspace: String,
 ) -> Result<Workspace, String> {
     log::trace!("getting workspace {workspace}");
-    let lookup = find_workspace(&workspace).await?;
-    let terminals = terminal::list_terminals_in_workspace(&lookup).await?;
-    let workspace = replace_workspace_terminals(lookup.workspace, terminals);
+    let lookup = hydrate_workspace_lookup(find_workspace(&workspace).await?).await;
+    let workspace = lookup.workspace;
     let workspace = state.apply_workspace_state(workspace);
     bootstrap::start_workspace_startup_reconcile_if_needed(workspace.clone());
     bootstrap::start_workspace_agent_update_reconcile_if_needed(workspace.clone());
-    Ok(state.apply_workspace_state(workspace))
+    Ok(workspace)
 }
 
 #[tauri::command]
-pub fn workspaces_set_active_session(
+pub async fn workspaces_set_active_session(
     state: State<'_, crate::state::WorkspaceMetadataManager>,
     workspace: String,
     kind: String,
@@ -768,17 +831,10 @@ pub fn workspaces_set_active_session(
 
     let active_session = WorkspaceActiveSession::new(kind.clone(), attachment_id);
     state.set_active_workspace_session(&workspace, active_session.clone());
-
-    let mut entries = active_session_metadata_entries(Some(&active_session));
-    if kind != "terminal" {
-        if let Some(key) = workspace_last_active_metadata_key(&kind) {
-            entries.push(WorkspaceMetadataEntry {
-                key: key.to_string(),
-                value: Some(current_rfc3339_timestamp()),
-            });
-        }
+    let lookup = find_workspace(&workspace).await?;
+    if lookup.workspace.is_ready() {
+        agent_sessions::set_active_session(&lookup, Some(&active_session)).await?;
     }
-    state.enqueue(&workspace, None, entries);
 
     Ok(())
 }
@@ -2023,7 +2079,6 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         .map(str::to_owned);
     let last_active = resolve_workspace_last_active(&metadata);
     let last_working = resolve_workspace_last_working(&metadata);
-    let active_session = resolve_workspace_active_session(&metadata);
     let agent_heartbeat_at = resolve_workspace_agent_heartbeat(&metadata);
     let agent_fingerprint = resolve_workspace_agent_fingerprint(&metadata);
     let lifecycle = resolve_workspace_lifecycle(&status, &metadata, agent_heartbeat_at.as_deref());
@@ -2033,7 +2088,7 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
         project,
         last_active,
         last_working,
-        active_session,
+        active_session: None,
         created_at,
         status,
         zone,
@@ -2045,9 +2100,9 @@ fn parse_workspace(value: &Value) -> Result<Workspace, String> {
     let unread =
         parse_optional_bool(&metadata, TERMINAL_UNREAD_METADATA_KEY, "unread")?.unwrap_or(false);
     let working = parse_optional_bool(&metadata, TERMINAL_WORKING_METADATA_KEY, "working")?;
-    let terminals = parse_prefixed_workspace_sessions(&metadata, TERMINAL_SESSION_METADATA_PREFIX);
-    let browsers = parse_prefixed_workspace_sessions(&metadata, BROWSER_SESSION_METADATA_PREFIX);
-    let files = parse_prefixed_workspace_sessions(&metadata, FILE_SESSION_METADATA_PREFIX);
+    let terminals = Vec::new();
+    let browsers = Vec::new();
+    let files = Vec::new();
 
     if template {
         let template_operation = resolve_template_operation(&metadata);
@@ -2212,33 +2267,6 @@ fn parse_optional_bool(
         .transpose()
 }
 
-fn parse_prefixed_workspace_sessions(
-    metadata: &HashMap<String, String>,
-    prefix: &str,
-) -> Vec<WorkspaceSession> {
-    let mut sessions = metadata
-        .iter()
-        .filter_map(|(key, value)| {
-            key.strip_prefix(prefix)
-                .map(|attachment_id| (attachment_id, value.as_str()))
-        })
-        .filter_map(|(attachment_id, value)| {
-            let mut session = serde_json::from_str::<WorkspaceSession>(value).ok()?;
-            if session.attachment_id.trim().is_empty() {
-                session.attachment_id = attachment_id.to_string();
-            }
-            Some(session)
-        })
-        .filter(|session| {
-            !session.kind.trim().is_empty()
-                && !session.name.trim().is_empty()
-                && !session.attachment_id.trim().is_empty()
-        })
-        .collect::<Vec<_>>();
-    terminal::sort_workspace_sessions_oldest_to_newest(&mut sessions);
-    sessions
-}
-
 fn resolve_workspace_last_active(metadata: &HashMap<String, String>) -> Option<String> {
     [
         metadata.get(BROWSER_LAST_ACTIVE_METADATA_KEY),
@@ -2352,23 +2380,6 @@ fn resolve_template_operation(
         updated_at,
         snapshot_name,
     })
-}
-
-fn resolve_workspace_active_session(
-    metadata: &HashMap<String, String>,
-) -> Option<WorkspaceActiveSession> {
-    let kind = metadata
-        .get(ACTIVE_SESSION_KIND_METADATA_KEY)
-        .map(String::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    let attachment_id = metadata
-        .get(ACTIVE_SESSION_ATTACHMENT_ID_METADATA_KEY)
-        .map(String::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-
-    Some(WorkspaceActiveSession::new(kind, attachment_id))
 }
 
 fn parse_bool_value(label: &str, value: &str) -> Result<bool, String> {
@@ -3365,8 +3376,6 @@ mod tests {
                     { "key": "terminal-working", "value": "true" },
                     { "key": "terminal-last-active", "value": "2026-03-11T13:05:00Z" },
                     { "key": "terminal-last-working", "value": "2026-03-11T13:04:30Z" },
-                    { "key": "active-session-kind", "value": "terminal" },
-                    { "key": "active-session-attachment-id", "value": "terminal-1" },
                     { "key": "terminal-session-terminal-1", "value": "{\"type\":\"terminal\",\"name\":\"codex\",\"attachment_id\":\"terminal-1\",\"working\":true,\"unread\":false}" }
                 ]
             }
@@ -3393,19 +3402,12 @@ mod tests {
         );
         assert_eq!(workspace.base.created_at, "2026-03-11T13:00:00.000-04:00");
         assert_eq!(workspace.base.zone, "us-east1-b");
-        assert_eq!(
-            workspace.base.active_session,
-            Some(WorkspaceActiveSession::new("terminal", "terminal-1"))
-        );
-        assert_eq!(workspace.terminals.len(), 1);
-        assert_eq!(workspace.terminals[0].name, "codex");
-        assert_eq!(workspace.terminals[0].attachment_id, "terminal-1");
-        assert_eq!(workspace.terminals[0].working, Some(true));
-        assert_eq!(workspace.terminals[0].unread, Some(false));
+        assert_eq!(workspace.base.active_session, None);
+        assert!(workspace.terminals.is_empty());
     }
 
     #[test]
-    fn parse_workspace_reads_flat_session_metadata() {
+    fn parse_workspace_ignores_flat_session_metadata() {
         let workspace = parse_workspace(&json!({
             "name": "ws-demo-123",
             "zone": "us-east1-b",
@@ -3434,12 +3436,7 @@ mod tests {
         assert_eq!(workspace.target_branch, "main");
         assert!(workspace.unread);
         assert_eq!(workspace.working, Some(true));
-        assert_eq!(workspace.terminals.len(), 1);
-        assert_eq!(workspace.terminals[0].kind, "terminal");
-        assert_eq!(workspace.terminals[0].name, "codex");
-        assert_eq!(workspace.terminals[0].attachment_id, "terminal-1");
-        assert_eq!(workspace.terminals[0].working, Some(true));
-        assert_eq!(workspace.terminals[0].unread, Some(false));
+        assert!(workspace.terminals.is_empty());
     }
 
     #[test]
@@ -3490,8 +3487,7 @@ mod tests {
 
         assert_eq!(workspace.branch, "silo/aare");
         assert_eq!(workspace.target_branch, "main");
-        assert_eq!(workspace.terminals.len(), 1);
-        assert_eq!(workspace.terminals[0].name, "good");
+        assert!(workspace.terminals.is_empty());
     }
 
     #[test]
@@ -3557,12 +3553,7 @@ mod tests {
         );
         assert!(!workspace.unread);
         assert_eq!(workspace.working, Some(false));
-        assert_eq!(workspace.terminals.len(), 1);
-        assert_eq!(workspace.terminals[0].name, "bun run build:render");
-        assert_eq!(
-            workspace.terminals[0].attachment_id,
-            "terminal-1773634611341"
-        );
+        assert!(workspace.terminals.is_empty());
     }
 
     #[test]

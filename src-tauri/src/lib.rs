@@ -1,3 +1,4 @@
+mod agent_sessions;
 mod bootstrap;
 mod browser;
 mod browser_file_server;

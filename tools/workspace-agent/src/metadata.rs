@@ -11,7 +11,6 @@ use crate::daemon::state::PublishedState;
 
 pub(crate) const TERMINAL_LAST_ACTIVE_METADATA_KEY: &str = "terminal-last-active";
 pub(crate) const TERMINAL_LAST_WORKING_METADATA_KEY: &str = "terminal-last-working";
-pub(crate) const TERMINAL_SESSION_METADATA_PREFIX: &str = "terminal-session-";
 pub(crate) const TERMINAL_UNREAD_METADATA_KEY: &str = "terminal-unread";
 pub(crate) const TERMINAL_WORKING_METADATA_KEY: &str = "terminal-working";
 pub(crate) const WORKSPACE_AGENT_HEARTBEAT_METADATA_KEY: &str = "workspace-agent-heartbeat-at";
@@ -196,7 +195,6 @@ pub(crate) fn flat_metadata_items(
     mut items: BTreeMap<String, String>,
     published: &PublishedState,
 ) -> Result<BTreeMap<String, String>, String> {
-    items.retain(|key, _| !key.starts_with(TERMINAL_SESSION_METADATA_PREFIX));
     update_metadata_item(&mut items, "branch", published.branch.as_deref());
     update_metadata_item(
         &mut items,
@@ -228,15 +226,6 @@ pub(crate) fn flat_metadata_items(
         WORKSPACE_AGENT_FINGERPRINT_METADATA_KEY,
         current_agent_fingerprint().as_deref(),
     );
-    for terminal in &published.terminals {
-        let key = format!(
-            "{TERMINAL_SESSION_METADATA_PREFIX}{}",
-            terminal.attachment_id
-        );
-        let value = serde_json::to_string(terminal)
-            .map_err(|error| format!("failed to serialize session metadata: {error}"))?;
-        items.insert(key, value);
-    }
     Ok(items)
 }
 

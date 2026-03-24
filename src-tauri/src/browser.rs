@@ -1,3 +1,4 @@
+use crate::agent_sessions;
 use crate::bootstrap;
 use crate::browser_file_server::{
     workspace_file_display_name_from_url, workspace_file_logical_url, BrowserFileServerManager,
@@ -5,7 +6,7 @@ use crate::browser_file_server::{
 use crate::browser_loopback::BrowserLoopbackManager;
 use crate::files;
 use crate::router::RouterManager;
-use crate::state::{active_session_metadata_entries, WorkspaceMetadataManager};
+use crate::state::WorkspaceMetadataManager;
 use crate::terminal;
 use crate::workspaces::{self, WorkspaceLookup, WorkspaceSession};
 use crate::{emit_workspace_state_changed, AppRuntime};
@@ -114,7 +115,7 @@ pub async fn browser_open_workspace_file(
     workspace: String,
     path: String,
 ) -> Result<BrowserCreateResult, String> {
-    let lookup = files::branch_workspace_lookup(&workspace).await?;
+    let lookup = workspaces::hydrate_workspace_lookup(files::branch_workspace_lookup(&workspace).await?).await;
     let path = files::normalize_repo_relative_path(&path)?;
     if files::browser_renderable_content_type(&path).is_none() {
         return Err(format!(
@@ -149,7 +150,7 @@ async fn create_browser_tab(
     workspace: String,
     url: Option<String>,
 ) -> Result<BrowserCreateResult, String> {
-    let lookup = workspaces::find_workspace(&workspace).await?;
+    let lookup = workspaces::hydrate_workspace_lookup(workspaces::find_workspace(&workspace).await?).await;
     if !lookup.workspace.is_ready() {
         bootstrap::start_workspace_startup_reconcile_if_needed(lookup.workspace.clone());
         return Err(workspaces::workspace_not_ready_error(&lookup.workspace));
@@ -160,6 +161,12 @@ async fn create_browser_tab(
         .sessions()
         .into_iter()
         .map(|session| session.attachment_id)
+        .chain(
+            manager
+                .cache_sessions_for_workspace(&workspace)?
+                .into_iter()
+                .map(|session| session.attachment_id),
+        )
         .collect::<HashSet<_>>();
     let attachment_id = generate_browser_attachment_id(&existing_names);
     let initial_url = manager.resolve_browser_url(&lookup, url.as_deref())?;
@@ -175,7 +182,8 @@ async fn create_browser_tab(
         None,
     );
     manager.cache_session(&workspace, session.clone())?;
-    metadata.enqueue_workspace_session_upsert(&workspace, Some(lookup.clone()), session);
+    metadata.upsert_workspace_session(&workspace, session.clone());
+    agent_sessions::upsert_session(&lookup, &session).await?;
 
     Ok(BrowserCreateResult { attachment_id })
 }
@@ -190,7 +198,7 @@ pub async fn browser_mount_tab(
     viewport: BrowserViewport,
     visible: bool,
 ) -> Result<BrowserMountResult, String> {
-    let lookup = workspaces::find_workspace(&workspace).await?;
+    let lookup = workspaces::hydrate_workspace_lookup(workspaces::find_workspace(&workspace).await?).await;
     if !lookup.workspace.is_ready() {
         bootstrap::start_workspace_startup_reconcile_if_needed(lookup.workspace.clone());
         return Err(workspaces::workspace_not_ready_error(&lookup.workspace));
@@ -220,11 +228,8 @@ pub async fn browser_mount_tab(
             session.working,
         );
         state.cache_session(&workspace, session.clone())?;
-        metadata.inner().enqueue_workspace_session_upsert(
-            &workspace,
-            Some(lookup.clone()),
-            session.clone(),
-        );
+        metadata.inner().upsert_workspace_session(&workspace, session.clone());
+        agent_sessions::upsert_session(&lookup, &session).await?;
         emit_browser_state_changed(&app, &workspace, &attachment_id)?;
     }
 
@@ -273,7 +278,7 @@ pub fn browser_detach_tab(
 }
 
 #[tauri::command]
-pub fn browser_kill_tab(
+pub async fn browser_kill_tab(
     app: AppHandle<AppRuntime>,
     state: State<'_, BrowserManager>,
     metadata: State<'_, WorkspaceMetadataManager>,
@@ -284,20 +289,28 @@ pub fn browser_kill_tab(
     let _ = state.remove_cached_session(&workspace, &attachment_id)?;
     let cached_sessions = state.cache_sessions_for_workspace(&workspace)?;
     let remaining_sessions = cached_sessions;
-    metadata.inner().enqueue_workspace_session_remove(
-        &workspace,
-        None,
-        BROWSER_KIND,
-        &attachment_id,
-    );
+    metadata
+        .inner()
+        .remove_workspace_session(&workspace, BROWSER_KIND, &attachment_id);
     let cleared_active_session = metadata.clear_active_workspace_session_if_matches(
         &workspace,
         BROWSER_KIND,
         &attachment_id,
         None,
     );
-    if cleared_active_session {
-        metadata.enqueue(&workspace, None, active_session_metadata_entries(None));
+    if let Ok(lookup) = workspaces::find_workspace(&workspace).await {
+        if let Err(error) = agent_sessions::remove_session(&lookup, BROWSER_KIND, &attachment_id).await
+        {
+            log::warn!(
+                "failed to remove browser session from agent workspace={} attachment_id={}: {}",
+                workspace,
+                attachment_id,
+                error
+            );
+        }
+        if cleared_active_session {
+            let _ = agent_sessions::set_active_session(&lookup, None).await;
+        }
     }
     emit_workspace_state_changed(
         &app,
@@ -363,9 +376,8 @@ pub async fn browser_go_to(
         Some(true),
     );
     state.cache_session(&workspace, session.clone())?;
-    metadata
-        .inner()
-        .enqueue_workspace_session_upsert(&workspace, Some(lookup.clone()), session);
+    metadata.inner().upsert_workspace_session(&workspace, session.clone());
+    agent_sessions::upsert_session(&lookup, &session).await?;
 
     if let Some(webview) = app.get_webview(&browser_webview_label(&workspace, &attachment_id)) {
         state.set_resolved_url(&workspace, &attachment_id, &normalized.resolved_url)?;
@@ -419,9 +431,9 @@ pub async fn browser_report_page_state(
         None,
     );
     state.cache_session(&workspace, session.clone())?;
-    metadata
-        .inner()
-        .enqueue_workspace_session_upsert(&workspace, None, session);
+    metadata.inner().upsert_workspace_session(&workspace, session.clone());
+    let lookup = workspaces::find_workspace(&workspace).await?;
+    agent_sessions::upsert_session(&lookup, &session).await?;
     emit_browser_state_changed(&app, &workspace, &attachment_id)?;
     Ok(BrowserMetadataResult { updated: true })
 }
@@ -1084,7 +1096,8 @@ fn handle_page_load(
             &workspace,
             &attachment_id,
             session,
-        );
+        )
+        .await;
     });
 }
 
@@ -1141,7 +1154,8 @@ fn handle_title_changed(
             &workspace,
             &attachment_id,
             session,
-        );
+        )
+        .await;
     });
 }
 
@@ -1450,17 +1464,14 @@ async fn find_existing_browser_session(
     if let Ok(Some(session)) = manager.cached_session(workspace, attachment_id) {
         return Some(session);
     }
-    workspaces::find_workspace(workspace)
-        .await
-        .ok()
-        .and_then(|lookup| {
-            lookup
-                .workspace
-                .browsers()
-                .iter()
-                .find(|session| session.attachment_id == attachment_id)
-                .cloned()
-        })
+    let lookup = workspaces::find_workspace(workspace).await.ok()?;
+    let lookup = workspaces::hydrate_workspace_lookup(lookup).await;
+    lookup
+        .workspace
+        .browsers()
+        .iter()
+        .find(|session| session.attachment_id == attachment_id)
+        .cloned()
 }
 
 fn find_browser_session_by_logical_url(
@@ -1487,6 +1498,53 @@ fn find_browser_session_by_logical_url(
                 || session.url.as_deref() == Some(logical_url)
         })
         .cloned())
+}
+
+async fn cache_and_emit_browser_session(
+    manager: &BrowserManager,
+    metadata: &WorkspaceMetadataManager,
+    app: &AppHandle<AppRuntime>,
+    workspace: &str,
+    attachment_id: &str,
+    session: WorkspaceSession,
+) -> Result<(), String> {
+    manager.cache_session(workspace, session.clone())?;
+    metadata.upsert_workspace_session(workspace, session.clone());
+    let lookup = workspaces::find_workspace(workspace).await?;
+    if lookup.workspace.is_ready() {
+        agent_sessions::upsert_session(&lookup, &session).await?;
+    }
+    emit_browser_state_changed(app, workspace, attachment_id)?;
+    Ok(())
+}
+
+async fn set_existing_browser_session_working(
+    manager: &BrowserManager,
+    metadata: &WorkspaceMetadataManager,
+    app: &AppHandle<AppRuntime>,
+    workspace: &str,
+    attachment_id: &str,
+    working: bool,
+) -> Result<(), String> {
+    let Some(mut session) = find_existing_browser_session(manager, workspace, attachment_id).await
+    else {
+        return Ok(());
+    };
+
+    if session.working == Some(working) {
+        return Ok(());
+    }
+
+    session.working = Some(working);
+    cache_and_emit_browser_session(
+        manager,
+        metadata,
+        app,
+        workspace,
+        attachment_id,
+        session,
+    )
+    .await
 }
 
 struct BrowserPageMetadata {
@@ -1535,40 +1593,6 @@ fn browser_session_for_url(
     }
 }
 
-fn cache_and_emit_browser_session(
-    manager: &BrowserManager,
-    metadata: &WorkspaceMetadataManager,
-    app: &AppHandle<AppRuntime>,
-    workspace: &str,
-    attachment_id: &str,
-    session: WorkspaceSession,
-) -> Result<(), String> {
-    manager.cache_session(workspace, session.clone())?;
-    metadata.enqueue_workspace_session_upsert(workspace, None, session);
-    emit_browser_state_changed(app, workspace, attachment_id)?;
-    Ok(())
-}
-
-async fn set_existing_browser_session_working(
-    manager: &BrowserManager,
-    metadata: &WorkspaceMetadataManager,
-    app: &AppHandle<AppRuntime>,
-    workspace: &str,
-    attachment_id: &str,
-    working: bool,
-) -> Result<(), String> {
-    let Some(mut session) = find_existing_browser_session(manager, workspace, attachment_id).await
-    else {
-        return Ok(());
-    };
-
-    if session.working == Some(working) {
-        return Ok(());
-    }
-
-    session.working = Some(working);
-    cache_and_emit_browser_session(manager, metadata, app, workspace, attachment_id, session)
-}
 
 fn browser_state_sync_script(workspace: &str, attachment_id: &str) -> String {
     format!(

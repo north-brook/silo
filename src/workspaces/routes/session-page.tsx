@@ -8,6 +8,7 @@ import type { CloudSession } from "@/workspaces/hosts/model";
 import { useWorkspaceSessionRouteParams } from "@/workspaces/routes/params";
 import {
   type SessionRouteState,
+  workspaceHref,
   workspaceSessionHref,
 } from "@/workspaces/routes/paths";
 import {
@@ -85,23 +86,34 @@ function WorkspaceSessionView({ kind }: { kind: "browser" | "terminal" }) {
       cloudSessions.find(
         (session) =>
           session.kind === kind && session.attachmentId === attachmentId,
-      ) ?? {
-        workspace,
-        kind,
-        attachmentId,
-        name: attachmentId,
-        url: null,
-        logicalUrl: null,
-        resolvedUrl: null,
-        title: null,
-        faviconUrl: null,
-        canGoBack: null,
-        canGoForward: null,
-        working: null,
-        unread: null,
-      }
+      ) ??
+      (freshRef.current
+        ? {
+            workspace,
+            kind,
+            attachmentId,
+            name: attachmentId,
+            url: null,
+            logicalUrl: null,
+            resolvedUrl: null,
+            title: null,
+            faviconUrl: null,
+            canGoBack: null,
+            canGoForward: null,
+            working: null,
+            unread: null,
+          }
+        : null)
     );
   }, [attachmentId, cloudSessions, kind, workspace]);
+
+  useEffect(() => {
+    if (!workspace || !attachmentId || freshRef.current || hasLiveSession) {
+      return;
+    }
+
+    navigate(workspaceHref({ project, workspace }), { replace: true });
+  }, [attachmentId, hasLiveSession, navigate, project, workspace]);
 
   useEffect(() => {
     if (!workspace || !attachmentId || !hasLiveSession) {

@@ -19,7 +19,13 @@ pub(crate) struct ObserverState {
     #[serde(default)]
     pub(crate) last_working: Option<String>,
     #[serde(default)]
+    pub(crate) active_session: Option<PublishedActiveSession>,
+    #[serde(default)]
     pub(crate) sessions: BTreeMap<String, SessionState>,
+    #[serde(default)]
+    pub(crate) browsers: BTreeMap<String, PublishedSession>,
+    #[serde(default)]
+    pub(crate) files_sessions: BTreeMap<String, PublishedSession>,
     #[serde(default)]
     pub(crate) files: FilesState,
 }
@@ -57,7 +63,7 @@ pub(crate) struct SessionState {
     pub(crate) poll_misses: u16,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct PublishedState {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) branch: Option<String>,
@@ -68,17 +74,29 @@ pub(crate) struct PublishedState {
     pub(crate) last_active: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) last_working: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) active_session: Option<PublishedActiveSession>,
     pub(crate) terminals: Vec<PublishedSession>,
+    #[serde(default)]
+    pub(crate) browsers: Vec<PublishedSession>,
+    #[serde(default)]
+    pub(crate) files: Vec<PublishedSession>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct PublishedSession {
     #[serde(rename = "type")]
-    pub(crate) kind: &'static str,
+    pub(crate) kind: String,
     pub(crate) name: String,
     pub(crate) attachment_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) logical_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resolved_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -91,6 +109,13 @@ pub(crate) struct PublishedSession {
     pub(crate) working: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unread: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct PublishedActiveSession {
+    #[serde(rename = "type")]
+    pub(crate) kind: String,
+    pub(crate) attachment_id: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -118,7 +143,6 @@ impl AssistantProvider {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum ObserverEvent {
     ShellSessionStarted {
         session: String,
@@ -148,6 +172,18 @@ pub(crate) enum ObserverEvent {
     MarkRead {
         session: String,
     },
+    SessionUpsert {
+        session: PublishedSession,
+    },
+    SessionRemove {
+        session_type: String,
+        attachment_id: String,
+    },
+    SetActiveSession {
+        session_type: String,
+        attachment_id: String,
+    },
+    ClearActiveSession,
     FilesWatchSet {
         paths: Vec<String>,
     },
@@ -219,6 +255,27 @@ pub(crate) fn apply_event(state: &mut ObserverState, event: ObserverEvent) {
                 session_state.unread = false;
             }
         }
+        ObserverEvent::SessionUpsert { session } => {
+            upsert_persisted_session(state, session);
+        }
+        ObserverEvent::SessionRemove {
+            session_type,
+            attachment_id,
+        } => {
+            remove_persisted_session(state, &session_type, &attachment_id);
+        }
+        ObserverEvent::SetActiveSession {
+            session_type,
+            attachment_id,
+        } => {
+            state.active_session = Some(PublishedActiveSession {
+                kind: session_type,
+                attachment_id,
+            });
+        }
+        ObserverEvent::ClearActiveSession => {
+            state.active_session = None;
+        }
         ObserverEvent::FilesWatchSet { paths } => {
             state.files.watch_paths = paths.into_iter().collect();
             state
@@ -227,6 +284,7 @@ pub(crate) fn apply_event(state: &mut ObserverState, event: ObserverEvent) {
                 .retain(|path, _| state.files.watch_paths.contains(path));
         }
     }
+    reconcile_active_session(state);
 }
 
 pub(crate) fn reconcile_sessions(state: &mut ObserverState, live_sessions: &[ZmxSession]) {
@@ -261,6 +319,7 @@ pub(crate) fn reconcile_sessions(state: &mut ObserverState, live_sessions: &[Zmx
     state.sessions.retain(|_, session_state| {
         session_state.poll_misses < session_poll_miss_threshold(session_state)
     });
+    reconcile_active_session(state);
 
     if state.sessions != before {
         touch_last_active(state);
@@ -284,10 +343,13 @@ pub(crate) fn build_published_state(state: &ObserverState) -> PublishedState {
             unread |= session_state.unread;
 
             PublishedSession {
-                kind: "terminal",
+                kind: "terminal".to_string(),
                 name,
                 attachment_id: session_name.clone(),
+                path: None,
                 url: None,
+                logical_url: None,
+                resolved_url: None,
                 title: None,
                 favicon_url: None,
                 can_go_back: None,
@@ -298,6 +360,10 @@ pub(crate) fn build_published_state(state: &ObserverState) -> PublishedState {
         })
         .collect::<Vec<_>>();
     terminals.sort_by(|left, right| left.attachment_id.cmp(&right.attachment_id));
+    let mut browsers = state.browsers.values().cloned().collect::<Vec<_>>();
+    browsers.sort_by(|left, right| left.attachment_id.cmp(&right.attachment_id));
+    let mut files = state.files_sessions.values().cloned().collect::<Vec<_>>();
+    files.sort_by(|left, right| left.attachment_id.cmp(&right.attachment_id));
 
     PublishedState {
         branch: state.branch.clone(),
@@ -306,7 +372,13 @@ pub(crate) fn build_published_state(state: &ObserverState) -> PublishedState {
         heartbeat_at: heartbeat_timestamp(),
         last_active: state.last_active.clone(),
         last_working: state.last_working.clone(),
+        active_session: state
+            .active_session
+            .clone()
+            .filter(|active| session_exists(state, &active.kind, &active.attachment_id)),
         terminals,
+        browsers,
+        files,
     }
 }
 
@@ -376,6 +448,54 @@ fn session_poll_miss_threshold(session: &SessionState) -> u16 {
         POLL_MISS_THRESHOLD_LIFECYCLE
     } else {
         POLL_MISS_THRESHOLD_UNMANAGED
+    }
+}
+
+fn upsert_persisted_session(state: &mut ObserverState, session: PublishedSession) {
+    let entry = match session.kind.as_str() {
+        "browser" => &mut state.browsers,
+        "file" => &mut state.files_sessions,
+        _ => return,
+    };
+    entry.insert(session.attachment_id.clone(), session);
+}
+
+fn remove_persisted_session(state: &mut ObserverState, kind: &str, attachment_id: &str) {
+    match kind {
+        "browser" => {
+            state.browsers.remove(attachment_id);
+        }
+        "file" => {
+            state.files_sessions.remove(attachment_id);
+        }
+        "terminal" => {
+            state.sessions.remove(attachment_id);
+        }
+        _ => {}
+    }
+    if state
+        .active_session
+        .as_ref()
+        .is_some_and(|active| active.kind == kind && active.attachment_id == attachment_id)
+    {
+        state.active_session = None;
+    }
+}
+
+fn session_exists(state: &ObserverState, kind: &str, attachment_id: &str) -> bool {
+    match kind {
+        "terminal" => state.sessions.contains_key(attachment_id),
+        "browser" => state.browsers.contains_key(attachment_id),
+        "file" => state.files_sessions.contains_key(attachment_id),
+        _ => false,
+    }
+}
+
+fn reconcile_active_session(state: &mut ObserverState) {
+    if !state.active_session.as_ref().is_some_and(|active| {
+        session_exists(state, &active.kind, &active.attachment_id)
+    }) {
+        state.active_session = None;
     }
 }
 

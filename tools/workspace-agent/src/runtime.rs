@@ -251,7 +251,7 @@ mod tests {
         let mut reader = BufReader::new(reader);
         let mut line = String::new();
         reader.read_line(&mut line).expect("reader should receive payload");
-        assert!(line.contains("\"mark_read\""));
+        assert!(line.contains("\"MarkRead\""));
         assert!(line.contains("\"demo\""));
 
         fs::remove_file(&path).expect("cleanup fifo");

@@ -1,10 +1,11 @@
 use std::env;
+use std::io;
 
 use crate::args::required_flag_value;
 use crate::assistant::run_assistant_proxy;
 use crate::daemon::run_daemon;
 use crate::daemon::state::{
-    build_published_state, reconcile_sessions, AssistantProvider, ObserverEvent,
+    build_published_state, reconcile_sessions, AssistantProvider, ObserverEvent, PublishedSession,
 };
 use crate::daemon::zmx::list_zmx_sessions;
 use crate::files::{
@@ -24,6 +25,11 @@ pub(crate) fn run() -> Result<(), String> {
         "emit" => run_emit(&args[1..]),
         "mark-read" => run_mark_read(&args[1..]),
         "terminals" => run_terminals(),
+        "sessions-snapshot" => run_sessions_snapshot(),
+        "session-upsert" => run_session_upsert(),
+        "session-remove" => run_session_remove(&args[1..]),
+        "session-set-active" => run_session_set_active(&args[1..]),
+        "session-clear-active" => run_session_clear_active(),
         "assistant-proxy" => run_assistant_proxy(&args[1..]),
         "files-directory" => run_files_directory(&args[1..]),
         "files-tree" => run_files_tree(),
@@ -58,6 +64,49 @@ fn run_terminals() -> Result<(), String> {
     }
     let published = build_published_state(&state);
     write_json_stdout(&published.terminals)
+}
+
+fn run_sessions_snapshot() -> Result<(), String> {
+    let runtime = RuntimePaths::new();
+    let mut state = load_state(&runtime.state_file).unwrap_or_default();
+    if let Ok(live_sessions) = list_zmx_sessions() {
+        reconcile_sessions(&mut state, &live_sessions);
+    }
+    let published = build_published_state(&state);
+    write_json_stdout(&published)
+}
+
+fn run_session_upsert() -> Result<(), String> {
+    let session = serde_json::from_reader::<_, PublishedSession>(io::stdin())
+        .map_err(|error| format!("failed to parse session payload: {error}"))?;
+    send_event(
+        &RuntimePaths::new().fifo,
+        &ObserverEvent::SessionUpsert { session },
+    )
+}
+
+fn run_session_remove(args: &[String]) -> Result<(), String> {
+    send_event(
+        &RuntimePaths::new().fifo,
+        &ObserverEvent::SessionRemove {
+            session_type: required_flag_value(args, "--type")?.to_string(),
+            attachment_id: required_flag_value(args, "--attachment-id")?.to_string(),
+        },
+    )
+}
+
+fn run_session_set_active(args: &[String]) -> Result<(), String> {
+    send_event(
+        &RuntimePaths::new().fifo,
+        &ObserverEvent::SetActiveSession {
+            session_type: required_flag_value(args, "--type")?.to_string(),
+            attachment_id: required_flag_value(args, "--attachment-id")?.to_string(),
+        },
+    )
+}
+
+fn run_session_clear_active() -> Result<(), String> {
+    send_event(&RuntimePaths::new().fifo, &ObserverEvent::ClearActiveSession)
 }
 
 fn parse_emit_event(args: &[String]) -> Result<ObserverEvent, String> {

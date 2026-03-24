@@ -9,8 +9,8 @@ use crate::assistant::{
 use crate::daemon::state::{
     apply_event, build_published_state, effective_activity_at, parse_timestamp, reconcile_sessions,
     resolve_assistant_provider, sanitize_command_name, should_suspend_for_inactivity_at,
-    AssistantProvider, ObserverEvent, ObserverState, PublishedSession, PublishedState,
-    SessionState, POLL_MISS_THRESHOLD_LIFECYCLE,
+    AssistantProvider, ObserverEvent, ObserverState, PublishedActiveSession, PublishedSession,
+    PublishedState, SessionState, POLL_MISS_THRESHOLD_LIFECYCLE,
 };
 use crate::daemon::zmx::{parse_zmx_session, parse_zmx_sessions, ZmxSession};
 use crate::metadata::{
@@ -135,10 +135,13 @@ fn flat_metadata_items_rewrites_terminal_state() {
         last_active: Some("2026-03-14T00:00:00Z".to_string()),
         last_working: Some("2026-03-14T01:00:00Z".to_string()),
         terminals: vec![PublishedSession {
-            kind: "terminal",
+            kind: "terminal".to_string(),
             name: "codex".to_string(),
             attachment_id: "terminal-1".to_string(),
+            path: None,
             url: None,
+            logical_url: None,
+            resolved_url: None,
             title: None,
             favicon_url: None,
             can_go_back: None,
@@ -146,6 +149,9 @@ fn flat_metadata_items_rewrites_terminal_state() {
             working: Some(false),
             unread: Some(true),
         }],
+        active_session: None,
+        browsers: Vec::new(),
+        files: Vec::new(),
     };
 
     let items = flat_metadata_items(items, &published).expect("metadata items should build");
@@ -176,14 +182,9 @@ fn flat_metadata_items_rewrites_terminal_state() {
     );
     assert_eq!(items.get("target_branch").map(String::as_str), Some("main"));
     assert_eq!(
-        items
-            .get("terminal-session-terminal-1")
-            .map(String::as_str),
-        Some(
-            "{\"type\":\"terminal\",\"name\":\"codex\",\"attachment_id\":\"terminal-1\",\"working\":false,\"unread\":true}"
-        )
+        items.get("terminal-session-old").map(String::as_str),
+        Some("{\"type\":\"terminal\",\"name\":\"old\",\"attachment_id\":\"old\"}")
     );
-    assert!(!items.contains_key("terminal-session-old"));
 }
 
 #[test]
@@ -227,6 +228,97 @@ fn assistant_prompt_submitted_updates_last_working() {
             .and_then(|session| session.working.then_some(true)),
         Some(true)
     );
+}
+
+#[test]
+fn session_upsert_persists_browser_and_file_sessions() {
+    let mut state = ObserverState::default();
+
+    apply_event(
+        &mut state,
+        ObserverEvent::SessionUpsert {
+            session: PublishedSession {
+                kind: "browser".to_string(),
+                name: "Docs".to_string(),
+                attachment_id: "browser-1".to_string(),
+                path: None,
+                url: Some("https://example.com".to_string()),
+                logical_url: Some("https://example.com".to_string()),
+                resolved_url: Some("https://example.com".to_string()),
+                title: Some("Docs".to_string()),
+                favicon_url: None,
+                can_go_back: Some(false),
+                can_go_forward: Some(false),
+                working: Some(false),
+                unread: Some(false),
+            },
+        },
+    );
+    apply_event(
+        &mut state,
+        ObserverEvent::SessionUpsert {
+            session: PublishedSession {
+                kind: "file".to_string(),
+                name: "README.md".to_string(),
+                attachment_id: "file-1".to_string(),
+                path: Some("README.md".to_string()),
+                url: None,
+                logical_url: None,
+                resolved_url: None,
+                title: None,
+                favicon_url: None,
+                can_go_back: None,
+                can_go_forward: None,
+                working: None,
+                unread: None,
+            },
+        },
+    );
+
+    let published = build_published_state(&state);
+    assert_eq!(published.browsers.len(), 1);
+    assert_eq!(published.files.len(), 1);
+    assert_eq!(published.browsers[0].attachment_id, "browser-1");
+    assert_eq!(published.files[0].attachment_id, "file-1");
+}
+
+#[test]
+fn active_session_is_cleared_when_target_session_disappears() {
+    let mut state = ObserverState {
+        active_session: Some(PublishedActiveSession {
+            kind: "browser".to_string(),
+            attachment_id: "browser-1".to_string(),
+        }),
+        ..ObserverState::default()
+    };
+    state.browsers.insert(
+        "browser-1".to_string(),
+        PublishedSession {
+            kind: "browser".to_string(),
+            name: "Docs".to_string(),
+            attachment_id: "browser-1".to_string(),
+            path: None,
+            url: Some("https://example.com".to_string()),
+            logical_url: Some("https://example.com".to_string()),
+            resolved_url: Some("https://example.com".to_string()),
+            title: Some("Docs".to_string()),
+            favicon_url: None,
+            can_go_back: Some(false),
+            can_go_forward: Some(false),
+            working: Some(false),
+            unread: Some(false),
+        },
+    );
+
+    apply_event(
+        &mut state,
+        ObserverEvent::SessionRemove {
+            session_type: "browser".to_string(),
+            attachment_id: "browser-1".to_string(),
+        },
+    );
+
+    assert_eq!(state.active_session, None);
 }
 
 #[test]

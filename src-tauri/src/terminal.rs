@@ -1,3 +1,4 @@
+use crate::agent_sessions;
 use crate::bootstrap;
 use crate::bootstrap::is_retryable_terminal_transport_error;
 use crate::remote::{
@@ -5,7 +6,7 @@ use crate::remote::{
     run_remote_command, run_terminal_user_command, shell_quote, terminal_shell_command,
     REMOTE_WORKSPACE_AGENT_BIN,
 };
-use crate::state::{active_session_metadata_entries, WorkspaceMetadataManager};
+use crate::state::WorkspaceMetadataManager;
 use crate::workspaces::{self, WorkspaceActiveSession, WorkspaceLookup, WorkspaceSession};
 use crate::{emit_workspace_state_changed, AppRuntime};
 use portable_pty::{native_pty_system, Child, ChildKiller, MasterPty, PtySize};
@@ -231,8 +232,9 @@ pub(crate) async fn ensure_template_startup_terminal_session(
     workspace_state: &WorkspaceMetadataManager,
     workspace: &str,
 ) -> Result<String, String> {
-    let workspace_with_state = workspace_state
-        .apply_workspace_state(workspaces::find_workspace(workspace).await?.workspace);
+    let lookup =
+        workspaces::hydrate_workspace_lookup(workspaces::find_workspace(workspace).await?).await;
+    let workspace_with_state = workspace_state.apply_workspace_state(lookup.workspace);
     let existing_attachment_id = workspace_with_state
         .active_session()
         .filter(|active| {
@@ -463,7 +465,7 @@ pub fn terminal_detach_terminal(
 }
 
 #[tauri::command]
-pub fn terminal_kill_terminal(
+pub async fn terminal_kill_terminal(
     app: AppHandle<AppRuntime>,
     state: State<'_, TerminalManager>,
     workspace_state: State<'_, WorkspaceMetadataManager>,
@@ -493,7 +495,9 @@ pub fn terminal_kill_terminal(
         None,
     );
     if cleared_active_session {
-        workspace_state.enqueue(&workspace, None, active_session_metadata_entries(None));
+        if let Ok(lookup) = workspaces::find_workspace(&workspace).await {
+            let _ = agent_sessions::set_active_session(&lookup, None).await;
+        }
     }
     emit_workspace_state_changed(
         &app,
@@ -1046,17 +1050,7 @@ fn write_attachment_input(attachment: &Attachment, data: &[u8]) -> Result<(), St
 pub(crate) async fn list_terminals_in_workspace(
     lookup: &WorkspaceLookup,
 ) -> Result<Vec<WorkspaceSession>, String> {
-    let mut sessions = match list_live_terminals_in_workspace(lookup).await {
-        Ok(sessions) => sessions,
-        Err(error) => {
-            log::warn!(
-                "failed to read live terminal sessions for workspace {}: {}; falling back to metadata",
-                lookup.workspace.name(),
-                error
-            );
-            lookup.workspace.terminals().to_vec()
-        }
-    };
+    let mut sessions = list_live_terminals_in_workspace(lookup).await?;
     sort_workspace_sessions_oldest_to_newest(&mut sessions);
     Ok(sessions)
 }
