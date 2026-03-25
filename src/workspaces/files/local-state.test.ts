@@ -4,9 +4,11 @@ import {
 	type DisplayWorkspaceSession,
 	defaultFileTabState,
 	getWorkspaceLocalFileState,
+	restoreWorkspaceLocalSession,
 	updateWorkspaceLocalSessionStates,
 	updateWorkspaceLocalSessions,
 	type WorkspaceLocalFileState,
+	type WorkspaceLocalSessionSnapshot,
 } from "./local-state";
 
 function fileSession(
@@ -37,6 +39,13 @@ function workspaceState(
 	sessionStates: Record<string, typeof defaultFileTabState>,
 ): WorkspaceLocalFileState {
 	return { sessions, sessionStates };
+}
+
+function sessionSnapshot(
+	session: DisplayWorkspaceSession,
+	state: typeof defaultFileTabState = defaultFileTabState,
+): WorkspaceLocalSessionSnapshot {
+	return { session, state };
 }
 
 describe("workspace local file state", () => {
@@ -132,5 +141,42 @@ describe("workspace local file state", () => {
 		expect(next.beta).toBeUndefined();
 		expect(getWorkspaceLocalFileState(next, "alpha")).toBe(alpha);
 		expect(getWorkspaceLocalFileState(next, "beta").sessions).toEqual([]);
+	});
+
+	test("restores a cleared local session with its tab state", () => {
+		const session = fileSession("file-beta-1", "docs/beta.md", {
+			persistentAttachmentId: "file-remote-1",
+		});
+		const cleared = clearWorkspaceLocalSession(
+			{
+				beta: workspaceState([session], {
+					"file-beta-1": {
+						...defaultFileTabState,
+						dirty: true,
+					},
+				}),
+			},
+			"beta",
+			"file-beta-1",
+		);
+
+		const restored = restoreWorkspaceLocalSession(
+			cleared,
+			"beta",
+			sessionSnapshot(session, {
+				...defaultFileTabState,
+				dirty: true,
+			}),
+		);
+
+		expect(getWorkspaceLocalFileState(restored, "beta").sessions).toEqual([
+			session,
+		]);
+		expect(
+			getWorkspaceLocalFileState(restored, "beta").sessionStates["file-beta-1"],
+		).toEqual({
+			...defaultFileTabState,
+			dirty: true,
+		});
 	});
 });

@@ -1,8 +1,4 @@
-import {
-	useMutation,
-	useMutationState,
-	useQueryClient,
-} from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Globe, Plus, Terminal, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Outlet, useLocation, useMatch, useNavigate } from "react-router-dom";
@@ -31,6 +27,7 @@ import {
 	type DisplayWorkspaceSession,
 	FileSessionsProvider,
 	useFileSessions,
+	type WorkspaceLocalSessionSnapshot,
 } from "@/workspaces/files/context";
 import { FileIcon } from "@/workspaces/files/icons";
 import { GitSidebarProvider } from "@/workspaces/git/context";
@@ -175,13 +172,13 @@ function isLocalOnlyFileSession(
 function findLiveNeighbor(
 	sessions: WorkspaceSession[],
 	closingIndex: number,
-	deletingIds: ReadonlySet<string>,
+	hiddenIds: ReadonlySet<string>,
 ): WorkspaceSession | null {
 	for (let i = closingIndex - 1; i >= 0; i--) {
-		if (!deletingIds.has(sessions[i].attachment_id)) return sessions[i];
+		if (!hiddenIds.has(sessions[i].attachment_id)) return sessions[i];
 	}
 	for (let i = closingIndex + 1; i < sessions.length; i++) {
-		if (!deletingIds.has(sessions[i].attachment_id)) return sessions[i];
+		if (!hiddenIds.has(sessions[i].attachment_id)) return sessions[i];
 	}
 	return null;
 }
@@ -225,7 +222,8 @@ function WorkspaceShellInner() {
 		"/projects/:project/workspaces/:workspace/terminal/:attachmentId",
 	);
 	const { ensureWorkspaceSessions, removeSession } = useSessionHosts();
-	const { clearSession, getDisplaySessions } = useFileSessions();
+	const { clearSession, getDisplaySessions, getSessionState, restoreSession } =
+		useFileSessions();
 	const {
 		invalidateWorkspace,
 		isMissing,
@@ -291,8 +289,6 @@ function WorkspaceShellInner() {
 	}, [displayWorkspaceSessions, openingSessions]);
 	const cloudSessions = useCloudSessions();
 	const [newTabOpen, setNewTabOpen] = useState(false);
-	const [closingSessionRefreshDeadline, setClosingSessionRefreshDeadline] =
-		useState<Record<string, number | null>>({});
 	const activeKind = browserMatch
 		? "browser"
 		: fileMatch
@@ -345,44 +341,12 @@ function WorkspaceShellInner() {
 	}, [cloudSessions, ensureWorkspaceSessions, isWorkspaceReady, workspaceName]);
 
 	useEffect(() => {
-		setClosingSessionRefreshDeadline({});
+		if (!workspaceName) {
+			setOpeningSessions({});
+			return;
+		}
 		setOpeningSessions({});
 	}, [workspaceName]);
-
-	const markSessionClosing = useCallback((attachmentId: string) => {
-		setClosingSessionRefreshDeadline((previous) => {
-			if (attachmentId in previous) {
-				return previous;
-			}
-			return {
-				...previous,
-				[attachmentId]: null,
-			};
-		});
-	}, []);
-
-	const markSessionCloseSettled = useCallback((attachmentId: string) => {
-		setClosingSessionRefreshDeadline((previous) => {
-			if (!(attachmentId in previous)) {
-				return previous;
-			}
-			return {
-				...previous,
-				[attachmentId]: Date.now(),
-			};
-		});
-	}, []);
-
-	const clearClosingSession = useCallback((attachmentId: string) => {
-		setClosingSessionRefreshDeadline((previous) => {
-			if (!(attachmentId in previous)) {
-				return previous;
-			}
-			const next = { ...previous };
-			delete next[attachmentId];
-			return next;
-		});
-	}, []);
 
 	const markSessionOpening = useCallback((session: DisplayWorkspaceSession) => {
 		const key = sessionListKey(session.type, session.attachment_id);
@@ -414,31 +378,6 @@ function WorkspaceShellInner() {
 		},
 		[],
 	);
-
-	useEffect(() => {
-		const trackedIds = Object.keys(closingSessionRefreshDeadline);
-		if (trackedIds.length === 0) {
-			return;
-		}
-
-		const visibleSessionIds = new Set(
-			sessions.map((session) => session.attachment_id),
-		);
-		setClosingSessionRefreshDeadline((previous) => {
-			let changed = false;
-			const next = { ...previous };
-			for (const [attachmentId, settledAt] of Object.entries(previous)) {
-				if (settledAt == null || workspaceUpdatedAt <= settledAt) {
-					continue;
-				}
-				if (!visibleSessionIds.has(attachmentId)) {
-					delete next[attachmentId];
-					changed = true;
-				}
-			}
-			return changed ? next : previous;
-		});
-	}, [closingSessionRefreshDeadline, sessions, workspaceUpdatedAt]);
 
 	useEffect(() => {
 		const trackedEntries = Object.entries(openingSessions);
@@ -599,10 +538,20 @@ function WorkspaceShellInner() {
 				"workspaces_get_workspace",
 				workspaceName,
 			]);
+			const localFileSnapshot: WorkspaceLocalSessionSnapshot | null =
+				session.type === "file" && session.persistentAttachmentId
+					? {
+							session,
+							state: getSessionState(session.attachment_id),
+						}
+					: null;
 			const attachmentId =
 				session.type === "file"
 					? (session.persistentAttachmentId ?? session.attachment_id)
 					: session.attachment_id;
+			if (localFileSnapshot) {
+				clearSession(session.attachment_id);
+			}
 			queryClient.setQueryData<Workspace | null>(
 				["workspaces_get_workspace", workspaceName],
 				(current) =>
@@ -611,10 +560,9 @@ function WorkspaceShellInner() {
 						attachmentId,
 					}) ?? null,
 			);
-			return { previousWorkspace };
+			return { previousWorkspace, localFileSnapshot };
 		},
 		onSuccess: (_, session) => {
-			markSessionCloseSettled(session.attachment_id);
 			clearOpeningSession(session.type, session.attachment_id);
 			invalidateWorkspace();
 			removeSession(
@@ -627,11 +575,13 @@ function WorkspaceShellInner() {
 			clearSession(session.attachment_id);
 		},
 		onError: (error, session, context) => {
-			clearClosingSession(session.attachment_id);
 			queryClient.setQueryData<Workspace | null>(
 				["workspaces_get_workspace", workspaceName],
 				context?.previousWorkspace ?? null,
 			);
+			if (context?.localFileSnapshot) {
+				restoreSession(context.localFileSnapshot);
+			}
 			toast({
 				variant: "error",
 				title:
@@ -648,28 +598,8 @@ function WorkspaceShellInner() {
 		},
 	});
 
-	const pendingKills = useMutationState({
-		filters: {
-			mutationKey: ["kill-session", workspaceName],
-			status: "pending",
-		},
-		select: (mutation) =>
-			(mutation.state.variables as DisplayWorkspaceSession | undefined)
-				?.attachment_id,
-	});
-	const deletingIds = useMemo(
-		() =>
-			new Set([
-				...Object.keys(closingSessionRefreshDeadline),
-				...pendingKills.filter((id): id is string => !!id),
-			]),
-		[closingSessionRefreshDeadline, pendingKills],
-	);
-
 	const closeTab = useCallback(
 		(session: DisplayWorkspaceSession) => {
-			if (deletingIds.has(session.attachment_id)) return;
-
 			const isLocalOnly = isLocalOnlyFileSession(session, workspaceSessions);
 			const isActive =
 				activeKind === session.type &&
@@ -679,8 +609,7 @@ function WorkspaceShellInner() {
 						const idx = sessions.findIndex(
 							(s) => s.attachment_id === session.attachment_id,
 						);
-						const preview = new Set(deletingIds);
-						preview.add(session.attachment_id);
+						const preview = new Set([session.attachment_id]);
 						const neighbor = findLiveNeighbor(sessions, idx, preview);
 						return neighbor
 							? workspaceSessionHref({
@@ -694,7 +623,6 @@ function WorkspaceShellInner() {
 				: null;
 
 			if (!session.preview && !isLocalOnly) {
-				markSessionClosing(session.attachment_id);
 				killSession.mutate(session);
 			}
 
@@ -708,7 +636,6 @@ function WorkspaceShellInner() {
 			}
 		},
 		[
-			deletingIds,
 			activeKind,
 			activeAttachmentId,
 			sessions,
@@ -717,11 +644,7 @@ function WorkspaceShellInner() {
 			workspaceName,
 			currentWorkspaceHref,
 			clearSession,
-			clearClosingSession,
-			clearOpeningSession,
 			killSession,
-			markSessionClosing,
-			markSessionCloseSettled,
 			workspaceSessions,
 		],
 	);
@@ -744,17 +667,13 @@ function WorkspaceShellInner() {
 
 	const navigateToPreviousTab = useCallback(() => {
 		if (!isCurrentLayoutInstance()) return;
-		const liveSessions = sessions.filter(
-			(s) => !deletingIds.has(s.attachment_id),
-		);
-		if (liveSessions.length === 0) return;
-		const activeIndex = liveSessions.findIndex(
+		if (sessions.length === 0) return;
+		const activeIndex = sessions.findIndex(
 			(s) => s.type === activeKind && s.attachment_id === activeAttachmentId,
 		);
 		if (activeIndex === -1) return;
-		const prevIndex =
-			activeIndex === 0 ? liveSessions.length - 1 : activeIndex - 1;
-		const prev = liveSessions[prevIndex];
+		const prevIndex = activeIndex === 0 ? sessions.length - 1 : activeIndex - 1;
+		const prev = sessions[prevIndex];
 		navigate(
 			workspaceSessionHref({
 				project,
@@ -765,7 +684,6 @@ function WorkspaceShellInner() {
 		);
 	}, [
 		sessions,
-		deletingIds,
 		activeKind,
 		activeAttachmentId,
 		navigate,
@@ -776,17 +694,13 @@ function WorkspaceShellInner() {
 
 	const navigateToNextTab = useCallback(() => {
 		if (!isCurrentLayoutInstance()) return;
-		const liveSessions = sessions.filter(
-			(s) => !deletingIds.has(s.attachment_id),
-		);
-		if (liveSessions.length === 0) return;
-		const activeIndex = liveSessions.findIndex(
+		if (sessions.length === 0) return;
+		const activeIndex = sessions.findIndex(
 			(s) => s.type === activeKind && s.attachment_id === activeAttachmentId,
 		);
 		if (activeIndex === -1) return;
-		const nextIndex =
-			activeIndex === liveSessions.length - 1 ? 0 : activeIndex + 1;
-		const next = liveSessions[nextIndex];
+		const nextIndex = activeIndex === sessions.length - 1 ? 0 : activeIndex + 1;
+		const next = sessions[nextIndex];
 		navigate(
 			workspaceSessionHref({
 				project,
@@ -797,7 +711,6 @@ function WorkspaceShellInner() {
 		);
 	}, [
 		sessions,
-		deletingIds,
 		activeKind,
 		activeAttachmentId,
 		navigate,
@@ -1009,7 +922,6 @@ function WorkspaceShellInner() {
 										activeKind === session.type &&
 										activeAttachmentId === session.attachment_id
 									}
-									isDeleting={deletingIds.has(session.attachment_id)}
 									onClose={() => closeTab(session)}
 									workspaceName={workspaceName}
 									project={project}
@@ -1059,14 +971,12 @@ function WorkspaceShellInner() {
 function WorkspaceTab({
 	session,
 	isActive,
-	isDeleting,
 	onClose,
 	workspaceName,
 	project,
 }: {
 	session: DisplayWorkspaceSession;
 	isActive: boolean;
-	isDeleting: boolean;
 	onClose: () => void;
 	workspaceName: string;
 	project: string;
@@ -1088,7 +998,6 @@ function WorkspaceTab({
 			aria-selected={isActive}
 			tabIndex={0}
 			onClick={() => {
-				if (isDeleting) return;
 				navigate(
 					workspaceSessionHref({
 						project,
@@ -1102,7 +1011,6 @@ function WorkspaceTab({
 				if (event.key !== "Enter" && event.key !== " ") {
 					return;
 				}
-				if (isDeleting) return;
 				event.preventDefault();
 				navigate(
 					workspaceSessionHref({
@@ -1123,11 +1031,7 @@ function WorkspaceTab({
 			<span className={`max-w-36 truncate ${session.preview ? "italic" : ""}`}>
 				{label}
 			</span>
-			{isDeleting ? (
-				<span className="p-0.5">
-					<Loader className="text-error" />
-				</span>
-			) : session.type === "file" && fileState.saving ? (
+			{session.type === "file" && fileState.saving ? (
 				<span className="p-0.5">
 					<Loader className="text-accent" />
 				</span>

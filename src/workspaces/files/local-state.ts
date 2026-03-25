@@ -16,6 +16,11 @@ export interface WorkspaceLocalFileState {
 	sessionStates: Record<string, FileTabState>;
 }
 
+export interface WorkspaceLocalSessionSnapshot {
+	session: DisplayWorkspaceSession;
+	state: FileTabState;
+}
+
 export const defaultFileTabState: FileTabState = {
 	conflicted: false,
 	dirty: false,
@@ -139,6 +144,57 @@ export function clearWorkspaceLocalSession(
 			if (hasSessionState) {
 				nextSessionStates = { ...previousWorkspaceState.sessionStates };
 				delete nextSessionStates[attachmentId];
+			}
+
+			return {
+				sessions: nextSessions,
+				sessionStates: nextSessionStates,
+			};
+		},
+	);
+}
+
+export function restoreWorkspaceLocalSession(
+	stateByWorkspace: Record<string, WorkspaceLocalFileState>,
+	workspace: string | null | undefined,
+	snapshot: WorkspaceLocalSessionSnapshot,
+): Record<string, WorkspaceLocalFileState> {
+	return updateWorkspaceLocalFileState(
+		stateByWorkspace,
+		workspace,
+		(previousWorkspaceState) => {
+			const existingIndex = previousWorkspaceState.sessions.findIndex(
+				(session) => session.attachment_id === snapshot.session.attachment_id,
+			);
+
+			let nextSessions = previousWorkspaceState.sessions;
+			if (existingIndex === -1) {
+				nextSessions = [...previousWorkspaceState.sessions, snapshot.session];
+			} else if (
+				previousWorkspaceState.sessions[existingIndex] !== snapshot.session
+			) {
+				nextSessions = [...previousWorkspaceState.sessions];
+				nextSessions[existingIndex] = snapshot.session;
+			}
+
+			const previousState =
+				previousWorkspaceState.sessionStates[snapshot.session.attachment_id];
+			const stateUnchanged =
+				previousState?.conflicted === snapshot.state.conflicted &&
+				previousState?.dirty === snapshot.state.dirty &&
+				previousState?.saving === snapshot.state.saving;
+			const nextSessionStates = stateUnchanged
+				? previousWorkspaceState.sessionStates
+				: {
+						...previousWorkspaceState.sessionStates,
+						[snapshot.session.attachment_id]: snapshot.state,
+					};
+
+			if (
+				nextSessions === previousWorkspaceState.sessions &&
+				nextSessionStates === previousWorkspaceState.sessionStates
+			) {
+				return previousWorkspaceState;
 			}
 
 			return {

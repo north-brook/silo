@@ -28,16 +28,19 @@ import {
 	defaultFileTabState,
 	type FileTabState,
 	getWorkspaceLocalFileState,
+	restoreWorkspaceLocalSession,
 	updateWorkspaceLocalFileState,
 	updateWorkspaceLocalSessionStates,
 	updateWorkspaceLocalSessions,
 	type WorkspaceLocalFileState,
+	type WorkspaceLocalSessionSnapshot,
 } from "@/workspaces/files/local-state";
 import { useWorkspaceSessions, useWorkspaceState } from "@/workspaces/state";
 
 export type {
 	DisplayWorkspaceSession,
 	FileTabState,
+	WorkspaceLocalSessionSnapshot,
 } from "@/workspaces/files/local-state";
 
 interface OpenFileTabOptions {
@@ -75,6 +78,7 @@ interface FileSessionsContextValue {
 			| ((previous: FileTabState) => Partial<FileTabState>),
 	) => void;
 	clearSession: (attachmentId: string) => void;
+	restoreSession: (snapshot: WorkspaceLocalSessionSnapshot) => void;
 }
 
 const FileSessionsContext = createContext<FileSessionsContextValue | null>(
@@ -224,6 +228,15 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 			);
 		},
 		[clearPendingPersistentOpen, workspaceName],
+	);
+
+	const restoreSession = useCallback(
+		(snapshot: WorkspaceLocalSessionSnapshot) => {
+			setWorkspaceLocalFileStates((previous) =>
+				restoreWorkspaceLocalSession(previous, workspaceName, snapshot),
+			);
+		},
+		[workspaceName],
 	);
 
 	const resolveSession = useCallback<
@@ -602,6 +615,7 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 			resolveSession,
 			setSessionState,
 			clearSession,
+			restoreSession,
 		}),
 		[
 			clearSession,
@@ -609,6 +623,7 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 			openFileTab,
 			promotePreviewTab,
 			resolveSession,
+			restoreSession,
 			sessionStates,
 			setSessionState,
 			watchedFilesByPath,
