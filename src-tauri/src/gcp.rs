@@ -19,12 +19,17 @@ const OSLOGIN_API_BASE: &str = "https://oslogin.googleapis.com/v1";
 const OSLOGIN_API_BASE_BETA: &str = "https://oslogin.googleapis.com/v1beta";
 const SSH_KEY_TTL_SECS: i64 = 600;
 const ACCESS_TOKEN_REFRESH_MARGIN_SECS: i64 = 60;
+const OSLOGIN_IMPORT_RETRY_ATTEMPTS: usize = 4;
+const OSLOGIN_IMPORT_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(250);
+const OSLOGIN_KEY_REFRESH_MARGIN: Duration = Duration::from_secs(60);
+const OSLOGIN_PROPAGATION_WAIT: Duration = Duration::from_secs(5);
 const DEFAULT_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 
 static CLIENT: OnceLock<Client> = OnceLock::new();
 static ACCESS_TOKENS: OnceLock<Mutex<HashMap<String, CachedAccessToken>>> = OnceLock::new();
 static OSLOGIN_USERNAMES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 static OSLOGIN_GATES: OnceLock<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> = OnceLock::new();
+static OSLOGIN_SSH_KEYS: OnceLock<Mutex<HashMap<String, CachedOsLoginSshKey>>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub(crate) struct InstanceEndpoint {
@@ -42,6 +47,13 @@ pub(crate) struct OsLoginSession {
 struct CachedAccessToken {
     value: String,
     refresh_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct CachedOsLoginSshKey {
+    username: String,
+    key_path: PathBuf,
+    import_valid_until: Instant,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -79,6 +91,10 @@ fn oslogin_usernames() -> &'static Mutex<HashMap<String, String>> {
 
 fn oslogin_gates() -> &'static Mutex<HashMap<String, Arc<AsyncMutex<()>>>> {
     OSLOGIN_GATES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn oslogin_ssh_keys() -> &'static Mutex<HashMap<String, CachedOsLoginSshKey>> {
+    OSLOGIN_SSH_KEYS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn ensure_private_dir(path: &Path) -> Result<(), String> {
@@ -287,6 +303,10 @@ fn oslogin_username_cache_key(project: &str, account: &str) -> String {
     format!("{project}:{account}")
 }
 
+fn oslogin_ssh_key_cache_key(project: &str, zone: &str, workspace: &str, account: &str) -> String {
+    format!("{project}:{zone}:{workspace}:{account}")
+}
+
 fn oslogin_gate(project: &str, account: &str) -> Result<Arc<AsyncMutex<()>>, String> {
     let key = oslogin_username_cache_key(project, account);
     let mut guard = oslogin_gates()
@@ -317,8 +337,81 @@ fn store_oslogin_username(project: &str, account: &str, username: &str) -> Resul
     Ok(())
 }
 
+fn cached_oslogin_ssh_key(
+    project: &str,
+    zone: &str,
+    workspace: &str,
+    account: &str,
+) -> Result<Option<OsLoginSession>, String> {
+    let cache_key = oslogin_ssh_key_cache_key(project, zone, workspace, account);
+    let mut guard = oslogin_ssh_keys()
+        .lock()
+        .map_err(|_| "OS Login SSH key cache lock poisoned".to_string())?;
+    let Some(cached) = guard.get(&cache_key).cloned() else {
+        return Ok(None);
+    };
+    if Instant::now() + OSLOGIN_KEY_REFRESH_MARGIN >= cached.import_valid_until
+        || !cached.key_path.exists()
+    {
+        guard.remove(&cache_key);
+        return Ok(None);
+    }
+
+    Ok(Some(OsLoginSession {
+        username: cached.username,
+        key_path: cached.key_path,
+    }))
+}
+
+fn store_oslogin_ssh_key(
+    project: &str,
+    zone: &str,
+    workspace: &str,
+    account: &str,
+    username: &str,
+    key_path: &Path,
+    import_valid_until: Instant,
+) -> Result<(), String> {
+    oslogin_ssh_keys()
+        .lock()
+        .map_err(|_| "OS Login SSH key cache lock poisoned".to_string())?
+        .insert(
+            oslogin_ssh_key_cache_key(project, zone, workspace, account),
+            CachedOsLoginSshKey {
+                username: username.to_string(),
+                key_path: key_path.to_path_buf(),
+                import_valid_until,
+            },
+        );
+    Ok(())
+}
+
+#[cfg(test)]
+fn clear_oslogin_ssh_key(
+    project: &str,
+    zone: &str,
+    workspace: &str,
+    account: &str,
+) -> Result<(), String> {
+    oslogin_ssh_keys()
+        .lock()
+        .map_err(|_| "OS Login SSH key cache lock poisoned".to_string())?
+        .remove(&oslogin_ssh_key_cache_key(
+            project, zone, workspace, account,
+        ));
+    Ok(())
+}
+
 fn is_already_exists_error(error: &str) -> bool {
     error.contains("status 409") || error.contains("ALREADY_EXISTS")
+}
+
+fn is_retryable_oslogin_import_error(error: &str) -> bool {
+    error.contains("ABORTED") || error.contains("Multiple concurrent mutations were attempted")
+}
+
+fn oslogin_import_retry_delay(attempt: usize) -> Duration {
+    Duration::from_millis(OSLOGIN_IMPORT_RETRY_INITIAL_DELAY.as_millis() as u64 * (1u64 << attempt))
 }
 
 fn metadata_map_to_items(map: &Map<String, Value>) -> Vec<Value> {
@@ -396,6 +489,14 @@ pub(crate) fn ssh_control_path(
 
 pub(crate) fn ssh_key_path(project: &str, zone: &str, workspace: &str) -> Result<PathBuf, String> {
     Ok(runtime_ssh_dir()?.join(format!("key-{}", ssh_slug(project, zone, workspace))))
+}
+
+fn ssh_public_key_path(key_path: &Path) -> Result<PathBuf, String> {
+    let filename = key_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("invalid ssh key path: {}", key_path.display()))?;
+    Ok(key_path.with_file_name(format!("{filename}.pub")))
 }
 
 pub(crate) async fn list_instances(project: &str) -> Result<Vec<Value>, String> {
@@ -690,25 +791,26 @@ pub(crate) async fn ensure_runtime_oslogin_ready(project: &str) -> Result<String
     }
 }
 
-pub(crate) async fn prepare_oslogin_session(
-    project: &str,
-    zone: &str,
-    workspace: &str,
-) -> Result<OsLoginSession, String> {
-    let (service_account, _key_file) = runtime_identity()?;
-    let key_path = ssh_key_path(project, zone, workspace)?;
-    let key_path_string = key_path.to_string_lossy().into_owned();
-    let public_key_path = format!("{key_path_string}.pub");
-    let parent = key_path
-        .parent()
-        .ok_or_else(|| format!("invalid ssh key path: {}", key_path.display()))?;
-    ensure_private_dir(parent)?;
-    if key_path.exists() {
-        let _ = fs::remove_file(&key_path);
+async fn sleep_for(duration: Duration, context: &str) -> Result<(), String> {
+    async_runtime::spawn_blocking(move || std::thread::sleep(duration))
+        .await
+        .map_err(|error| format!("{context}: {error}"))?;
+    Ok(())
+}
+
+async fn ensure_workspace_ssh_keypair(key_path: &Path) -> Result<PathBuf, String> {
+    let public_key_path = ssh_public_key_path(key_path)?;
+    if key_path.exists() && public_key_path.exists() {
+        return Ok(public_key_path);
     }
-    if Path::new(&public_key_path).exists() {
+    if key_path.exists() {
+        let _ = fs::remove_file(key_path);
+    }
+    if public_key_path.exists() {
         let _ = fs::remove_file(&public_key_path);
     }
+
+    let key_path_string = key_path.to_string_lossy().into_owned();
     async_runtime::spawn_blocking(move || {
         let status = std::process::Command::new("ssh-keygen")
             .args(["-q", "-t", "ed25519", "-N", "", "-f", &key_path_string])
@@ -722,22 +824,116 @@ pub(crate) async fn prepare_oslogin_session(
     })
     .await
     .map_err(|error| format!("ssh-keygen task failed: {error}"))??;
-    let public_key = async_runtime::spawn_blocking({
-        let public_key_path = public_key_path.clone();
-        move || fs::read_to_string(&public_key_path)
-    })
-    .await
-    .map_err(|error| format!("public key read task failed: {error}"))?
-    .map_err(|error| format!("failed to read generated public key: {error}"))?;
+
+    Ok(public_key_path)
+}
+
+async fn read_public_key(public_key_path: &Path) -> Result<String, String> {
+    let public_key_path = public_key_path.to_path_buf();
+    async_runtime::spawn_blocking(move || fs::read_to_string(&public_key_path))
+        .await
+        .map_err(|error| format!("public key read task failed: {error}"))?
+        .map_err(|error| format!("failed to read generated public key: {error}"))
+}
+
+async fn import_oslogin_key_with_retry(
+    project: &str,
+    account: &str,
+    public_key: &str,
+) -> Result<(Option<String>, usize), String> {
+    for attempt in 0..OSLOGIN_IMPORT_RETRY_ATTEMPTS {
+        match import_oslogin_key(project, account, public_key).await {
+            Ok(username) => return Ok((username, attempt)),
+            Err(error)
+                if attempt + 1 < OSLOGIN_IMPORT_RETRY_ATTEMPTS
+                    && is_retryable_oslogin_import_error(&error) =>
+            {
+                let delay = oslogin_import_retry_delay(attempt);
+                log::warn!(
+                    "retrying OS Login SSH key import project={} account={} attempt={}/{} delay_ms={} error={}",
+                    project,
+                    account,
+                    attempt + 1,
+                    OSLOGIN_IMPORT_RETRY_ATTEMPTS,
+                    delay.as_millis(),
+                    error
+                );
+                sleep_for(delay, "OS Login import retry wait failed").await?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err("OS Login SSH key import retry loop exhausted".to_string())
+}
+
+pub(crate) async fn prepare_oslogin_session(
+    project: &str,
+    zone: &str,
+    workspace: &str,
+) -> Result<OsLoginSession, String> {
+    let (service_account, _key_file) = runtime_identity()?;
+    let key_path = ssh_key_path(project, zone, workspace)?;
+    let parent = key_path
+        .parent()
+        .ok_or_else(|| format!("invalid ssh key path: {}", key_path.display()))?;
+    ensure_private_dir(parent)?;
+    if let Some(session) = cached_oslogin_ssh_key(project, zone, workspace, &service_account)? {
+        log::debug!(
+            "reusing cached OS Login SSH key project={} zone={} workspace={}",
+            project,
+            zone,
+            workspace
+        );
+        return Ok(session);
+    }
+
+    let public_key_path = ensure_workspace_ssh_keypair(&key_path).await?;
+    let public_key = read_public_key(&public_key_path).await?;
     let gate = oslogin_gate(project, &service_account)?;
     let _guard = gate.lock().await;
-    let username = match import_oslogin_key(project, &service_account, public_key.trim()).await? {
+    if let Some(session) = cached_oslogin_ssh_key(project, zone, workspace, &service_account)? {
+        log::debug!(
+            "reusing cached OS Login SSH key after gate project={} zone={} workspace={}",
+            project,
+            zone,
+            workspace
+        );
+        return Ok(session);
+    }
+
+    log::info!(
+        "refreshing OS Login SSH key lease project={} zone={} workspace={}",
+        project,
+        zone,
+        workspace
+    );
+    let (imported_username, retries) =
+        import_oslogin_key_with_retry(project, &service_account, public_key.trim()).await?;
+    let username = match imported_username {
         Some(username) => username,
         None => provision_oslogin_posix_account(project, &service_account).await?,
     };
-    async_runtime::spawn_blocking(|| std::thread::sleep(std::time::Duration::from_secs(5)))
-        .await
-        .map_err(|error| format!("OS Login propagation wait failed: {error}"))?;
+    if retries > 0 {
+        log::info!(
+            "OS Login SSH key import succeeded after retries project={} zone={} workspace={} retries={}",
+            project,
+            zone,
+            workspace,
+            retries
+        );
+    }
+    sleep_for(OSLOGIN_PROPAGATION_WAIT, "OS Login propagation wait failed").await?;
+    store_oslogin_ssh_key(
+        project,
+        zone,
+        workspace,
+        &service_account,
+        &username,
+        &key_path,
+        Instant::now() + Duration::from_secs(SSH_KEY_TTL_SECS as u64),
+    )?;
+
     Ok(OsLoginSession { username, key_path })
 }
 
@@ -780,5 +976,119 @@ mod tests {
         assert!(is_already_exists_error("status 409 Conflict"));
         assert!(is_already_exists_error("reason: ALREADY_EXISTS"));
         assert!(!is_already_exists_error("status 403 Forbidden"));
+    }
+
+    #[test]
+    fn retryable_oslogin_import_error_matches_aborted_conflicts() {
+        assert!(is_retryable_oslogin_import_error(
+            "failed to import OS Login SSH public key: status 409 Conflict: ABORTED"
+        ));
+        assert!(is_retryable_oslogin_import_error(
+            "Multiple concurrent mutations were attempted. Please retry the request."
+        ));
+        assert!(!is_retryable_oslogin_import_error(
+            "failed to import OS Login SSH public key: status 403 Forbidden"
+        ));
+    }
+
+    #[test]
+    fn oslogin_import_retry_delay_exponential_backoff() {
+        assert_eq!(oslogin_import_retry_delay(0), Duration::from_millis(250));
+        assert_eq!(oslogin_import_retry_delay(1), Duration::from_millis(500));
+        assert_eq!(oslogin_import_retry_delay(2), Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn cached_oslogin_ssh_key_reuses_valid_lease() {
+        let unique = format!(
+            "silo-gcp-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let key_path = std::env::temp_dir().join(format!("{unique}.key"));
+        fs::write(&key_path, "test-key").unwrap();
+
+        store_oslogin_ssh_key(
+            "project",
+            "zone",
+            &unique,
+            "account",
+            "svc_user",
+            &key_path,
+            Instant::now() + OSLOGIN_KEY_REFRESH_MARGIN + Duration::from_secs(5),
+        )
+        .unwrap();
+
+        let session = cached_oslogin_ssh_key("project", "zone", &unique, "account")
+            .unwrap()
+            .expect("lease should be reusable");
+        assert_eq!(session.username, "svc_user");
+        assert_eq!(session.key_path, key_path);
+
+        clear_oslogin_ssh_key("project", "zone", &unique, "account").unwrap();
+        let _ = fs::remove_file(&key_path);
+    }
+
+    #[test]
+    fn cached_oslogin_ssh_key_expires_with_refresh_margin() {
+        let unique = format!(
+            "silo-gcp-expiring-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let key_path = std::env::temp_dir().join(format!("{unique}.key"));
+        fs::write(&key_path, "test-key").unwrap();
+
+        store_oslogin_ssh_key(
+            "project",
+            "zone",
+            &unique,
+            "account",
+            "svc_user",
+            &key_path,
+            Instant::now() + Duration::from_secs(30),
+        )
+        .unwrap();
+
+        assert!(
+            cached_oslogin_ssh_key("project", "zone", &unique, "account")
+                .unwrap()
+                .is_none()
+        );
+
+        let _ = fs::remove_file(&key_path);
+    }
+
+    #[test]
+    fn cached_oslogin_ssh_key_drops_missing_key_path() {
+        let unique = format!(
+            "silo-gcp-missing-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let key_path = std::env::temp_dir().join(format!("{unique}.key"));
+
+        store_oslogin_ssh_key(
+            "project",
+            "zone",
+            &unique,
+            "account",
+            "svc_user",
+            &key_path,
+            Instant::now() + OSLOGIN_KEY_REFRESH_MARGIN + Duration::from_secs(5),
+        )
+        .unwrap();
+
+        assert!(
+            cached_oslogin_ssh_key("project", "zone", &unique, "account")
+                .unwrap()
+                .is_none()
+        );
     }
 }
