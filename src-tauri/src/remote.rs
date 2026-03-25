@@ -222,6 +222,10 @@ fn start_master_connection(session: &SshSession) -> Result<(), String> {
     }
 }
 
+fn is_ssh_publickey_error(error: &str) -> bool {
+    error.contains("Permission denied (publickey)")
+}
+
 fn control_master_alive(session: &SshSession) -> bool {
     if !session.control_path.exists() {
         return false;
@@ -236,6 +240,40 @@ fn control_master_alive(session: &SshSession) -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+async fn build_ssh_session(lookup: &WorkspaceLookup) -> Result<SshSession, String> {
+    let endpoint = gcp::instance_endpoint(
+        &lookup.gcloud_project,
+        lookup.workspace.zone(),
+        lookup.workspace.name(),
+    )
+    .await?;
+    let login = gcp::prepare_oslogin_session(
+        &lookup.gcloud_project,
+        &endpoint.zone,
+        lookup.workspace.name(),
+    )
+    .await?;
+    let session = SshSession {
+        username: login.username,
+        host: endpoint.host,
+        key_path: login.key_path,
+        known_hosts_path: gcp::ssh_known_hosts_path()?,
+        control_path: gcp::ssh_control_path(
+            &lookup.gcloud_project,
+            lookup.workspace.zone(),
+            lookup.workspace.name(),
+        )?,
+        expires_at: Instant::now() + Duration::from_secs(600),
+    };
+    tauri::async_runtime::spawn_blocking({
+        let session = session.clone();
+        move || start_master_connection(&session)
+    })
+    .await
+    .map_err(|error| format!("ssh control master task failed: {error}"))??;
+    Ok(session)
 }
 
 async fn ensure_ssh_session(lookup: &WorkspaceLookup) -> Result<SshSession, String> {
@@ -255,40 +293,32 @@ async fn ensure_ssh_session(lookup: &WorkspaceLookup) -> Result<SshSession, Stri
         return Err(error);
     }
 
-    let result: Result<SshSession, String> = async {
-        let endpoint = gcp::instance_endpoint(
-            &lookup.gcloud_project,
-            lookup.workspace.zone(),
-            lookup.workspace.name(),
-        )
-        .await?;
-        let login = gcp::prepare_oslogin_session(
-            &lookup.gcloud_project,
-            &endpoint.zone,
-            lookup.workspace.name(),
-        )
-        .await?;
-        let session = SshSession {
-            username: login.username,
-            host: endpoint.host,
-            key_path: login.key_path,
-            known_hosts_path: gcp::ssh_known_hosts_path()?,
-            control_path: gcp::ssh_control_path(
+    let mut result = build_ssh_session(lookup).await;
+    if let Err(error) = &result {
+        if is_ssh_publickey_error(error) {
+            match gcp::invalidate_cached_oslogin_ssh_key(
                 &lookup.gcloud_project,
                 lookup.workspace.zone(),
                 lookup.workspace.name(),
-            )?,
-            expires_at: Instant::now() + Duration::from_secs(600),
-        };
-        tauri::async_runtime::spawn_blocking({
-            let session = session.clone();
-            move || start_master_connection(&session)
-        })
-        .await
-        .map_err(|error| format!("ssh control master task failed: {error}"))??;
-        Ok(session)
+            ) {
+                Ok(invalidated) => {
+                    log::warn!(
+                        "ssh publickey auth failed while establishing session workspace={} invalidated_cached_oslogin_key={} retrying=true",
+                        lookup.workspace.name(),
+                        invalidated
+                    );
+                    result = build_ssh_session(lookup).await;
+                }
+                Err(invalidate_error) => {
+                    log::warn!(
+                        "ssh publickey auth failed while establishing session workspace={} but cached OS Login key invalidation failed: {}",
+                        lookup.workspace.name(),
+                        invalidate_error
+                    );
+                }
+            }
+        }
     }
-    .await;
 
     match result {
         Ok(session) => {
@@ -644,5 +674,15 @@ mod tests {
 
         assert_eq!(cached_session_failure(key).unwrap(), None);
         assert!(ssh_session_failures().lock().unwrap().get(key).is_none());
+    }
+
+    #[test]
+    fn ssh_publickey_error_matches_auth_failures() {
+        assert!(is_ssh_publickey_error(
+            "failed to start ssh control master: user@host: Permission denied (publickey)."
+        ));
+        assert!(!is_ssh_publickey_error(
+            "failed to start ssh control master: user@host: Connection timed out"
+        ));
     }
 }

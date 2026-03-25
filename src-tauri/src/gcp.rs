@@ -386,20 +386,28 @@ fn store_oslogin_ssh_key(
     Ok(())
 }
 
-#[cfg(test)]
 fn clear_oslogin_ssh_key(
     project: &str,
     zone: &str,
     workspace: &str,
     account: &str,
-) -> Result<(), String> {
-    oslogin_ssh_keys()
+) -> Result<bool, String> {
+    Ok(oslogin_ssh_keys()
         .lock()
         .map_err(|_| "OS Login SSH key cache lock poisoned".to_string())?
         .remove(&oslogin_ssh_key_cache_key(
             project, zone, workspace, account,
-        ));
-    Ok(())
+        ))
+        .is_some())
+}
+
+pub(crate) fn invalidate_cached_oslogin_ssh_key(
+    project: &str,
+    zone: &str,
+    workspace: &str,
+) -> Result<bool, String> {
+    let (service_account, _key_file) = runtime_identity()?;
+    clear_oslogin_ssh_key(project, zone, workspace, &service_account)
 }
 
 fn is_already_exists_error(error: &str) -> bool {
@@ -1090,5 +1098,38 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn clear_oslogin_ssh_key_removes_cached_lease() {
+        let unique = format!(
+            "silo-gcp-clear-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let key_path = std::env::temp_dir().join(format!("{unique}.key"));
+        fs::write(&key_path, "test-key").unwrap();
+
+        store_oslogin_ssh_key(
+            "project",
+            "zone",
+            &unique,
+            "account",
+            "svc_user",
+            &key_path,
+            Instant::now() + OSLOGIN_KEY_REFRESH_MARGIN + Duration::from_secs(5),
+        )
+        .unwrap();
+
+        assert!(clear_oslogin_ssh_key("project", "zone", &unique, "account").unwrap());
+        assert!(
+            cached_oslogin_ssh_key("project", "zone", &unique, "account")
+                .unwrap()
+                .is_none()
+        );
+
+        let _ = fs::remove_file(&key_path);
     }
 }
