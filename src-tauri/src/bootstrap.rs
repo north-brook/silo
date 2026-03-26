@@ -37,7 +37,7 @@ pub(crate) const REMOTE_WORKSPACE_AGENT_FINGERPRINT_FILE: &str =
 const REMOTE_WORKSPACE_AGENT_SHELL_FILE: &str = "/home/silo/.silo/workspace-agent-shell.sh";
 const WORKSPACE_AGENT_RELEASE_ROLLOUT_STATE_FILE_NAME: &str =
     "workspace-agent-release-rollout.json";
-const WORKSPACE_BOOTSTRAP_VERSION: &str = "17";
+const WORKSPACE_BOOTSTRAP_VERSION: &str = "18";
 const STARTUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 const INSTANCE_RUNNING_POLL_ATTEMPTS: usize = 180;
 const SSH_READY_POLL_ATTEMPTS: usize = 120;
@@ -1045,16 +1045,10 @@ fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBoo
             git_fetch_target_branch = git_fetch_target_branch,
         )
     } else {
-        format!(
-            "if [ ! -d \"$WORKSPACE_DIR/.git\" ]; then\n  rm -rf \"$WORKSPACE_DIR\"\n  {git_clone_target_branch}\nfi\n\
-git -C \"$WORKSPACE_DIR\" remote set-url origin \"$REMOTE_URL\"\n\
-{git_fetch_target_branch}\n\
-git -C \"$WORKSPACE_DIR\" checkout \"$TARGET_BRANCH\"\n\
-{git_pull_target_branch}\n\
-if git -C \"$WORKSPACE_DIR\" show-ref --verify --quiet \"refs/heads/$WORKSPACE_BRANCH\"; then\n  git -C \"$WORKSPACE_DIR\" checkout \"$WORKSPACE_BRANCH\"\nelse\n  git -C \"$WORKSPACE_DIR\" checkout -b \"$WORKSPACE_BRANCH\" \"$TARGET_BRANCH\"\nfi",
-            git_clone_target_branch = git_clone_target_branch,
-            git_fetch_target_branch = git_fetch_target_branch,
-            git_pull_target_branch = git_pull_target_branch,
+        branch_workspace_setup_script(
+            &git_clone_target_branch,
+            &git_fetch_target_branch,
+            &git_pull_target_branch,
         )
     };
 
@@ -1184,6 +1178,36 @@ bootstrap_log 'step=completed'\n",
         cli_update = cli_update,
         agent_install = agent_install,
         state_write = workspace_bootstrap_state_write_script(),
+    )
+}
+
+fn branch_workspace_setup_script(
+    git_clone_target_branch: &str,
+    git_fetch_target_branch: &str,
+    git_pull_target_branch: &str,
+) -> String {
+    format!(
+        "if [ ! -d \"$WORKSPACE_DIR/.git\" ]; then\n  rm -rf \"$WORKSPACE_DIR\"\n  {git_clone_target_branch}\nfi\n\
+git -C \"$WORKSPACE_DIR\" remote set-url origin \"$REMOTE_URL\"\n\
+CURRENT_BRANCH=\"$(git -C \"$WORKSPACE_DIR\" symbolic-ref --quiet --short HEAD 2>/dev/null || printf '')\"\n\
+WORKTREE_DIRTY=0\n\
+if [ -n \"$(git -C \"$WORKSPACE_DIR\" status --porcelain --untracked-files=normal 2>/dev/null || printf '')\" ]; then\n\
+  WORKTREE_DIRTY=1\n\
+fi\n\
+if git -C \"$WORKSPACE_DIR\" show-ref --verify --quiet \"refs/heads/$WORKSPACE_BRANCH\"; then\n\
+  bootstrap_log \"workspace_branch_present branch=$WORKSPACE_BRANCH current_branch=${{CURRENT_BRANCH:-detached}}; skipping_target_sync\"\n\
+elif [ \"$CURRENT_BRANCH\" != \"$TARGET_BRANCH\" ]; then\n\
+  bootstrap_log \"workspace_branch_missing current_branch=${{CURRENT_BRANCH:-detached}} target_branch=$TARGET_BRANCH; skipping_target_sync\"\n\
+elif [ \"$WORKTREE_DIRTY\" -ne 0 ]; then\n\
+  bootstrap_log \"workspace_branch_missing current_branch=$CURRENT_BRANCH dirty_worktree=1; skipping_target_sync\"\n\
+else\n\
+  {git_fetch_target_branch}\n\
+  {git_pull_target_branch}\n\
+  git -C \"$WORKSPACE_DIR\" checkout -b \"$WORKSPACE_BRANCH\" \"$TARGET_BRANCH\"\n\
+fi",
+        git_clone_target_branch = git_clone_target_branch,
+        git_fetch_target_branch = git_fetch_target_branch,
+        git_pull_target_branch = git_pull_target_branch,
     )
 }
 
@@ -1724,6 +1748,36 @@ mod tests {
         assert!(script.contains("git -C \"$WORKSPACE_DIR\" lfs pull"));
         assert!(script.contains("GIT_ASKPASS=\"$ASKPASS_PATH\""));
         assert!(script.contains("git_lfs_unavailable"));
+    }
+
+    #[test]
+    fn branch_workspace_setup_script_skips_target_checkout_for_existing_branches() {
+        let script = branch_workspace_setup_script(
+            "git clone --branch \"$TARGET_BRANCH\" \"$REMOTE_URL\" \"$WORKSPACE_DIR\"",
+            "git -C \"$WORKSPACE_DIR\" fetch origin \"$TARGET_BRANCH\"",
+            "git -C \"$WORKSPACE_DIR\" pull --ff-only origin \"$TARGET_BRANCH\"",
+        );
+
+        assert!(script.contains(
+            "git -C \"$WORKSPACE_DIR\" show-ref --verify --quiet \"refs/heads/$WORKSPACE_BRANCH\""
+        ));
+        assert!(script.contains("workspace_branch_present branch=$WORKSPACE_BRANCH"));
+        assert!(!script.contains("git -C \"$WORKSPACE_DIR\" checkout \"$TARGET_BRANCH\""));
+    }
+
+    #[test]
+    fn branch_workspace_setup_script_only_syncs_clean_target_branch_worktrees() {
+        let script = branch_workspace_setup_script(
+            "git clone --branch \"$TARGET_BRANCH\" \"$REMOTE_URL\" \"$WORKSPACE_DIR\"",
+            "git -C \"$WORKSPACE_DIR\" fetch origin \"$TARGET_BRANCH\"",
+            "git -C \"$WORKSPACE_DIR\" pull --ff-only origin \"$TARGET_BRANCH\"",
+        );
+
+        assert!(script.contains("CURRENT_BRANCH=\"$(git -C \"$WORKSPACE_DIR\" symbolic-ref --quiet --short HEAD"));
+        assert!(script.contains("status --porcelain --untracked-files=normal"));
+        assert!(script.contains("elif [ \"$CURRENT_BRANCH\" != \"$TARGET_BRANCH\" ]; then"));
+        assert!(script.contains("elif [ \"$WORKTREE_DIRTY\" -ne 0 ]; then"));
+        assert!(script.contains("git -C \"$WORKSPACE_DIR\" checkout -b \"$WORKSPACE_BRANCH\" \"$TARGET_BRANCH\""));
     }
 
     #[test]
