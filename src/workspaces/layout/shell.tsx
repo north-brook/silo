@@ -533,7 +533,10 @@ function WorkspaceShellInner() {
 							workspace: workspaceName,
 							attachmentId: session.attachment_id,
 						}),
-		onMutate: (session) => {
+		onMutate: async (session) => {
+			await queryClient.cancelQueries({
+				queryKey: ["workspaces_get_workspace", workspaceName],
+			});
 			const previousWorkspace = queryClient.getQueryData<Workspace | null>([
 				"workspaces_get_workspace",
 				workspaceName,

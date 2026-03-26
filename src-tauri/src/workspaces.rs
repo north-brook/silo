@@ -805,7 +805,11 @@ pub async fn workspaces_get_workspace(
     workspace: String,
 ) -> Result<Workspace, String> {
     log::trace!("getting workspace {workspace}");
-    let lookup = hydrate_workspace_lookup(find_workspace(&workspace).await?).await;
+    // Hydrate from the raw lookup first, then apply local overlays once. Applying
+    // session removal overlays before hydration can drop a close tombstone while
+    // instance metadata still lags the runtime snapshot, which lets a just-closed
+    // tab flash back into the workspace query result.
+    let lookup = hydrate_workspace_lookup(find_workspace_raw(&workspace).await?).await;
     // Reapply local overlays after hydration because the runtime snapshot replaces session
     // arrays with agent state, which can temporarily lag local optimistic session updates.
     let workspace = state.apply_workspace_state(lookup.workspace);
@@ -903,7 +907,7 @@ fn prompt_command_for_model(model: &str, prompt: &str) -> Result<String, String>
     }
 }
 
-pub(crate) async fn find_workspace(name: &str) -> Result<WorkspaceLookup, String> {
+async fn find_workspace_raw(name: &str) -> Result<WorkspaceLookup, String> {
     let config = ConfigStore::new()
         .and_then(|store| store.load())
         .map_err(|error| error.to_string())?;
@@ -928,17 +932,19 @@ pub(crate) async fn find_workspace(name: &str) -> Result<WorkspaceLookup, String
 
     match matches.len() {
         0 => Err(format!("workspace not found: {name}")),
-        1 => {
-            let mut lookup = matches.remove(0);
-            if let Some(manager) = crate::state::current_workspace_metadata_manager() {
-                lookup.workspace = manager.apply_workspace_state(lookup.workspace);
-            }
-            Ok(lookup)
-        }
+        1 => Ok(matches.remove(0)),
         _ => Err(format!(
             "workspace {name} is ambiguous across multiple gcloud projects"
         )),
     }
+}
+
+pub(crate) async fn find_workspace(name: &str) -> Result<WorkspaceLookup, String> {
+    let mut lookup = find_workspace_raw(name).await?;
+    if let Some(manager) = crate::state::current_workspace_metadata_manager() {
+        lookup.workspace = manager.apply_workspace_state(lookup.workspace);
+    }
+    Ok(lookup)
 }
 
 async fn update_workspace_metadata_in_lookup(
