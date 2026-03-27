@@ -3,7 +3,7 @@ import {
 	ArrowUpFromLine,
 	ExternalLink,
 	GitMerge,
-	GitPullRequestClosed,
+	GitMergeConflict,
 	GitPullRequestCreateArrow,
 	PanelRight,
 	X,
@@ -232,11 +232,10 @@ export function GitSidebarHeader() {
 	const checksKnown = prSummary?.checks != null;
 	const checksRunning = prSummary?.checks?.has_pending ?? false;
 	const checksFailing = prSummary?.checks?.has_failing ?? false;
-	const mergeColor =
-		!checksKnown || checksRunning
+	const mergeColor = checksFailing
+		? "bg-yellow-600 text-white hover:bg-yellow-500"
+		: !checksKnown || checksRunning
 			? "bg-btn text-text hover:bg-btn-hover"
-			: checksFailing
-				? "bg-yellow-600 text-white hover:bg-yellow-500"
 				: "bg-green-600 text-white hover:bg-green-500";
 
 	const handleMerge = () => {
@@ -386,7 +385,7 @@ export function GitSidebarHeader() {
 								{resolveConflicts.isPending ? (
 									<Loader className="text-white" />
 								) : (
-									<GitPullRequestClosed size={10} />
+									<GitMergeConflict size={10} />
 								)}
 								Resolve conflicts
 							</button>

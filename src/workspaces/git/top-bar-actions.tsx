@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	ArrowUpFromLine,
 	GitMerge,
-	GitPullRequestClosed,
+	GitMergeConflict,
 	GitPullRequestCreateArrow,
 	X,
 } from "lucide-react";
@@ -229,12 +229,11 @@ export function GitTopBarActions() {
 	const checksKnown = prSummary?.checks != null;
 	const checksRunning = prSummary?.checks?.has_pending ?? false;
 	const checksFailing = prSummary?.checks?.has_failing ?? false;
-	const mergeColor =
-		!checksKnown || checksRunning
+	const mergeColor = checksFailing
+		? "bg-yellow-600 text-white hover:bg-yellow-500"
+		: !checksKnown || checksRunning
 			? "bg-btn text-text hover:bg-btn-hover"
-			: checksFailing
-				? "bg-yellow-600 text-white hover:bg-yellow-500"
-				: "bg-green-600 text-white hover:bg-green-500";
+			: "bg-green-600 text-white hover:bg-green-500";
 
 	const handleMerge = () => {
 		if (!checksKnown || checksRunning || checksFailing) {
@@ -396,12 +395,12 @@ export function GitTopBarActions() {
 								type="button"
 								disabled={resolveConflicts.isPending}
 								onClick={() => resolveConflicts.mutate()}
-								className="flex items-center gap-1.5 px-2.5 py-1 rounded text-sm font-medium bg-red-600 text-white hover:bg-red-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+								className="flex items-center gap-1.5 px-2.5 py-1 rounded text-sm font-medium bg-orange-600 text-white hover:bg-orange-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
 							>
 								{resolveConflicts.isPending ? (
 									<Loader className="text-white" />
 								) : (
-									<GitPullRequestClosed size={10} />
+									<GitMergeConflict size={10} />
 								)}
 								Resolve conflicts
 							</button>

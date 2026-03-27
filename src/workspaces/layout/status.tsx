@@ -3,7 +3,7 @@ import {
 	GitBranch,
 	GitMerge,
 	GitPullRequest,
-	GitPullRequestClosed,
+	GitMergeConflict,
 } from "lucide-react";
 import { Loader } from "@/shared/ui/loader";
 import type { WorkspaceLifecycle } from "@/workspaces/api";
@@ -68,7 +68,7 @@ export function WorkspaceIndicator({
 			workspace.prSummary?.status === "merged"
 				? GitMerge
 				: workspace.prSummary?.mergeability === "conflicting"
-					? GitPullRequestClosed
+					? GitMergeConflict
 					: workspace.prSummary?.status === "open"
 						? GitPullRequest
 						: GitBranch;
@@ -83,7 +83,7 @@ export function WorkspaceIndicator({
 		// Priority: failing > dirty > pending > passing > default
 		if (workspace.prSummary.mergeability === "conflicting") {
 			return (
-				<GitPullRequestClosed size={12} className="shrink-0 text-red-400" />
+				<GitMergeConflict size={12} className="shrink-0 text-red-400" />
 			);
 		}
 
