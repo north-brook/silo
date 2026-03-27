@@ -79,3 +79,47 @@ When finished, print the PR URL and a concise summary of the commits, validation
         target_branch = target_branch,
     )
 }
+
+pub(crate) fn git_resolve_conflicts_prompt(branch: &str, target_branch: &str) -> String {
+    format!(
+        r#"You are operating inside the workspace repository on branch "{branch}" targeting "{target_branch}".
+
+Your goal is to resolve the pull request's merge conflicts so the branch can be merged cleanly.
+
+Start by understanding the current state:
+- Inspect git status, staged changes, unstaged changes, and recent commits.
+- Review the diff against the target branch.
+- Check whether there is already an in-progress merge or other interrupted Git operation before starting new work.
+
+Prepare local work safely:
+- If there are intended local changes that are not committed yet, organize them into logical commits before resolving conflicts.
+- Stage all intended changes with `git add -A`, excluding secrets, credentials, tokens, .env files, large binaries, build artifacts, or generated files that should remain untracked.
+- Match the repository's existing commit message style.
+
+Resolve the branch conflict:
+- Fetch the latest target branch from origin.
+- Merge `origin/{target_branch}` into the current branch. Prefer a merge-based repair for this flow; do not rebase or rewrite published history.
+- If conflicts occur, resolve them carefully by understanding both sides of each change. Preserve important behavior from both branches whenever possible.
+- Use file history, surrounding code, tests, and documentation to make informed resolutions instead of picking sides mechanically.
+- Remove all conflict markers and make sure Git reports no unresolved paths before continuing.
+- If the branch already merges cleanly, say so clearly instead of inventing extra work.
+
+Validation:
+- Run focused validation for the affected areas after resolving conflicts.
+- If validation fails, fix the underlying issue before pushing when reasonable.
+
+Push and PR hygiene:
+- Push the updated branch to origin without force pushing or force-with-lease.
+- Review the existing pull request title and body. Update them if the conflict-resolution work changes reviewer expectations, testing notes, or rollout risks.
+
+Constraints:
+- Do not merge the pull request.
+- Do not use rebase, force push, or force-with-lease.
+- Do not discard user work to make the conflict disappear.
+- If you hit a blocker you cannot safely resolve, stop and explain exactly what remains conflicted and why.
+
+When finished, print a concise summary of the conflicts you resolved, any commits you created, the validation you ran, what you pushed, and any PR updates you made."#,
+        branch = branch,
+        target_branch = target_branch,
+    )
+}

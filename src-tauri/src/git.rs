@@ -38,6 +38,7 @@ struct PullRequestSummary {
     head_ref_oid: String,
     status: String,
     updated_at: Option<String>,
+    mergeability: Option<PullRequestMergeability>,
     url: String,
     title: String,
     body: String,
@@ -165,6 +166,14 @@ pub enum CheckState {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestMergeability {
+    Mergeable,
+    Conflicting,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PullRequestChecksSummary {
     total: usize,
@@ -186,6 +195,8 @@ pub struct PullRequestStatusSummary {
     number: u64,
     url: String,
     head_ref_oid: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mergeability: Option<PullRequestMergeability>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     checks: Option<PullRequestChecksSummary>,
 }
@@ -503,6 +514,7 @@ pub async fn git_pr_summary(workspace: String) -> Result<Option<PullRequestStatu
         number: pr.number,
         url: pr.url,
         head_ref_oid: pr.head_ref_oid,
+        mergeability: pr.mergeability,
         checks,
     }))
 }
@@ -571,9 +583,10 @@ pub async fn git_merge_pr(workspace: String) -> Result<(), String> {
     log::info!("merging PR for workspace {workspace}");
     let context = branch_workspace_context(&workspace).await?;
     let branch = current_workspace_branch(&context).await?;
-    let pr = find_open_pull_request(&context)
+    let pr = find_open_pull_request_live(&context)
         .await?
         .ok_or_else(|| format!("no open pull request found for branch {}", branch))?;
+    ensure_pull_request_can_merge(&pr)?;
 
     let command = format!(
         "gh pr merge {} --merge --match-head-commit {}",
@@ -586,6 +599,34 @@ pub async fn git_merge_pr(workspace: String) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn git_resolve_conflicts(
+    state: State<'_, TerminalManager>,
+    workspace_state: State<'_, WorkspaceMetadataManager>,
+    workspace: String,
+) -> Result<GitTerminalResult, String> {
+    log::info!("resolving PR conflicts for workspace {workspace}");
+    let context = branch_workspace_context(&workspace).await?;
+    let branch = current_workspace_branch(&context).await?;
+    let pr = find_open_pull_request_live(&context)
+        .await?
+        .ok_or_else(|| format!("no open pull request found for branch {}", branch))?;
+    ensure_pull_request_needs_conflict_resolution(&pr)?;
+    clear_pull_request_caches_for_workspace(&context);
+
+    let prompt = prompts::git_resolve_conflicts_prompt(&branch, &context.target_branch);
+    let command = terminal::codex_prompt_command(&prompt);
+    let attachment_id = terminal::start_terminal_command(
+        state.inner(),
+        workspace_state.inner(),
+        &workspace,
+        &command,
+    )
+    .await?;
+
+    Ok(GitTerminalResult { attachment_id })
 }
 
 #[tauri::command]
@@ -1202,6 +1243,22 @@ async fn find_open_pull_request(
     Ok(pull_request)
 }
 
+async fn find_open_pull_request_live(
+    context: &BranchWorkspaceContext,
+) -> Result<Option<PullRequestSummary>, String> {
+    let branch = current_workspace_branch(context).await?;
+    let cache_key = current_pull_request_cache_key(context, &branch);
+    let pull_request = find_current_pull_request(context, &branch)
+        .await?
+        .filter(|pull_request| pull_request.status == "open");
+    if let Some(pull_request) = pull_request.as_ref() {
+        cache_current_pull_request(cache_key, pull_request.clone());
+    } else {
+        clear_current_pull_request_cache(&cache_key);
+    }
+    Ok(pull_request)
+}
+
 async fn find_pull_request(
     context: &BranchWorkspaceContext,
 ) -> Result<Option<PullRequestSummary>, String> {
@@ -1235,7 +1292,7 @@ async fn find_current_pull_request(
     context: &BranchWorkspaceContext,
     branch: &str,
 ) -> Result<Option<PullRequestSummary>, String> {
-    let command = "gh pr view --json number,headRefName,baseRefName,headRefOid,state,mergedAt,updatedAt,url,title,body";
+    let command = "gh pr view --json number,headRefName,baseRefName,headRefOid,state,mergeable,mergeStateStatus,mergedAt,updatedAt,url,title,body";
     let result = run_workspace_command(context, command).await?;
     if !result.success {
         if is_missing_pull_request_error(&result.stderr) {
@@ -1522,6 +1579,30 @@ else\n\
 fi"
 }
 
+fn ensure_pull_request_can_merge(pr: &PullRequestSummary) -> Result<(), String> {
+    match pr.mergeability {
+        Some(PullRequestMergeability::Mergeable) => Ok(()),
+        Some(PullRequestMergeability::Conflicting) => {
+            Err("pull request has merge conflicts; resolve conflicts before merging".to_string())
+        }
+        Some(PullRequestMergeability::Unknown) | None => {
+            Err("pull request mergeability is still loading; try again in a moment".to_string())
+        }
+    }
+}
+
+fn ensure_pull_request_needs_conflict_resolution(pr: &PullRequestSummary) -> Result<(), String> {
+    match pr.mergeability {
+        Some(PullRequestMergeability::Conflicting) => Ok(()),
+        Some(PullRequestMergeability::Mergeable) => {
+            Err("pull request no longer has merge conflicts".to_string())
+        }
+        Some(PullRequestMergeability::Unknown) | None => {
+            Err("pull request mergeability is still loading; try again in a moment".to_string())
+        }
+    }
+}
+
 fn trim_branch_input(value: &str, field: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -1773,6 +1854,7 @@ fn parse_pull_requests(
                 .ok_or_else(|| "pull request was missing headRefOid".to_string())?,
             status,
             updated_at: string_field(item, "updatedAt"),
+            mergeability: None,
             url: string_field(item, "url")
                 .ok_or_else(|| "pull request was missing url".to_string())?,
             title: string_field(item, "title")
@@ -1832,6 +1914,7 @@ fn parse_pull_request_view(
             .ok_or_else(|| "pull request was missing headRefOid".to_string())?,
         status,
         updated_at: string_field(&value, "updatedAt"),
+        mergeability: parse_pull_request_mergeability(&value),
         url: string_field(&value, "url")
             .ok_or_else(|| "pull request was missing url".to_string())?,
         title: string_field(&value, "title")
@@ -1850,6 +1933,25 @@ fn pull_request_status_rank(status: &str) -> u8 {
         "merged" => 2,
         "closed" => 1,
         _ => 0,
+    }
+}
+
+fn parse_pull_request_mergeability(value: &Value) -> Option<PullRequestMergeability> {
+    let merge_state_status =
+        string_field(value, "mergeStateStatus").map(|value| value.trim().to_ascii_lowercase());
+    if merge_state_status.as_deref() == Some("dirty") {
+        return Some(PullRequestMergeability::Conflicting);
+    }
+
+    match string_field(value, "mergeable")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("mergeable") => Some(PullRequestMergeability::Mergeable),
+        Some("conflicting") => Some(PullRequestMergeability::Conflicting),
+        Some("unknown") => Some(PullRequestMergeability::Unknown),
+        Some(_) => Some(PullRequestMergeability::Unknown),
+        None => None,
     }
 }
 
@@ -2152,6 +2254,7 @@ mod tests {
             head_ref_oid: format!("head-{number}"),
             status: "merged".to_string(),
             updated_at: Some("2026-03-23T12:00:00Z".to_string()),
+            mergeability: None,
             url: format!("https://github.com/example/repo/pull/{number}"),
             title: format!("PR {number}"),
             body: format!("body {number}"),
@@ -2366,6 +2469,7 @@ index 1111111..2222222 100644\n\
         assert_eq!(pr.number, 16);
         assert_eq!(pr.head_ref_oid, "fedcba");
         assert_eq!(pr.status, "open");
+        assert_eq!(pr.mergeability, None);
         assert_eq!(pr.url, "https://github.com/example/repo/pull/16");
         assert_eq!(pr.title, "Active PR");
         assert_eq!(pr.body, "body 16");
@@ -2407,8 +2511,80 @@ index 1111111..2222222 100644\n\
             .expect("matching pull request should exist");
         assert_eq!(pr.number, 22);
         assert_eq!(pr.status, "merged");
+        assert_eq!(pr.mergeability, None);
         assert_eq!(pr.title, "Merged PR");
         assert_eq!(pr.body, "merged body");
+    }
+
+    #[test]
+    fn parse_pull_request_view_marks_conflicting_pull_requests() {
+        let stdout = r#"
+{
+  "number": 31,
+  "headRefName": "feature/a",
+  "baseRefName": "main",
+  "headRefOid": "abc123",
+  "state": "OPEN",
+  "mergeable": "CONFLICTING",
+  "mergeStateStatus": "DIRTY",
+  "mergedAt": null,
+  "updatedAt": "2026-03-12T10:00:00Z",
+  "url": "https://github.com/example/repo/pull/31",
+  "title": "Conflicted PR",
+  "body": "body"
+}
+"#;
+
+        let pr = parse_pull_request_view(stdout, "feature/a", "main")
+            .expect("pull request should parse")
+            .expect("matching pull request should exist");
+        assert_eq!(pr.mergeability, Some(PullRequestMergeability::Conflicting));
+    }
+
+    #[test]
+    fn parse_pull_request_view_marks_unknown_mergeability() {
+        let stdout = r#"
+{
+  "number": 32,
+  "headRefName": "feature/a",
+  "baseRefName": "main",
+  "headRefOid": "def456",
+  "state": "OPEN",
+  "mergeable": "UNKNOWN",
+  "mergeStateStatus": "UNKNOWN",
+  "mergedAt": null,
+  "updatedAt": "2026-03-12T10:00:00Z",
+  "url": "https://github.com/example/repo/pull/32",
+  "title": "Pending PR",
+  "body": "body"
+}
+"#;
+
+        let pr = parse_pull_request_view(stdout, "feature/a", "main")
+            .expect("pull request should parse")
+            .expect("matching pull request should exist");
+        assert_eq!(pr.mergeability, Some(PullRequestMergeability::Unknown));
+    }
+
+    #[test]
+    fn merge_guard_rejects_conflicting_pull_requests() {
+        let mut pr = test_pull_request_summary(91);
+        pr.status = "open".to_string();
+        pr.mergeability = Some(PullRequestMergeability::Conflicting);
+
+        let error = ensure_pull_request_can_merge(&pr).expect_err("merge should be blocked");
+        assert!(error.contains("merge conflicts"));
+    }
+
+    #[test]
+    fn resolve_conflicts_guard_requires_conflicting_pull_request() {
+        let mut pr = test_pull_request_summary(92);
+        pr.status = "open".to_string();
+        pr.mergeability = Some(PullRequestMergeability::Mergeable);
+
+        let error = ensure_pull_request_needs_conflict_resolution(&pr)
+            .expect_err("resolve conflicts should be blocked");
+        assert!(error.contains("no longer has merge conflicts"));
     }
 
     #[test]
