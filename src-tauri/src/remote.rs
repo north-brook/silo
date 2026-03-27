@@ -5,7 +5,7 @@ use base64::Engine;
 use portable_pty::CommandBuilder;
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -226,6 +226,62 @@ fn is_ssh_publickey_error(error: &str) -> bool {
     error.contains("Permission denied (publickey)")
 }
 
+fn is_ssh_host_key_mismatch_error(error: &str) -> bool {
+    error.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
+        || error.contains("Host key verification failed")
+}
+
+fn known_host_entry_matches_host(line: &str, host: &str) -> bool {
+    let Some(hosts) = line.split_whitespace().next() else {
+        return false;
+    };
+    if hosts.starts_with('#') {
+        return false;
+    }
+    let port_host = format!("[{host}]:22");
+    hosts
+        .split(',')
+        .any(|candidate| candidate == host || candidate == port_host)
+}
+
+fn remove_known_host_entry(path: &Path, host: &str) -> Result<bool, String> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "failed to read ssh known hosts file {}: {error}",
+                path.display()
+            ));
+        }
+    };
+
+    let mut removed = false;
+    let mut retained = Vec::new();
+    for line in contents.lines() {
+        if known_host_entry_matches_host(line, host) {
+            removed = true;
+            continue;
+        }
+        retained.push(line);
+    }
+    if !removed {
+        return Ok(false);
+    }
+
+    let mut updated = retained.join("\n");
+    if !updated.is_empty() {
+        updated.push('\n');
+    }
+    std::fs::write(path, updated).map_err(|error| {
+        format!(
+            "failed to update ssh known hosts file {}: {error}",
+            path.display()
+        )
+    })?;
+    Ok(true)
+}
+
 fn control_master_alive(session: &SshSession) -> bool {
     if !session.control_path.exists() {
         return false;
@@ -276,6 +332,21 @@ async fn build_ssh_session(lookup: &WorkspaceLookup) -> Result<SshSession, Strin
     Ok(session)
 }
 
+async fn invalidate_cached_workspace_host_key(lookup: &WorkspaceLookup) -> Result<bool, String> {
+    let endpoint = gcp::instance_endpoint(
+        &lookup.gcloud_project,
+        lookup.workspace.zone(),
+        lookup.workspace.name(),
+    )
+    .await?;
+    let known_hosts_path = gcp::ssh_known_hosts_path()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        remove_known_host_entry(&known_hosts_path, &endpoint.host)
+    })
+    .await
+    .map_err(|error| format!("ssh known hosts cleanup task failed: {error}"))?
+}
+
 async fn ensure_ssh_session(lookup: &WorkspaceLookup) -> Result<SshSession, String> {
     let cache_key = session_key(lookup);
     let gate = session_gate(&cache_key)?;
@@ -312,6 +383,24 @@ async fn ensure_ssh_session(lookup: &WorkspaceLookup) -> Result<SshSession, Stri
                 Err(invalidate_error) => {
                     log::warn!(
                         "ssh publickey auth failed while establishing session workspace={} but cached OS Login key invalidation failed: {}",
+                        lookup.workspace.name(),
+                        invalidate_error
+                    );
+                }
+            }
+        } else if is_ssh_host_key_mismatch_error(error) {
+            match invalidate_cached_workspace_host_key(lookup).await {
+                Ok(invalidated) => {
+                    log::warn!(
+                        "ssh host key mismatch while establishing session workspace={} invalidated_cached_host_key={} retrying=true",
+                        lookup.workspace.name(),
+                        invalidated
+                    );
+                    result = build_ssh_session(lookup).await;
+                }
+                Err(invalidate_error) => {
+                    log::warn!(
+                        "ssh host key mismatch while establishing session workspace={} but known hosts invalidation failed: {}",
                         lookup.workspace.name(),
                         invalidate_error
                     );
@@ -684,5 +773,39 @@ mod tests {
         assert!(!is_ssh_publickey_error(
             "failed to start ssh control master: user@host: Connection timed out"
         ));
+    }
+
+    #[test]
+    fn ssh_host_key_mismatch_error_matches_changed_host_failures() {
+        assert!(is_ssh_host_key_mismatch_error(
+            "failed to start ssh control master: @@@@@@@@@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@@@@@@@@@"
+        ));
+        assert!(is_ssh_host_key_mismatch_error(
+            "failed to start ssh control master: Host key verification failed."
+        ));
+        assert!(!is_ssh_host_key_mismatch_error(
+            "failed to start ssh control master: ssh: connect to host 1.2.3.4 port 22: Connection timed out"
+        ));
+    }
+
+    #[test]
+    fn remove_known_host_entry_removes_matching_host_lines() {
+        let path = std::env::temp_dir().join(format!("known-hosts-{}", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            "\
+35.245.191.100 ssh-ed25519 old-a
+136.107.138.114 ssh-ed25519 old-b
+[136.107.138.114]:22 ssh-ed25519 old-c
+",
+        )
+        .unwrap();
+
+        let removed = remove_known_host_entry(&path, "136.107.138.114").unwrap();
+        let updated = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(removed);
+        assert_eq!(updated, "35.245.191.100 ssh-ed25519 old-a\n");
     }
 }
