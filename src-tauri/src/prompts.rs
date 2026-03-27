@@ -16,7 +16,9 @@ Committing:
 - Write commit messages in imperative mood ("Add search endpoint", not "Added search endpoint"). The subject line should complete the sentence "This commit will ___".
 - Keep the subject line under 72 characters. If more context is needed, add a blank line followed by a body that explains *why* the change was made, not *what* changed (the diff shows that).
 - Look at the recent commit history to match the style and conventions of the repository.
-- Run focused validation (tests, linting, type checking) when appropriate and mention what you ran in your final summary.
+- Run only fast, local validation when appropriate and mention what you ran in your final summary.
+- Prefer quick signal such as type checking, linting, build/compile checks, or targeted unit tests that usually finish quickly.
+- Do not run slow or broad validation like e2e suites, browser tests, smoke tests, or full integration test suites unless the user explicitly asked for them or there is no faster way to verify a risky change. Defer that coverage to GitHub Actions/CI.
 
 Push the branch to origin without force pushing.
 
@@ -55,7 +57,9 @@ Committing:
 - Write commit messages in imperative mood ("Add search endpoint", not "Added search endpoint"). The subject line should complete the sentence "This commit will ___".
 - Keep the subject line under 72 characters. If more context is needed, add a blank line followed by a body that explains *why* the change was made.
 - Look at the recent commit history to match the style and conventions of the repository.
-- Run focused validation (tests, linting, type checking) when appropriate and include results in your final summary.
+- Run only fast, local validation when appropriate and include results in your final summary.
+- Prefer quick signal such as type checking, linting, build/compile checks, or targeted unit tests that usually finish quickly.
+- Do not run slow or broad validation like e2e suites, browser tests, smoke tests, or full integration test suites unless the user explicitly asked for them or there is no faster way to verify a risky change. Defer that coverage to GitHub Actions/CI.
 
 Safety:
 - Before staging files, review what you are about to commit. Do not commit secrets, credentials, API keys, tokens, .env files, or other sensitive material. Do not commit large binaries, build artifacts, or generated files that should be in .gitignore.
@@ -105,7 +109,9 @@ Resolve the branch conflict:
 - If the branch already merges cleanly, say so clearly instead of inventing extra work.
 
 Validation:
-- Run focused validation for the affected areas after resolving conflicts.
+- Run only fast, local validation for the affected areas after resolving conflicts.
+- Prefer quick signal such as type checking, linting, build/compile checks, or targeted unit tests that usually finish quickly.
+- Do not run slow or broad validation like e2e suites, browser tests, smoke tests, or full integration test suites unless the user explicitly asked for them or there is no faster way to verify a risky change. Defer that coverage to GitHub Actions/CI.
 - If validation fails, fix the underlying issue before pushing when reasonable.
 
 Push and PR hygiene:
