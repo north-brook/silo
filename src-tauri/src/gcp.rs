@@ -46,7 +46,7 @@ pub(crate) struct OsLoginSession {
 #[derive(Debug, Clone)]
 struct CachedAccessToken {
     value: String,
-    refresh_at: Instant,
+    refresh_at: time::OffsetDateTime,
 }
 
 #[derive(Debug, Clone)]
@@ -144,7 +144,7 @@ async fn access_token() -> Result<String, String> {
         .map_err(|_| "access token cache lock poisoned".to_string())?
         .get(&key_file)
         .cloned()
-        .filter(|cached| Instant::now() < cached.refresh_at)
+        .filter(|cached| cached_access_token_is_fresh(cached, time::OffsetDateTime::now_utc()))
     {
         return Ok(cached.value);
     }
@@ -201,13 +201,7 @@ async fn access_token() -> Result<String, String> {
         .await
         .map_err(|error| format!("invalid token response: {error}"))?;
     let bearer = format!("Bearer {}", token.access_token);
-    let refresh_at = Instant::now()
-        + Duration::from_secs(
-            (token.expires_in - ACCESS_TOKEN_REFRESH_MARGIN_SECS)
-                .max(30)
-                .try_into()
-                .unwrap_or(30),
-        );
+    let refresh_at = access_token_refresh_at(time::OffsetDateTime::now_utc(), token.expires_in);
     access_tokens()
         .lock()
         .map_err(|_| "access token cache lock poisoned".to_string())?
@@ -226,33 +220,130 @@ async fn authorized(builder: RequestBuilder) -> Result<RequestBuilder, String> {
     Ok(builder.header("Authorization", token))
 }
 
-async fn send_json(builder: RequestBuilder, context: &str) -> Result<Value, String> {
-    let response = builder
+fn cached_access_token_is_fresh(cached: &CachedAccessToken, now: time::OffsetDateTime) -> bool {
+    now < cached.refresh_at
+}
+
+fn access_token_refresh_at(
+    now: time::OffsetDateTime,
+    expires_in_secs: i64,
+) -> time::OffsetDateTime {
+    let usable_secs = expires_in_secs.saturating_sub(ACCESS_TOKEN_REFRESH_MARGIN_SECS);
+    now + time::Duration::seconds(usable_secs.max(0))
+}
+
+fn invalidate_cached_access_token(key_file: &str) -> Result<bool, String> {
+    Ok(access_tokens()
+        .lock()
+        .map_err(|_| "access token cache lock poisoned".to_string())?
+        .remove(key_file)
+        .is_some())
+}
+
+fn is_expired_access_token_response(status: reqwest::StatusCode, body: &str) -> bool {
+    if status != reqwest::StatusCode::UNAUTHORIZED {
+        return false;
+    }
+    if body.contains("ACCESS_TOKEN_EXPIRED") || body.contains("invalid_token") {
+        return true;
+    }
+
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    let error = value.get("error").unwrap_or(&value);
+    if error.get("status").and_then(Value::as_str) != Some("UNAUTHENTICATED") {
+        return false;
+    }
+
+    if error
+        .get("message")
+        .and_then(Value::as_str)
+        .is_some_and(|message| {
+            message.contains("Invalid Credentials")
+                || message.contains("invalid authentication credentials")
+        })
+    {
+        return true;
+    }
+
+    error
+        .get("details")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|detail| {
+            detail.get("reason").and_then(Value::as_str) == Some("ACCESS_TOKEN_EXPIRED")
+                || detail
+                    .get("errorInfo")
+                    .and_then(|info| info.get("reason"))
+                    .and_then(Value::as_str)
+                    == Some("ACCESS_TOKEN_EXPIRED")
+        })
+}
+
+async fn execute_with_auth_retry(
+    builder: RequestBuilder,
+    context: &str,
+) -> Result<reqwest::Response, String> {
+    let retry_builder = builder.try_clone();
+    let response = authorized(builder)
+        .await
+        .map_err(|error| format!("{context}: {error}"))?
         .send()
         .await
         .map_err(|error| format!("{context}: request failed: {error}"))?;
     if response.status().is_success() {
-        return response
-            .json::<Value>()
-            .await
-            .map_err(|error| format!("{context}: invalid response json: {error}"));
+        return Ok(response);
     }
+
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
+    if is_expired_access_token_response(status, &body) {
+        let (_service_account, key_file) =
+            runtime_identity().map_err(|error| format!("{context}: {error}"))?;
+        let _ = invalidate_cached_access_token(&key_file)
+            .map_err(|error| format!("{context}: {error}"))?;
+        if let Some(retry_builder) = retry_builder {
+            log::warn!(
+                "expired GCP access token detected; invalidating cache and retrying request once context={}",
+                context
+            );
+            let retry_response = authorized(retry_builder)
+                .await
+                .map_err(|error| format!("{context}: {error}"))?
+                .send()
+                .await
+                .map_err(|error| {
+                    format!("{context}: request failed after auth refresh: {error}")
+                })?;
+            if retry_response.status().is_success() {
+                return Ok(retry_response);
+            }
+            let retry_status = retry_response.status();
+            let retry_body = retry_response.text().await.unwrap_or_default();
+            return Err(format!("{context}: status {retry_status}: {retry_body}"));
+        }
+        log::warn!(
+            "expired GCP access token detected; invalidated cache but could not retry unclonable request context={}",
+            context
+        );
+    }
+
     Err(format!("{context}: status {status}: {body}"))
 }
 
-async fn send_empty(builder: RequestBuilder, context: &str) -> Result<(), String> {
-    let response = builder
-        .send()
+async fn send_json(builder: RequestBuilder, context: &str) -> Result<Value, String> {
+    let response = execute_with_auth_retry(builder, context).await?;
+    response
+        .json::<Value>()
         .await
-        .map_err(|error| format!("{context}: request failed: {error}"))?;
-    if response.status().is_success() {
-        return Ok(());
-    }
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    Err(format!("{context}: status {status}: {body}"))
+        .map_err(|error| format!("{context}: invalid response json: {error}"))
+}
+
+async fn send_empty(builder: RequestBuilder, context: &str) -> Result<(), String> {
+    execute_with_auth_retry(builder, context).await?;
+    Ok(())
 }
 
 fn metadata_items_to_map(value: Option<&Value>) -> Map<String, Value> {
@@ -512,8 +603,8 @@ pub(crate) async fn list_instances(project: &str) -> Result<Vec<Value>, String> 
     let mut instances = Vec::new();
     loop {
         let url = format!("{COMPUTE_API_BASE}/projects/{project}/aggregated/instances");
-        let mut request = authorized(client().request(Method::GET, &url))
-            .await?
+        let mut request = client()
+            .request(Method::GET, &url)
             .query(&[(
                 "fields",
                 "items/*/instances(name,zone,status,labels,metadata,creationTimestamp,networkInterfaces,disks),nextPageToken",
@@ -544,12 +635,10 @@ pub(crate) async fn list_instances(project: &str) -> Result<Vec<Value>, String> 
 
 pub(crate) async fn get_instance(project: &str, zone: &str, name: &str) -> Result<Value, String> {
     let url = format!("{COMPUTE_API_BASE}/projects/{project}/zones/{zone}/instances/{name}");
-    let request = authorized(client().request(Method::GET, &url))
-        .await?
-        .query(&[(
-            "fields",
-            "name,zone,status,labels,metadata,creationTimestamp,networkInterfaces,disks",
-        )]);
+    let request = client().request(Method::GET, &url).query(&[(
+        "fields",
+        "name,zone,status,labels,metadata,creationTimestamp,networkInterfaces,disks",
+    )]);
     send_json(request, "failed to describe workspace").await
 }
 
@@ -576,13 +665,13 @@ pub(crate) async fn post_instance_action(
 ) -> Result<(), String> {
     let url =
         format!("{COMPUTE_API_BASE}/projects/{project}/zones/{zone}/instances/{name}/{action}");
-    let request = authorized(client().request(Method::POST, &url)).await?;
+    let request = client().request(Method::POST, &url);
     send_empty(request, context).await
 }
 
 pub(crate) async fn delete_instance(project: &str, zone: &str, name: &str) -> Result<(), String> {
     let url = format!("{COMPUTE_API_BASE}/projects/{project}/zones/{zone}/instances/{name}");
-    let request = authorized(client().request(Method::DELETE, &url)).await?;
+    let request = client().request(Method::DELETE, &url);
     send_empty(request, "failed to delete workspace").await
 }
 
@@ -618,9 +707,7 @@ pub(crate) async fn set_instance_metadata(
     });
     let url =
         format!("{COMPUTE_API_BASE}/projects/{project}/zones/{zone}/instances/{name}/setMetadata");
-    let request = authorized(client().request(Method::POST, &url))
-        .await?
-        .json(&body);
+    let request = client().request(Method::POST, &url).json(&body);
     send_empty(
         request,
         &format!("failed to update metadata for workspace {name}"),
@@ -630,8 +717,8 @@ pub(crate) async fn set_instance_metadata(
 
 pub(crate) async fn get_image_from_family(project: &str, family: &str) -> Result<String, String> {
     let url = format!("{COMPUTE_API_BASE}/projects/{project}/global/images/family/{family}");
-    let request = authorized(client().request(Method::GET, &url))
-        .await?
+    let request = client()
+        .request(Method::GET, &url)
         .query(&[("fields", "selfLink")]);
     let response = send_json(request, "failed to resolve image family").await?;
     response
@@ -643,9 +730,7 @@ pub(crate) async fn get_image_from_family(project: &str, family: &str) -> Result
 
 pub(crate) async fn create_instance(project: &str, zone: &str, body: Value) -> Result<(), String> {
     let url = format!("{COMPUTE_API_BASE}/projects/{project}/zones/{zone}/instances");
-    let request = authorized(client().request(Method::POST, &url))
-        .await?
-        .json(&body);
+    let request = client().request(Method::POST, &url).json(&body);
     send_empty(request, "failed to create workspace").await
 }
 
@@ -654,12 +739,10 @@ pub(crate) async fn list_snapshots(project: &str) -> Result<Vec<Value>, String> 
     let mut snapshots = Vec::new();
     loop {
         let url = format!("{COMPUTE_API_BASE}/projects/{project}/global/snapshots");
-        let mut request = authorized(client().request(Method::GET, &url))
-            .await?
-            .query(&[(
-                "fields",
-                "items(name,status,creationTimestamp,labels,labelFingerprint),nextPageToken",
-            )]);
+        let mut request = client().request(Method::GET, &url).query(&[(
+            "fields",
+            "items(name,status,creationTimestamp,labels,labelFingerprint),nextPageToken",
+        )]);
         if let Some(token) = page_token.as_deref() {
             request = request.query(&[("pageToken", token)]);
         }
@@ -682,26 +765,22 @@ pub(crate) async fn list_snapshots(project: &str) -> Result<Vec<Value>, String> 
 
 pub(crate) async fn get_snapshot(project: &str, name: &str) -> Result<Value, String> {
     let url = format!("{COMPUTE_API_BASE}/projects/{project}/global/snapshots/{name}");
-    let request = authorized(client().request(Method::GET, &url))
-        .await?
-        .query(&[(
-            "fields",
-            "name,status,creationTimestamp,labels,labelFingerprint",
-        )]);
+    let request = client().request(Method::GET, &url).query(&[(
+        "fields",
+        "name,status,creationTimestamp,labels,labelFingerprint",
+    )]);
     send_json(request, "failed to describe template snapshot").await
 }
 
 pub(crate) async fn delete_snapshot(project: &str, name: &str) -> Result<(), String> {
     let url = format!("{COMPUTE_API_BASE}/projects/{project}/global/snapshots/{name}");
-    let request = authorized(client().request(Method::DELETE, &url)).await?;
+    let request = client().request(Method::DELETE, &url);
     send_empty(request, "failed to delete template snapshot").await
 }
 
 pub(crate) async fn create_snapshot(project: &str, body: Value) -> Result<(), String> {
     let url = format!("{COMPUTE_API_BASE}/projects/{project}/global/snapshots");
-    let request = authorized(client().request(Method::POST, &url))
-        .await?
-        .json(&body);
+    let request = client().request(Method::POST, &url).json(&body);
     send_empty(request, "failed to create template snapshot").await
 }
 
@@ -716,9 +795,7 @@ pub(crate) async fn set_snapshot_labels(
         "labels": labels,
         "labelFingerprint": fingerprint,
     });
-    let request = authorized(client().request(Method::POST, &url))
-        .await?
-        .json(&body);
+    let request = client().request(Method::POST, &url).json(&body);
     send_empty(request, "failed to update template snapshot labels").await
 }
 
@@ -729,8 +806,8 @@ pub(crate) async fn import_oslogin_key(
 ) -> Result<Option<String>, String> {
     let expires_at = time::OffsetDateTime::now_utc() + time::Duration::seconds(SSH_KEY_TTL_SECS);
     let url = format!("{OSLOGIN_API_BASE}/users/{account}:importSshPublicKey");
-    let request = authorized(client().request(Method::POST, &url))
-        .await?
+    let request = client()
+        .request(Method::POST, &url)
         .query(&[("projectId", project)])
         .json(&json!({
             "key": public_key,
@@ -752,8 +829,8 @@ pub(crate) async fn get_login_profile_username(
         return Ok(username);
     }
     let url = format!("{OSLOGIN_API_BASE}/users/{account}/loginProfile");
-    let request = authorized(client().request(Method::GET, &url))
-        .await?
+    let request = client()
+        .request(Method::GET, &url)
         .query(&[("projectId", project)]);
     let response = send_json(request, "failed to load OS Login profile").await?;
     let username = oslogin_username(&response)
@@ -770,9 +847,7 @@ pub(crate) async fn provision_oslogin_posix_account(
         return Ok(username);
     }
     let url = format!("{OSLOGIN_API_BASE_BETA}/users/{account}/projects/{project}");
-    let request = authorized(client().request(Method::POST, &url))
-        .await?
-        .json(&json!({}));
+    let request = client().request(Method::POST, &url).json(&json!({}));
     match send_json(request, "failed to provision OS Login POSIX account").await {
         Ok(response) => {
             let username = posix_account_username(&response).ok_or_else(|| {
@@ -1131,5 +1206,93 @@ mod tests {
         );
 
         let _ = fs::remove_file(&key_path);
+    }
+
+    #[test]
+    fn access_token_refresh_at_uses_margin_without_extending_expiry() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+
+        assert_eq!(
+            access_token_refresh_at(now, 3600),
+            now + time::Duration::seconds(3540)
+        );
+        assert_eq!(access_token_refresh_at(now, 60), now);
+        assert_eq!(access_token_refresh_at(now, 30), now);
+        assert_eq!(
+            access_token_refresh_at(now, 61),
+            now + time::Duration::seconds(1)
+        );
+    }
+
+    #[test]
+    fn cached_access_token_turns_stale_at_refresh_deadline() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let cached = CachedAccessToken {
+            value: "Bearer test".to_string(),
+            refresh_at: now,
+        };
+
+        assert!(!cached_access_token_is_fresh(&cached, now));
+        assert!(!cached_access_token_is_fresh(
+            &cached,
+            now + time::Duration::seconds(1)
+        ));
+
+        let fresh = CachedAccessToken {
+            value: "Bearer test".to_string(),
+            refresh_at: now + time::Duration::seconds(1),
+        };
+        assert!(cached_access_token_is_fresh(&fresh, now));
+    }
+
+    #[test]
+    fn invalidate_cached_access_token_removes_cached_bearer() {
+        let key_file = "test-key-file";
+        access_tokens().lock().unwrap().insert(
+            key_file.to_string(),
+            CachedAccessToken {
+                value: "Bearer test".to_string(),
+                refresh_at: time::OffsetDateTime::now_utc() + time::Duration::seconds(60),
+            },
+        );
+
+        assert!(invalidate_cached_access_token(key_file).unwrap());
+        assert!(access_tokens().lock().unwrap().get(key_file).is_none());
+    }
+
+    #[test]
+    fn expired_access_token_response_matches_google_error_info_shape() {
+        let body = json!({
+            "error": {
+                "code": 401,
+                "message": "Request had invalid authentication credentials.",
+                "status": "UNAUTHENTICATED",
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                        "reason": "ACCESS_TOKEN_EXPIRED",
+                        "domain": "googleapis.com"
+                    }
+                ]
+            }
+        })
+        .to_string();
+
+        assert!(is_expired_access_token_response(
+            reqwest::StatusCode::UNAUTHORIZED,
+            &body
+        ));
+    }
+
+    #[test]
+    fn expired_access_token_response_ignores_non_expiry_failures() {
+        assert!(!is_expired_access_token_response(
+            reqwest::StatusCode::FORBIDDEN,
+            "{\"error\":{\"status\":\"PERMISSION_DENIED\"}}"
+        ));
+        assert!(!is_expired_access_token_response(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "{\"error\":{\"status\":\"UNAUTHENTICATED\",\"message\":\"other\"}}"
+        ));
     }
 }
