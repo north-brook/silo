@@ -1441,20 +1441,35 @@ mv {shell_tmp_path} {shell_path}\n",
     script
 }
 
+fn workspace_agent_daemon_pid_discovery_script() -> String {
+    let pidfile = shell_quote(REMOTE_WORKSPACE_AGENT_PIDFILE);
+    let bin_path = shell_quote(REMOTE_WORKSPACE_AGENT_BIN);
+    format!(
+        "AGENT_PIDS=\"\"\n\
+AGENT_BIN={bin_path}\n\
+if [ -f {pidfile} ]; then\n\
+  PID=\"$(cat {pidfile} 2>/dev/null || true)\"\n\
+  if [ -n \"$PID\" ] && kill -0 \"$PID\" 2>/dev/null; then\n\
+    ARGS=\"$(ps -o args= -p \"$PID\" 2>/dev/null || true)\"\n\
+    case \"$ARGS\" in\n\
+      \"$AGENT_BIN daemon\"|\"$AGENT_BIN daemon \"*) AGENT_PIDS=\"$PID\" ;;\n\
+    esac\n\
+  fi\n\
+fi\n\
+EXTRA_AGENT_PIDS=\"$(ps -eo pid=,args= 2>/dev/null | awk -v bin=\"$AGENT_BIN\" '$2 == bin && $3 == \"daemon\" {{ print $1 }}' || true)\"\n\
+if [ -n \"$EXTRA_AGENT_PIDS\" ]; then\n\
+  AGENT_PIDS=\"$AGENT_PIDS\n\
+$EXTRA_AGENT_PIDS\"\n\
+fi\n",
+        bin_path = bin_path,
+        pidfile = pidfile,
+    )
+}
+
 fn workspace_agent_stop_script() -> String {
     let pidfile = shell_quote(REMOTE_WORKSPACE_AGENT_PIDFILE);
     format!(
-        "AGENT_PIDS=\"\"\n\
-if [ -f {pidfile} ]; then\n\
-  AGENT_PIDS=\"$(cat {pidfile} 2>/dev/null || true)\"\n\
-fi\n\
-if command -v pgrep >/dev/null 2>&1; then\n\
-  EXTRA_AGENT_PIDS=\"$(pgrep -x workspace-agent 2>/dev/null || true)\"\n\
-  if [ -n \"$EXTRA_AGENT_PIDS\" ]; then\n\
-    AGENT_PIDS=\"$AGENT_PIDS\n$EXTRA_AGENT_PIDS\"\n\
-  fi\n\
-fi\n\
-for PID in $(printf '%s\\n' \"$AGENT_PIDS\" | awk 'NF' | sort -u); do\n\
+        "{}for PID in $(printf '%s\\n' \"$AGENT_PIDS\" | awk 'NF' | sort -u); do\n\
   if kill -0 \"$PID\" 2>/dev/null; then\n\
     kill \"$PID\" 2>/dev/null || true\n\
     for _ in $(seq 1 50); do\n\
@@ -1469,25 +1484,23 @@ for PID in $(printf '%s\\n' \"$AGENT_PIDS\" | awk 'NF' | sort -u); do\n\
   fi\n\
 done\n\
 rm -f {pidfile}\n",
+        workspace_agent_daemon_pid_discovery_script(),
+        pidfile = pidfile,
     )
 }
 
 fn workspace_agent_running_check_command() -> String {
     let bin_path = shell_quote(REMOTE_WORKSPACE_AGENT_BIN);
-    let pidfile = shell_quote(REMOTE_WORKSPACE_AGENT_PIDFILE);
     format!(
-        "if [ -x {bin_path} ] && [ -f {pidfile} ]; then\n\
-  PID=\"$(cat {pidfile})\"\n\
-  if [ -n \"$PID\" ] && kill -0 \"$PID\" 2>/dev/null; then\n\
-    exit 0\n\
-  fi\n\
+        "if [ ! -x {bin_path} ]; then\n\
+  exit 1\n\
 fi\n\
-if command -v pgrep >/dev/null 2>&1 && pgrep -x workspace-agent >/dev/null 2>&1; then\n\
+{}for PID in $(printf '%s\\n' \"$AGENT_PIDS\" | awk 'NF' | sort -u); do\n\
   exit 0\n\
-fi\n\
+done\n\
 exit 1",
+        workspace_agent_daemon_pid_discovery_script(),
         bin_path = bin_path,
-        pidfile = pidfile,
     )
 }
 
@@ -1907,6 +1920,15 @@ mod tests {
     }
 
     #[test]
+    fn workspace_agent_stop_script_targets_daemon_processes_only() {
+        let script = workspace_agent_stop_script();
+
+        assert!(script.contains("$AGENT_BIN daemon"));
+        assert!(script.contains("$3 == \"daemon\""));
+        assert!(!script.contains("pgrep -x workspace-agent"));
+    }
+
+    #[test]
     fn workspace_agent_install_script_writes_fingerprint_file() {
         let script = workspace_agent_install_script_for_target(
             "demo-silo-alpha",
@@ -1924,7 +1946,8 @@ mod tests {
     fn workspace_agent_running_check_command_stays_small_and_only_checks_state() {
         let command = workspace_agent_running_check_command();
 
-        assert!(command.contains("pgrep -x workspace-agent"));
+        assert!(command.contains("$AGENT_BIN daemon"));
+        assert!(command.contains("ps -eo pid=,args="));
         assert!(command.contains("/home/silo/.silo/workspace-agent/daemon.pid"));
         assert!(!command.contains("EOF_AGENT_BIN"));
         assert!(!command.contains("workspace-agent.new"));
@@ -1945,7 +1968,7 @@ mod tests {
         let command = clear_template_runtime_state_command();
 
         assert!(command.starts_with("set -e\nAGENT_PIDS="));
-        assert!(command.contains("pgrep -x workspace-agent"));
+        assert!(command.contains("$3 == \"daemon\""));
         assert!(command.contains("rm -f '/home/silo/.silo/workspace-agent/daemon.pid'"));
         assert!(command.ends_with("rm -rf \"$HOME/.silo\""));
     }
