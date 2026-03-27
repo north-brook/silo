@@ -282,7 +282,7 @@ pub async fn files_close_session(
     state
         .inner()
         .remove_workspace_session(&workspace, "file", &attachment_id);
-    if let Ok(lookup) = branch_workspace_lookup(&workspace).await {
+    if let Ok(lookup) = branch_workspace_lookup_raw(&workspace).await {
         if let Err(error) = agent_sessions::remove_session(&lookup, "file", &attachment_id).await {
             log::warn!(
                 "failed to remove file session from agent workspace={} attachment_id={}: {}",
@@ -380,6 +380,18 @@ pub(crate) fn browser_renderable_content_type(path: &str) -> Option<&'static str
 
 pub(crate) async fn branch_workspace_lookup(workspace: &str) -> Result<WorkspaceLookup, String> {
     let lookup = workspaces::find_workspace(workspace).await?;
+    validate_branch_workspace_lookup(lookup, workspace)
+}
+
+async fn branch_workspace_lookup_raw(workspace: &str) -> Result<WorkspaceLookup, String> {
+    let lookup = workspaces::find_workspace_raw(workspace).await?;
+    validate_branch_workspace_lookup(lookup, workspace)
+}
+
+fn validate_branch_workspace_lookup(
+    lookup: WorkspaceLookup,
+    workspace: &str,
+) -> Result<WorkspaceLookup, String> {
     if lookup.workspace.is_template() {
         return Err(format!(
             "workspace {} is a template workspace and does not support file editing",

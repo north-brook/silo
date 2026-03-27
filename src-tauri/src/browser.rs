@@ -306,7 +306,7 @@ pub async fn browser_kill_tab(
         &attachment_id,
         None,
     );
-    if let Ok(lookup) = workspaces::find_workspace(&workspace).await {
+    if let Ok(lookup) = workspaces::find_workspace_raw(&workspace).await {
         if let Err(error) =
             agent_sessions::remove_session(&lookup, BROWSER_KIND, &attachment_id).await
         {

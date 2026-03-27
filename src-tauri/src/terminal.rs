@@ -497,7 +497,7 @@ pub async fn terminal_kill_terminal(
         None,
     );
     if cleared_active_session {
-        if let Ok(lookup) = workspaces::find_workspace(&workspace).await {
+        if let Ok(lookup) = workspaces::find_workspace_raw(&workspace).await {
             let _ = agent_sessions::set_active_session(&lookup, None).await;
         }
     }
@@ -512,7 +512,7 @@ pub async fn terminal_kill_terminal(
     let workspace_for_kill = workspace.clone();
     let attachment_for_kill = attachment_id.clone();
     tauri::async_runtime::spawn(async move {
-        let lookup = match workspaces::find_workspace(&workspace_for_kill).await {
+        let lookup = match workspaces::find_workspace_raw(&workspace_for_kill).await {
             Ok(lookup) => lookup,
             Err(error) => {
                 log::warn!(

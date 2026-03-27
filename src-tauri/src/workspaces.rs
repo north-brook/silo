@@ -836,7 +836,9 @@ pub async fn workspaces_set_active_session(
 
     let active_session = WorkspaceActiveSession::new(kind.clone(), attachment_id);
     state.set_active_workspace_session(&workspace, active_session.clone());
-    let lookup = find_workspace(&workspace).await?;
+    // Use the raw lookup here so a just-added session close tombstone is not
+    // dropped before the runtime snapshot catches up.
+    let lookup = find_workspace_raw(&workspace).await?;
     if lookup.workspace.is_ready() {
         agent_sessions::set_active_session(&lookup, Some(&active_session)).await?;
     }
@@ -907,7 +909,7 @@ fn prompt_command_for_model(model: &str, prompt: &str) -> Result<String, String>
     }
 }
 
-async fn find_workspace_raw(name: &str) -> Result<WorkspaceLookup, String> {
+pub(crate) async fn find_workspace_raw(name: &str) -> Result<WorkspaceLookup, String> {
     let config = ConfigStore::new()
         .and_then(|store| store.load())
         .map_err(|error| error.to_string())?;
