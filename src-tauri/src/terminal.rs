@@ -299,7 +299,11 @@ pub async fn terminal_attach_terminal(
     output: Channel<Vec<u8>>,
 ) -> Result<TerminalAttachResult, String> {
     let attach_started = Instant::now();
-    let lookup = workspaces::find_workspace(&workspace).await?;
+    // Hydrate from the raw lookup so an in-flight terminal close tombstone is not
+    // dropped before the runtime snapshot reflects the removal.
+    let lookup =
+        workspaces::hydrate_workspace_lookup(workspaces::find_workspace_raw(&workspace).await?)
+            .await;
     if !lookup.workspace.is_ready() {
         bootstrap::start_workspace_startup_reconcile_if_needed(lookup.workspace.clone());
         return Err(workspaces::workspace_not_ready_error(&lookup.workspace));
@@ -496,8 +500,18 @@ pub async fn terminal_kill_terminal(
         &attachment_id,
         None,
     );
-    if cleared_active_session {
-        if let Ok(lookup) = workspaces::find_workspace_raw(&workspace).await {
+    if let Ok(lookup) = workspaces::find_workspace_raw(&workspace).await {
+        if let Err(error) =
+            agent_sessions::remove_session(&lookup, "terminal", &attachment_id).await
+        {
+            log::warn!(
+                "failed to remove terminal session from agent workspace={} attachment_id={}: {}",
+                workspace,
+                attachment_id,
+                error
+            );
+        }
+        if cleared_active_session {
             let _ = agent_sessions::set_active_session(&lookup, None).await;
         }
     }

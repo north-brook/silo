@@ -836,9 +836,26 @@ pub async fn workspaces_set_active_session(
 
     let active_session = WorkspaceActiveSession::new(kind.clone(), attachment_id);
     state.set_active_workspace_session(&workspace, active_session.clone());
-    // Use the raw lookup here so a just-added session close tombstone is not
-    // dropped before the runtime snapshot catches up.
-    let lookup = find_workspace_raw(&workspace).await?;
+    // Hydrate from the raw lookup first so session close tombstones survive until the
+    // runtime snapshot catches up. Then verify the requested session still exists after
+    // applying local overlays before updating agent-owned active-session state.
+    let lookup = hydrate_workspace_lookup(find_workspace_raw(&workspace).await?).await;
+    let workspace_with_state = state.apply_workspace_state(lookup.workspace.clone());
+    if !workspace_with_state.has_session(&kind, &active_session.attachment_id) {
+        log::info!(
+            "ignoring active session update for missing workspace session workspace={} kind={} attachment_id={}",
+            workspace,
+            kind,
+            active_session.attachment_id
+        );
+        state.clear_active_workspace_session_if_matches(
+            &workspace,
+            &kind,
+            &active_session.attachment_id,
+            None,
+        );
+        return Ok(());
+    }
     if lookup.workspace.is_ready() {
         agent_sessions::set_active_session(&lookup, Some(&active_session)).await?;
     }
