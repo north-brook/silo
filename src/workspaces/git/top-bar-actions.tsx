@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
 	ArrowUpFromLine,
 	GitMerge,
+	GitPullRequestClosed,
 	GitPullRequestCreateArrow,
 	X,
 } from "lucide-react";
@@ -25,6 +26,7 @@ import {
 	gitMergePr,
 	gitPrDetails,
 	gitPush,
+	gitResolveConflicts,
 	gitTreeDirty,
 } from "@/workspaces/git/api";
 import {
@@ -160,13 +162,62 @@ export function GitTopBarActions() {
 		},
 	});
 
+	const resolveConflicts = useMutation({
+		mutationFn: () => gitResolveConflicts(workspace),
+		onSuccess: (result) => {
+			queryClient.invalidateQueries({ queryKey: ["git_diff", workspace] });
+			queryClient.invalidateQueries({
+				queryKey: ["git_tree_dirty", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["git_pr_summary", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["git_pr_details", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["git_pr_deployments", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["terminal_list_terminals", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_get_workspace", workspace],
+			});
+			navigate(
+				workspaceSessionHref({
+					project,
+					workspace,
+					kind: "terminal",
+					attachmentId: result.attachment_id,
+				}),
+				{ state: { fresh: true } satisfies SessionRouteState },
+			);
+		},
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to resolve conflicts",
+				description: error.message,
+			});
+		},
+	});
+
 	const [mergeConfirmOpen, setMergeConfirmOpen] = useState(false);
 	const dirty = treeDirty.data ?? true;
 	const isLoading = prSummaryLoading || (hasPr && treeDirty.isLoading);
+	const mergeability = prSummary?.mergeability ?? null;
+	const mergeabilityUnknown =
+		hasPr && (mergeability == null || mergeability === "unknown");
+	const hasMergeConflicts = mergeability === "conflicting";
 
 	const showCreatePr = !isLoading && !prSummary && hasChanges;
-	const showMerge = !isLoading && hasPr && !dirty;
-	const showPush = !isLoading && hasPr && dirty;
+	const showResolveConflicts = !isLoading && hasPr && hasMergeConflicts;
+	const showMerge =
+		!isLoading && hasPr && mergeability === "mergeable" && !dirty;
+	const showCheckingMerge =
+		!isLoading && hasPr && mergeabilityUnknown && !dirty && !hasMergeConflicts;
+	const showPush = !isLoading && hasPr && dirty && !hasMergeConflicts;
 	const mergeDetailsQuery = useQuery({
 		queryKey: ["git_pr_details", workspace, prSummary?.head_ref_oid ?? null],
 		queryFn: () => gitPrDetails(workspace),
@@ -200,6 +251,10 @@ export function GitTopBarActions() {
 			} else if (showPush && !push.isPending) {
 				push.mutate();
 			}
+			return;
+		}
+		if (showResolveConflicts && !resolveConflicts.isPending) {
+			resolveConflicts.mutate();
 			return;
 		}
 		if (showMerge && !merge.isPending) {
@@ -333,6 +388,38 @@ export function GitTopBarActions() {
 							<HotkeyHint keys={["⌘", "⇧", "M"]} />
 						</TooltipContent>
 					</Tooltip>
+				)}
+				{showResolveConflicts && (
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<button
+								type="button"
+								disabled={resolveConflicts.isPending}
+								onClick={() => resolveConflicts.mutate()}
+								className="flex items-center gap-1.5 px-2.5 py-1 rounded text-sm font-medium bg-red-600 text-white hover:bg-red-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+							>
+								{resolveConflicts.isPending ? (
+									<Loader className="text-white" />
+								) : (
+									<GitPullRequestClosed size={10} />
+								)}
+								Resolve conflicts
+							</button>
+						</TooltipTrigger>
+						<TooltipContent side="bottom">
+							<HotkeyHint keys={["⌘", "⇧", "M"]} />
+						</TooltipContent>
+					</Tooltip>
+				)}
+				{showCheckingMerge && (
+					<button
+						type="button"
+						disabled
+						className="flex items-center gap-1.5 px-2.5 py-1 rounded text-sm font-medium bg-btn text-text transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+					>
+						<Loader />
+						Checking merge
+					</button>
 				)}
 				{showPush && (
 					<Tooltip>

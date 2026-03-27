@@ -3,6 +3,7 @@ import {
 	ArrowUpFromLine,
 	ExternalLink,
 	GitMerge,
+	GitPullRequestClosed,
 	GitPullRequestCreateArrow,
 	PanelRight,
 	X,
@@ -27,6 +28,7 @@ import {
 	gitMergePr,
 	gitPrDetails,
 	gitPush,
+	gitResolveConflicts,
 	gitTreeDirty,
 } from "@/workspaces/git/api";
 import { CheckStateIcon } from "@/workspaces/git/checks";
@@ -152,14 +154,73 @@ export function GitSidebarHeader() {
 		},
 	});
 
+	const resolveConflicts = useMutation({
+		mutationFn: () => gitResolveConflicts(workspace),
+		onSuccess: (result) => {
+			queryClient.invalidateQueries({ queryKey: ["git_diff", workspace] });
+			queryClient.invalidateQueries({
+				queryKey: ["git_tree_dirty", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["git_pr_summary", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["git_pr_details", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["git_pr_deployments", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["terminal_list_terminals", workspace],
+			});
+			queryClient.invalidateQueries({
+				queryKey: ["workspaces_get_workspace", workspace],
+			});
+			navigate(
+				workspaceSessionHref({
+					project,
+					workspace,
+					kind: "terminal",
+					attachmentId: result.attachment_id,
+				}),
+				{ state: { fresh: true } satisfies SessionRouteState },
+			);
+		},
+		onError: (error) => {
+			toast({
+				variant: "error",
+				title: "Failed to resolve conflicts",
+				description: error.message,
+			});
+		},
+	});
+
 	const [mergeConfirmOpen, setMergeConfirmOpen] = useState(false);
 	const dirty = treeDirty.data ?? true;
 	const isLoading =
 		prSummaryLoading || (prSummary?.status === "open" && treeDirty.isLoading);
+	const mergeability = prSummary?.mergeability ?? null;
+	const mergeabilityUnknown =
+		prSummary?.status === "open" &&
+		(mergeability == null || mergeability === "unknown");
+	const hasMergeConflicts = mergeability === "conflicting";
 
 	const showCreatePr = !isLoading && !prSummary && hasChanges;
-	const showMerge = !isLoading && prSummary?.status === "open" && !dirty;
-	const showPush = !isLoading && prSummary?.status === "open" && dirty;
+	const showResolveConflicts =
+		!isLoading && prSummary?.status === "open" && hasMergeConflicts;
+	const showMerge =
+		!isLoading &&
+		prSummary?.status === "open" &&
+		mergeability === "mergeable" &&
+		!dirty;
+	const showCheckingMerge =
+		!isLoading &&
+		prSummary?.status === "open" &&
+		mergeabilityUnknown &&
+		!dirty &&
+		!hasMergeConflicts;
+	const showPush =
+		!isLoading && prSummary?.status === "open" && dirty && !hasMergeConflicts;
 	const mergeDetailsQuery = useQuery({
 		queryKey: ["git_pr_details", workspace, prSummary?.head_ref_oid ?? null],
 		queryFn: () => gitPrDetails(workspace),
@@ -194,6 +255,11 @@ export function GitSidebarHeader() {
 			} else if (showPush && !push.isPending) {
 				push.mutate();
 			}
+			return;
+		}
+
+		if (showResolveConflicts && !resolveConflicts.isPending) {
+			resolveConflicts.mutate();
 			return;
 		}
 
@@ -307,6 +373,38 @@ export function GitSidebarHeader() {
 							<HotkeyHint keys={["⌘", "⇧", "M"]} />
 						</TooltipContent>
 					</Tooltip>
+				)}
+				{showResolveConflicts && (
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<button
+								type="button"
+								disabled={resolveConflicts.isPending}
+								onClick={() => resolveConflicts.mutate()}
+								className="flex items-center gap-1.5 px-2.5 py-1 rounded text-sm font-medium bg-red-600 text-white hover:bg-red-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+							>
+								{resolveConflicts.isPending ? (
+									<Loader className="text-white" />
+								) : (
+									<GitPullRequestClosed size={10} />
+								)}
+								Resolve conflicts
+							</button>
+						</TooltipTrigger>
+						<TooltipContent side="left">
+							<HotkeyHint keys={["⌘", "⇧", "M"]} />
+						</TooltipContent>
+					</Tooltip>
+				)}
+				{showCheckingMerge && (
+					<button
+						type="button"
+						disabled
+						className="flex items-center gap-1.5 px-2.5 py-1 rounded text-sm font-medium bg-btn text-text transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+					>
+						<Loader />
+						Checking merge
+					</button>
 				)}
 				{showPush && (
 					<Tooltip>

@@ -84,11 +84,14 @@ export interface PullRequestChecksSummary {
 	has_cancelled: boolean;
 }
 
+export type PullRequestMergeability = "mergeable" | "conflicting" | "unknown";
+
 export interface PullRequestSummary {
 	status: "open" | "closed" | "merged";
 	number: number;
 	url: string;
 	head_ref_oid: string;
+	mergeability?: PullRequestMergeability | null;
 	checks: PullRequestChecksSummary | null;
 }
 
@@ -207,6 +210,12 @@ export function gitCreatePr(workspace: string): Promise<GitTerminalResult> {
 
 export function gitMergePr(workspace: string): Promise<void> {
 	return invoke<void>("git_merge_pr", { workspace });
+}
+
+export function gitResolveConflicts(
+	workspace: string,
+): Promise<GitTerminalResult> {
+	return invoke<GitTerminalResult>("git_resolve_conflicts", { workspace });
 }
 
 export function gitRerunFailedChecks(workspace: string): Promise<void> {
