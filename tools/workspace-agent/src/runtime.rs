@@ -238,7 +238,11 @@ mod tests {
         create_fifo(&path);
 
         let (reader, _keepalive) = open_fifo_reader(&path).expect("reader should open");
-        assert!(path.metadata().expect("fifo metadata").file_type().is_fifo());
+        assert!(path
+            .metadata()
+            .expect("fifo metadata")
+            .file_type()
+            .is_fifo());
 
         send_event(
             &path,
@@ -250,7 +254,9 @@ mod tests {
 
         let mut reader = BufReader::new(reader);
         let mut line = String::new();
-        reader.read_line(&mut line).expect("reader should receive payload");
+        reader
+            .read_line(&mut line)
+            .expect("reader should receive payload");
         assert!(line.contains("\"MarkRead\""));
         assert!(line.contains("\"demo\""));
 
@@ -266,8 +272,8 @@ mod tests {
     }
 
     fn create_fifo(path: &Path) {
-        let path_cstring = CString::new(path.to_string_lossy().as_bytes())
-            .expect("fifo path should be valid");
+        let path_cstring =
+            CString::new(path.to_string_lossy().as_bytes()).expect("fifo path should be valid");
         let result = unsafe { libc::mkfifo(path_cstring.as_ptr(), FIFO_MODE as libc::mode_t) };
         assert_eq!(
             result,

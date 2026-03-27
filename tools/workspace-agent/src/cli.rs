@@ -2,7 +2,7 @@ use std::env;
 use std::io;
 
 use crate::args::required_flag_value;
-use crate::assistant::run_assistant_proxy;
+use crate::assistant::{run_assistant_hook, run_assistant_proxy};
 use crate::daemon::run_daemon;
 use crate::daemon::state::{
     build_published_state, reconcile_sessions, AssistantProvider, ObserverEvent, PublishedSession,
@@ -31,6 +31,7 @@ pub(crate) fn run() -> Result<(), String> {
         "session-set-active" => run_session_set_active(&args[1..]),
         "session-clear-active" => run_session_clear_active(),
         "assistant-proxy" => run_assistant_proxy(&args[1..]),
+        "assistant-hook" => run_assistant_hook(&args[1..]),
         "files-directory" => run_files_directory(&args[1..]),
         "files-tree" => run_files_tree(),
         "files-read" => run_files_read(&args[1..]),
@@ -106,7 +107,10 @@ fn run_session_set_active(args: &[String]) -> Result<(), String> {
 }
 
 fn run_session_clear_active() -> Result<(), String> {
-    send_event(&RuntimePaths::new().fifo, &ObserverEvent::ClearActiveSession)
+    send_event(
+        &RuntimePaths::new().fifo,
+        &ObserverEvent::ClearActiveSession,
+    )
 }
 
 fn parse_emit_event(args: &[String]) -> Result<ObserverEvent, String> {

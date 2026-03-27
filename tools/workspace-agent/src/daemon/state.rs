@@ -492,9 +492,11 @@ fn session_exists(state: &ObserverState, kind: &str, attachment_id: &str) -> boo
 }
 
 fn reconcile_active_session(state: &mut ObserverState) {
-    if !state.active_session.as_ref().is_some_and(|active| {
-        session_exists(state, &active.kind, &active.attachment_id)
-    }) {
+    if !state
+        .active_session
+        .as_ref()
+        .is_some_and(|active| session_exists(state, &active.kind, &active.attachment_id))
+    {
         state.active_session = None;
     }
 }

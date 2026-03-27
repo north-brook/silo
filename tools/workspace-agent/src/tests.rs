@@ -2,10 +2,7 @@ use std::collections::BTreeMap;
 
 use time::Duration as TimeDuration;
 
-use crate::assistant::{
-    collect_submitted_assistant_prompts, normalize_assistant_input, turn_output_timeout,
-    INITIAL_PROMPT_STARTUP_GRACE, SOFT_NEWLINE_SENTINEL, TURN_OUTPUT_IDLE_TIMEOUT,
-};
+use crate::assistant::observer_event_from_hook_input;
 use crate::daemon::state::{
     apply_event, build_published_state, effective_activity_at, parse_timestamp, reconcile_sessions,
     resolve_assistant_provider, sanitize_command_name, should_suspend_for_inactivity_at,
@@ -20,54 +17,48 @@ use crate::metadata::{
 };
 
 #[test]
-fn assistant_input_strips_escape_sequences() {
-    assert_eq!(
-        normalize_assistant_input("hello\u{001b}[31m world\u{001b}[0m"),
-        "hello world"
+fn assistant_hook_maps_prompt_submit() {
+    let event = observer_event_from_hook_input(
+        "terminal-1",
+        AssistantProvider::Claude,
+        r#"{"hook_event_name":"UserPromptSubmit","session_id":"provider-session"}"#,
     );
+
+    assert!(matches!(
+        event,
+        Some(ObserverEvent::AssistantPromptSubmitted {
+            session,
+            provider: AssistantProvider::Claude,
+        }) if session == "terminal-1"
+    ));
 }
 
 #[test]
-fn assistant_input_collects_prompts() {
-    let mut buffer = String::new();
-    assert_eq!(
-        collect_submitted_assistant_prompts(&mut buffer, "hello world\r"),
-        vec!["hello world".to_string()]
+fn assistant_hook_maps_stop() {
+    let event = observer_event_from_hook_input(
+        "terminal-1",
+        AssistantProvider::Codex,
+        r#"{"hook_event_name":"Stop","session_id":"provider-session"}"#,
     );
-    assert!(buffer.is_empty());
+
+    assert!(matches!(
+        event,
+        Some(ObserverEvent::AssistantTurnCompleted {
+            session,
+            provider: AssistantProvider::Codex,
+        }) if session == "terminal-1"
+    ));
 }
 
 #[test]
-fn assistant_input_treats_shift_enter_as_soft_newline() {
-    let mut buffer = String::new();
+fn assistant_hook_ignores_unknown_events() {
+    let event = observer_event_from_hook_input(
+        "terminal-1",
+        AssistantProvider::Codex,
+        r#"{"hook_event_name":"SessionStart"}"#,
+    );
 
-    assert!(
-        collect_submitted_assistant_prompts(&mut buffer, "line 1\u{001b}[13;2uline 2").is_empty()
-    );
-    assert_eq!(buffer, "line 1\nline 2");
-    assert_eq!(
-        collect_submitted_assistant_prompts(&mut buffer, "\r"),
-        vec!["line 1\nline 2".to_string()]
-    );
-    assert!(buffer.is_empty());
-}
-
-#[test]
-fn assistant_input_normalizes_shift_enter_escape() {
-    assert_eq!(
-        normalize_assistant_input("hello\u{001b}[13;2uworld"),
-        format!("hello{SOFT_NEWLINE_SENTINEL}world")
-    );
-}
-
-#[test]
-fn turn_output_timeout_adds_startup_grace_only_before_first_output() {
-    assert_eq!(
-        turn_output_timeout(true, false),
-        TURN_OUTPUT_IDLE_TIMEOUT + INITIAL_PROMPT_STARTUP_GRACE
-    );
-    assert_eq!(turn_output_timeout(true, true), TURN_OUTPUT_IDLE_TIMEOUT);
-    assert_eq!(turn_output_timeout(false, false), TURN_OUTPUT_IDLE_TIMEOUT);
+    assert!(event.is_none());
 }
 
 #[test]

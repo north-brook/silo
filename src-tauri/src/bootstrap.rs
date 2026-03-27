@@ -37,7 +37,7 @@ pub(crate) const REMOTE_WORKSPACE_AGENT_FINGERPRINT_FILE: &str =
 const REMOTE_WORKSPACE_AGENT_SHELL_FILE: &str = "/home/silo/.silo/workspace-agent-shell.sh";
 const WORKSPACE_AGENT_RELEASE_ROLLOUT_STATE_FILE_NAME: &str =
     "workspace-agent-release-rollout.json";
-const WORKSPACE_BOOTSTRAP_VERSION: &str = "18";
+const WORKSPACE_BOOTSTRAP_VERSION: &str = "21";
 const STARTUP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 const INSTANCE_RUNNING_POLL_ATTEMPTS: usize = 180;
 const SSH_READY_POLL_ATTEMPTS: usize = 120;
@@ -986,6 +986,7 @@ fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, S
 fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBootstrap) -> String {
     let codex_auth_json = bootstrap.codex_auth_json.clone();
     let codex_config_toml = codex_config_toml();
+    let codex_hooks_json = codex_hooks_json();
     let claude_settings_json = claude_settings_json();
     let claude_state_json = claude_state_json();
     let gh_hosts_yml = gh_hosts_yml(&bootstrap.gh_username, &bootstrap.gh_token);
@@ -1126,11 +1127,12 @@ chmod 600 \"$HOME/.config/gh/hosts.yml\"\n\
 mkdir -p \"$HOME/.codex\" \"$HOME/.claude\"\n\
 {codex_auth_write}\n\
 printf '%s\\n' {codex_config_toml} > \"$HOME/.codex/config.toml\"\n\
+printf '%s\\n' {codex_hooks_json} > \"$HOME/.codex/hooks.json\"\n\
 printf '%s\\n' {claude_settings_json} > \"$HOME/.claude/settings.json\"\n\
 printf '%s\\n' {claude_state_json} > \"$HOME/.claude.json\"\n\
 chmod 700 \"$HOME/.codex\" \"$HOME/.claude\"\n\
 if [ -f \"$HOME/.codex/auth.json\" ]; then chmod 600 \"$HOME/.codex/auth.json\"; fi\n\
-chmod 600 \"$HOME/.codex/config.toml\" \"$HOME/.claude/settings.json\" \"$HOME/.claude.json\"\n\
+chmod 600 \"$HOME/.codex/config.toml\" \"$HOME/.codex/hooks.json\" \"$HOME/.claude/settings.json\" \"$HOME/.claude.json\"\n\
 rm -f \"$HOME/.gitconfig.lock\"\n\
 bootstrap_log 'step=configure_git'\n\
 if [ -n \"$GIT_USER_NAME\" ] && [ \"$(git config --global --get user.name || true)\" != \"$GIT_USER_NAME\" ]; then\n\
@@ -1169,6 +1171,7 @@ bootstrap_log 'step=completed'\n",
         gh_hosts_yml = shell_quote(&gh_hosts_yml),
         codex_auth_write = codex_auth_write,
         codex_config_toml = shell_quote(&codex_config_toml),
+        codex_hooks_json = shell_quote(&codex_hooks_json),
         claude_settings_json = shell_quote(&claude_settings_json),
         claude_state_json = shell_quote(&claude_state_json),
         branch_setup = branch_setup,
@@ -1647,6 +1650,10 @@ model = "gpt-5.4"
 model_reasoning_effort = "high"
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
+suppress_unstable_features_warning = true
+
+[features]
+codex_hooks = true
 
 [projects."/home/silo/workspace"]
 trust_level = "trusted"
@@ -1657,12 +1664,20 @@ hide_full_access_warning = true
     .to_string()
 }
 
+fn codex_hooks_json() -> String {
+    json!({
+        "hooks": provider_hook_config("codex")
+    })
+    .to_string()
+}
+
 fn claude_settings_json() -> String {
     json!({
         "model": "opus",
         "alwaysThinkingEnabled": true,
         "effortLevel": "high",
-        "skipDangerousModePermissionPrompt": true
+        "skipDangerousModePermissionPrompt": true,
+        "hooks": provider_hook_config("claude")
     })
     .to_string()
 }
@@ -1688,6 +1703,44 @@ pub(crate) fn claude_state_json() -> String {
         }
     })
     .to_string()
+}
+
+fn provider_hook_config(provider: &str) -> serde_json::Value {
+    json!({
+        "UserPromptSubmit": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": assistant_emit_hook_command(
+                            provider,
+                            "assistant_prompt_submitted"
+                        )
+                    }
+                ]
+            }
+        ],
+        "Stop": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": assistant_emit_hook_command(
+                            provider,
+                            "assistant_turn_completed"
+                        )
+                    }
+                ]
+            }
+        ]
+    })
+}
+
+fn assistant_emit_hook_command(provider: &str, kind: &str) -> String {
+    format!(
+        "[ -n \"${{SILO_TERMINAL_ID:-}}\" ] || exit 0; SILO_AGENT_HOOK=1 \"${{SILO_WORKSPACE_AGENT_BIN:-{}}}\" emit --kind {} --session \"$SILO_TERMINAL_ID\" --provider {}",
+        REMOTE_WORKSPACE_AGENT_BIN, kind, provider
+    )
 }
 
 fn gh_hosts_yml(username: &str, token: &str) -> String {
@@ -1721,6 +1774,33 @@ mod tests {
         assert!(script.contains("--kind shell_session_exited"));
         assert!(script.contains("SILO_AGENT_SESSION_REGISTERED"));
         assert!(script.contains("add-zsh-hook zshexit _silo_agent_zshexit"));
+    }
+
+    #[test]
+    fn provider_hook_config_uses_direct_workspace_agent_emits() {
+        let codex = codex_hooks_json();
+        let claude = claude_settings_json();
+
+        assert!(codex.contains("\"UserPromptSubmit\""));
+        assert!(codex.contains("\"Stop\""));
+        assert!(codex.contains("emit --kind assistant_prompt_submitted"));
+        assert!(codex.contains("emit --kind assistant_turn_completed"));
+        assert!(codex.contains("--provider codex"));
+        assert!(codex.contains("SILO_TERMINAL_ID"));
+        assert!(codex.contains("SILO_WORKSPACE_AGENT_BIN"));
+        assert!(claude.contains("\"hooks\""));
+        assert!(claude.contains("emit --kind assistant_prompt_submitted"));
+        assert!(claude.contains("emit --kind assistant_turn_completed"));
+        assert!(claude.contains("--provider claude"));
+    }
+
+    #[test]
+    fn codex_config_toml_enables_lifecycle_hooks() {
+        let config = codex_config_toml();
+
+        assert!(config.contains("suppress_unstable_features_warning = true"));
+        assert!(config.contains("[features]"));
+        assert!(config.contains("codex_hooks = true"));
     }
 
     #[test]
@@ -1773,11 +1853,15 @@ mod tests {
             "git -C \"$WORKSPACE_DIR\" pull --ff-only origin \"$TARGET_BRANCH\"",
         );
 
-        assert!(script.contains("CURRENT_BRANCH=\"$(git -C \"$WORKSPACE_DIR\" symbolic-ref --quiet --short HEAD"));
+        assert!(script.contains(
+            "CURRENT_BRANCH=\"$(git -C \"$WORKSPACE_DIR\" symbolic-ref --quiet --short HEAD"
+        ));
         assert!(script.contains("status --porcelain --untracked-files=normal"));
         assert!(script.contains("elif [ \"$CURRENT_BRANCH\" != \"$TARGET_BRANCH\" ]; then"));
         assert!(script.contains("elif [ \"$WORKTREE_DIRTY\" -ne 0 ]; then"));
-        assert!(script.contains("git -C \"$WORKSPACE_DIR\" checkout -b \"$WORKSPACE_BRANCH\" \"$TARGET_BRANCH\""));
+        assert!(script.contains(
+            "git -C \"$WORKSPACE_DIR\" checkout -b \"$WORKSPACE_BRANCH\" \"$TARGET_BRANCH\""
+        ));
     }
 
     #[test]

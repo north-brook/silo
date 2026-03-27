@@ -376,7 +376,10 @@ fn mark_gitignored_entries(
 ) -> Result<(), String> {
     let ignored_paths = gitignored_paths(
         workspace_root,
-        &entries.iter().map(|entry| entry.path.clone()).collect::<Vec<_>>(),
+        &entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>(),
     )?;
     for entry in entries {
         entry.git_ignored = ignored_paths.contains(entry.path.as_str());
@@ -391,7 +394,10 @@ fn mark_gitignored_directory_entries(
 ) -> Result<(), String> {
     let ignored_paths = gitignored_paths(
         workspace_root,
-        &entries.iter().map(|entry| entry.path.clone()).collect::<Vec<_>>(),
+        &entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>(),
     )?;
     for entry in entries {
         entry.git_ignored = ignored_paths.contains(entry.path.as_str());
@@ -406,7 +412,13 @@ fn gitignored_paths(workspace_root: &Path, paths: &[String]) -> Result<HashSet<S
     }
 
     let mut child = Command::new("git")
-        .args(["-c", "core.quotepath=false", "check-ignore", "-z", "--stdin"])
+        .args([
+            "-c",
+            "core.quotepath=false",
+            "check-ignore",
+            "-z",
+            "--stdin",
+        ])
         .current_dir(workspace_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -783,7 +795,9 @@ mod tests {
             ]
         );
         assert!(!entries.iter().any(|entry| entry.path.starts_with(".git/")));
-        assert!(!entries.iter().any(|entry| entry.path.starts_with("linked-dir/")));
+        assert!(!entries
+            .iter()
+            .any(|entry| entry.path.starts_with("linked-dir/")));
     }
 
     #[cfg(unix)]

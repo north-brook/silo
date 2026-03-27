@@ -8,7 +8,10 @@ pub(crate) fn required_flag_value<'a>(args: &'a [String], flag: &str) -> Result<
         .ok_or_else(|| format!("missing value for flag: {flag}"))
 }
 
-pub(crate) fn optional_flag_value<'a>(args: &'a [String], flag: &str) -> Result<Option<&'a str>, String> {
+pub(crate) fn optional_flag_value<'a>(
+    args: &'a [String],
+    flag: &str,
+) -> Result<Option<&'a str>, String> {
     let Some(index) = args.iter().position(|arg| arg == flag) else {
         return Ok(None);
     };

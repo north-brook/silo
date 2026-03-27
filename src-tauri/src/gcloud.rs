@@ -246,15 +246,15 @@ async fn ensure_project_iam_bindings_as(
         let result = run_gcloud_as(
             operator_account,
             [
-            "projects".to_string(),
-            "add-iam-policy-binding".to_string(),
-            project.to_string(),
-            "--member".to_string(),
-            format!("serviceAccount:{service_account}"),
-            "--role".to_string(),
-            (*role).to_string(),
-            "--quiet".to_string(),
-        ],
+                "projects".to_string(),
+                "add-iam-policy-binding".to_string(),
+                project.to_string(),
+                "--member".to_string(),
+                format!("serviceAccount:{service_account}"),
+                "--role".to_string(),
+                (*role).to_string(),
+                "--quiet".to_string(),
+            ],
         )
         .await
         .ok_or_else(|| "failed to execute gcloud projects add-iam-policy-binding".to_string())?;
@@ -287,18 +287,18 @@ async fn ensure_service_account_user_binding_as(
     let result = run_gcloud_as(
         operator_account,
         [
-        "iam".to_string(),
-        "service-accounts".to_string(),
-        "add-iam-policy-binding".to_string(),
-        service_account.to_string(),
-        "--project".to_string(),
-        project.to_string(),
-        "--member".to_string(),
-        format!("serviceAccount:{service_account}"),
-        "--role".to_string(),
-        "roles/iam.serviceAccountUser".to_string(),
-        "--quiet".to_string(),
-    ],
+            "iam".to_string(),
+            "service-accounts".to_string(),
+            "add-iam-policy-binding".to_string(),
+            service_account.to_string(),
+            "--project".to_string(),
+            project.to_string(),
+            "--member".to_string(),
+            format!("serviceAccount:{service_account}"),
+            "--role".to_string(),
+            "roles/iam.serviceAccountUser".to_string(),
+            "--quiet".to_string(),
+        ],
     )
     .await
     .ok_or_else(|| {

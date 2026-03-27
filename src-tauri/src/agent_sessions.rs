@@ -82,7 +82,12 @@ pub(crate) async fn set_active_session(
         )),
         None => agent_remote_command("session-clear-active"),
     };
-    run_agent_command(lookup, "failed to update active workspace session", &command).await
+    run_agent_command(
+        lookup,
+        "failed to update active workspace session",
+        &command,
+    )
+    .await
 }
 
 fn agent_remote_command(command: &str) -> String {
@@ -143,9 +148,7 @@ async fn run_agent_json_command<T: for<'de> Deserialize<'de>>(
         } else if stderr.is_empty() {
             format!("{context}: invalid agent response: {error}; stdout={stdout}")
         } else {
-            format!(
-                "{context}: invalid agent response: {error}; stdout={stdout}; stderr={stderr}"
-            )
+            format!("{context}: invalid agent response: {error}; stdout={stdout}; stderr={stderr}")
         }
     })
 }
