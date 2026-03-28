@@ -134,11 +134,13 @@ fn parse_emit_event(args: &[String]) -> Result<ObserverEvent, String> {
             session,
             provider: AssistantProvider::parse(required_flag_value(args, "--provider")?)
                 .ok_or_else(|| "invalid assistant provider".to_string())?,
+            turn_id: None,
         }),
         "assistant_turn_completed" => Ok(ObserverEvent::AssistantTurnCompleted {
             session,
             provider: AssistantProvider::parse(required_flag_value(args, "--provider")?)
                 .ok_or_else(|| "invalid assistant provider".to_string())?,
+            turn_id: None,
         }),
         "mark_read" => Ok(ObserverEvent::MarkRead { session }),
         other => Err(format!("unsupported event kind: {other}")),
