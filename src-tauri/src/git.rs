@@ -6,7 +6,7 @@ use crate::remote::{
 };
 use crate::state::WorkspaceMetadataManager;
 use crate::terminal;
-use crate::terminal::TerminalManager;
+use crate::terminal::AssistantProvider;
 use crate::workspaces::{self, WorkspaceLookup};
 use serde::Serialize;
 use serde_json::Value;
@@ -557,7 +557,6 @@ pub async fn git_pr_deployments(workspace: String) -> Result<Vec<Deployment>, St
 
 #[tauri::command]
 pub async fn git_push(
-    state: State<'_, TerminalManager>,
     workspace_state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
 ) -> Result<GitTerminalResult, String> {
@@ -566,12 +565,11 @@ pub async fn git_push(
     clear_pull_request_caches_for_workspace(&context);
     let branch = current_workspace_branch(&context).await?;
     let prompt = prompts::git_push_prompt(&branch, &context.target_branch);
-    let command = terminal::codex_prompt_command(&prompt);
-    let attachment_id = terminal::start_terminal_command(
-        state.inner(),
+    let attachment_id = terminal::start_assistant_session(
         workspace_state.inner(),
         &workspace,
-        &command,
+        AssistantProvider::Codex,
+        Some(&prompt),
     )
     .await?;
 
@@ -603,7 +601,6 @@ pub async fn git_merge_pr(workspace: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn git_resolve_conflicts(
-    state: State<'_, TerminalManager>,
     workspace_state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
 ) -> Result<GitTerminalResult, String> {
@@ -617,12 +614,11 @@ pub async fn git_resolve_conflicts(
     clear_pull_request_caches_for_workspace(&context);
 
     let prompt = prompts::git_resolve_conflicts_prompt(&branch, &context.target_branch);
-    let command = terminal::codex_prompt_command(&prompt);
-    let attachment_id = terminal::start_terminal_command(
-        state.inner(),
+    let attachment_id = terminal::start_assistant_session(
         workspace_state.inner(),
         &workspace,
-        &command,
+        AssistantProvider::Codex,
+        Some(&prompt),
     )
     .await?;
 
@@ -669,7 +665,6 @@ pub async fn git_rerun_failed_checks(workspace: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn git_create_pr(
-    state: State<'_, TerminalManager>,
     workspace_state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
 ) -> Result<GitTerminalResult, String> {
@@ -678,12 +673,11 @@ pub async fn git_create_pr(
     clear_pull_request_caches_for_workspace(&context);
     let branch = current_workspace_branch(&context).await?;
     let prompt = prompts::git_create_pr_prompt(&branch, &context.target_branch);
-    let command = terminal::codex_prompt_command(&prompt);
-    let attachment_id = terminal::start_terminal_command(
-        state.inner(),
+    let attachment_id = terminal::start_assistant_session(
         workspace_state.inner(),
         &workspace,
-        &command,
+        AssistantProvider::Codex,
+        Some(&prompt),
     )
     .await?;
 
