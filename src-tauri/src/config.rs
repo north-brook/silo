@@ -195,9 +195,27 @@ impl ConfigStore {
         self.ensure_config_file_locked()?;
 
         let contents = fs::read_to_string(&self.config_path).map_err(ConfigError::Io)?;
-        let config: SiloConfig = toml::from_str(&contents).map_err(ConfigError::Parse)?;
+        let mut config: SiloConfig = toml::from_str(&contents).map_err(ConfigError::Parse)?;
         validate_config(&config)?;
+        self.sync_codex_auth_from_host_locked(&mut config)?;
         Ok(config)
+    }
+
+    fn sync_codex_auth_from_host_locked(&self, config: &mut SiloConfig) -> Result<(), ConfigError> {
+        let Some(host_auth_json) = detect_codex_auth_json(&self.home_dir) else {
+            return Ok(());
+        };
+
+        if config.codex.auth_json == host_auth_json {
+            return Ok(());
+        }
+
+        info!(
+            "syncing codex auth from host auth.json into {}",
+            self.config_path.display()
+        );
+        config.codex.auth_json = host_auth_json;
+        self.save_locked(config)
     }
 
     fn save_locked(&self, config: &SiloConfig) -> Result<(), ConfigError> {
@@ -927,6 +945,44 @@ mod tests {
             .load()
             .expect("existing config should remain readable");
         assert_eq!(loaded, existing);
+    }
+
+    #[test]
+    fn load_syncs_codex_auth_from_host_auth_json() {
+        let temp_dir = TestDir::new_without_config();
+        let store = temp_dir.store();
+        let host_codex_dir = temp_dir.root.join(".codex");
+        fs::create_dir_all(&host_codex_dir).expect("host codex dir should exist");
+        fs::write(
+            host_codex_dir.join("auth.json"),
+            "{\n  \"tokens\": {\n    \"refresh_token\": \"host-codex-refresh-token\"\n  }\n}\n",
+        )
+        .expect("host auth.json should be written");
+
+        let existing = SiloConfig {
+            codex: CodexConfig {
+                auth_json: "{\"tokens\":{\"refresh_token\":\"stale-codex-refresh-token\"}}"
+                    .to_string(),
+            },
+            ..SiloConfig::default()
+        };
+        write_file(
+            &temp_dir.config_path(),
+            &serialize_config(&existing).expect("existing config should serialize"),
+        )
+        .expect("existing config should be written");
+
+        let loaded = store.load().expect("config should load");
+        assert_eq!(
+            loaded.codex.auth_json,
+            "{\"tokens\":{\"refresh_token\":\"host-codex-refresh-token\"}}"
+        );
+
+        let persisted = fs::read_to_string(temp_dir.config_path())
+            .expect("persisted config should remain readable");
+        let persisted: SiloConfig =
+            toml::from_str(&persisted).expect("persisted config should remain valid");
+        assert_eq!(persisted.codex.auth_json, loaded.codex.auth_json);
     }
 
     struct TestDir {
