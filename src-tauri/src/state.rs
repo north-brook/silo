@@ -36,10 +36,16 @@ struct PendingWorkspaceLifecycle {
     lifecycle: WorkspaceLifecycle,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingWorkspaceSession {
+    Upsert(WorkspaceSession),
+    Remove,
+}
+
 #[derive(Clone, Default)]
 pub struct WorkspaceMetadataManager {
     metadata: Arc<Mutex<HashMap<String, PendingWorkspaceMetadata>>>,
-    sessions: Arc<Mutex<HashMap<String, HashMap<String, Option<WorkspaceSession>>>>>,
+    sessions: Arc<Mutex<HashMap<String, HashMap<String, PendingWorkspaceSession>>>>,
     active_sessions: Arc<Mutex<HashMap<String, Option<WorkspaceActiveSession>>>>,
     lifecycles: Arc<Mutex<HashMap<String, PendingWorkspaceLifecycle>>>,
     template_operations: Arc<Mutex<HashMap<String, Option<TemplateOperationState>>>>,
@@ -260,7 +266,7 @@ impl WorkspaceMetadataManager {
 
             let mut current_lookup = match lookup {
                 Some(lookup) => lookup,
-                None => match workspaces::find_workspace(&workspace).await {
+                None => match workspaces::find_workspace_raw(&workspace).await {
                     Ok(lookup) => lookup,
                     Err(error) => {
                         log::warn!(
@@ -285,7 +291,7 @@ impl WorkspaceMetadataManager {
                 }
                 if attempt + 1 < WORKSPACE_METADATA_BACKGROUND_RETRY_ATTEMPTS {
                     sleep_for(WORKSPACE_METADATA_BACKGROUND_RETRY_INTERVAL).await;
-                    if let Ok(refreshed) = workspaces::find_workspace(&workspace).await {
+                    if let Ok(refreshed) = workspaces::find_workspace_raw(&workspace).await {
                         current_lookup = refreshed;
                     }
                 }
@@ -318,7 +324,7 @@ impl WorkspaceMetadataManager {
                             entry_keys,
                             error
                         );
-                        if let Ok(refreshed) = workspaces::find_workspace(&workspace).await {
+                        if let Ok(refreshed) = workspaces::find_workspace_raw(&workspace).await {
                             current_lookup = refreshed;
                         }
                     }
@@ -461,7 +467,7 @@ impl WorkspaceMetadataManager {
         };
         sessions.entry(workspace.to_string()).or_default().insert(
             workspace_session_key(&session.kind, &session.attachment_id),
-            Some(session),
+            PendingWorkspaceSession::Upsert(session),
         );
     }
 
@@ -478,14 +484,17 @@ impl WorkspaceMetadataManager {
         let key = workspace_session_key("terminal", attachment_id);
         let next = entries
             .get(&key)
-            .and_then(|existing| existing.clone())
+            .and_then(|existing| match existing {
+                PendingWorkspaceSession::Upsert(session) => Some(session.clone()),
+                PendingWorkspaceSession::Remove => None,
+            })
             .or(session)
             .map(|mut session| {
                 session.unread = Some(false);
                 session
             });
         if let Some(session) = next {
-            entries.insert(key, Some(session));
+            entries.insert(key, PendingWorkspaceSession::Upsert(session));
         }
     }
 
@@ -498,10 +507,10 @@ impl WorkspaceMetadataManager {
         let Ok(mut sessions) = self.sessions.lock() else {
             return;
         };
-        sessions
-            .entry(workspace.to_string())
-            .or_default()
-            .insert(workspace_session_key(kind, attachment_id), None);
+        sessions.entry(workspace.to_string()).or_default().insert(
+            workspace_session_key(kind, attachment_id),
+            PendingWorkspaceSession::Remove,
+        );
     }
 
     pub(crate) fn apply_workspace_state(&self, workspace: Workspace) -> Workspace {
@@ -518,34 +527,30 @@ impl WorkspaceMetadataManager {
         workspace_name: &str,
         workspace: Workspace,
     ) -> Workspace {
-        let metadata_sessions = workspace
-            .sessions()
-            .into_iter()
-            .map(|session| {
-                (
-                    workspace_session_key(&session.kind, &session.attachment_id),
-                    session,
-                )
-            })
-            .collect::<HashMap<_, _>>();
-
         let overlay = {
-            let Ok(mut sessions) = self.sessions.lock() else {
+            let Ok(sessions) = self.sessions.lock() else {
                 return workspace;
             };
-            let Some(entries) = sessions.get_mut(workspace_name) else {
+            let Some(entries) = sessions.get(workspace_name) else {
                 return workspace;
             };
-            entries.retain(|key, pending| match pending {
-                Some(session) => !should_drop_pending_session(session, metadata_sessions.get(key)),
-                None => metadata_sessions.contains_key(key),
-            });
-            if entries.is_empty() {
-                sessions.remove(workspace_name);
-                return workspace;
-            }
-            entries.clone()
+            entries
+                .iter()
+                .map(|(key, pending)| {
+                    (
+                        key.clone(),
+                        match pending {
+                            PendingWorkspaceSession::Upsert(session) => Some(session.clone()),
+                            PendingWorkspaceSession::Remove => None,
+                        },
+                    )
+                })
+                .collect::<HashMap<_, _>>()
         };
+
+        if overlay.is_empty() {
+            return workspace;
+        }
 
         workspaces::overlay_workspace_sessions(workspace, &overlay)
     }
@@ -556,16 +561,12 @@ impl WorkspaceMetadataManager {
         workspace: Workspace,
     ) -> Workspace {
         let overlay = {
-            let Ok(mut active_sessions) = self.active_sessions.lock() else {
+            let Ok(active_sessions) = self.active_sessions.lock() else {
                 return workspace;
             };
             let Some(pending) = active_sessions.get(workspace_name).cloned() else {
                 return workspace;
             };
-            if pending == workspace.active_session().cloned() {
-                active_sessions.remove(workspace_name);
-                return workspace;
-            }
             pending
         };
 
@@ -578,20 +579,12 @@ impl WorkspaceMetadataManager {
         workspace: Workspace,
     ) -> Workspace {
         let overlay = {
-            let Ok(mut lifecycles) = self.lifecycles.lock() else {
+            let Ok(lifecycles) = self.lifecycles.lock() else {
                 return workspace;
             };
             let Some(pending) = lifecycles.get(workspace_name).cloned() else {
                 return workspace;
             };
-            if should_drop_pending_lifecycle(
-                &pending,
-                workspace.lifecycle(),
-                bootstrap::workspace_startup_attempt_in_flight(workspace_name, pending.attempt_id),
-            ) {
-                lifecycles.remove(workspace_name);
-                return workspace;
-            }
             pending.lifecycle
         };
 
@@ -604,20 +597,131 @@ impl WorkspaceMetadataManager {
         workspace: Workspace,
     ) -> Workspace {
         let overlay = {
-            let Ok(mut template_operations) = self.template_operations.lock() else {
+            let Ok(template_operations) = self.template_operations.lock() else {
                 return workspace;
             };
             let Some(pending) = template_operations.get(workspace_name).cloned() else {
                 return workspace;
             };
-            if pending == workspace.template_operation().cloned() {
-                template_operations.remove(workspace_name);
-                return workspace;
-            }
             pending
         };
 
         workspaces::overlay_workspace_template_operation(workspace, overlay)
+    }
+
+    pub(crate) fn reconcile_workspace_observation(
+        &self,
+        metadata_workspace: &Workspace,
+        runtime_workspace: Option<&Workspace>,
+    ) {
+        let workspace_name = metadata_workspace.name();
+        self.reconcile_workspace_session_state(
+            workspace_name,
+            metadata_workspace,
+            runtime_workspace,
+        );
+        self.reconcile_active_workspace_state(
+            workspace_name,
+            metadata_workspace,
+            runtime_workspace,
+        );
+        self.reconcile_workspace_lifecycle_state(workspace_name, metadata_workspace);
+        self.reconcile_template_operation_state(workspace_name, metadata_workspace);
+    }
+
+    fn reconcile_workspace_session_state(
+        &self,
+        workspace_name: &str,
+        metadata_workspace: &Workspace,
+        runtime_workspace: Option<&Workspace>,
+    ) {
+        let metadata_sessions = observed_workspace_sessions(metadata_workspace);
+        let runtime_sessions = runtime_workspace.map(observed_workspace_sessions);
+        let require_runtime = workspace_requires_runtime_observation(metadata_workspace);
+
+        let Ok(mut sessions) = self.sessions.lock() else {
+            return;
+        };
+        let Some(entries) = sessions.get_mut(workspace_name) else {
+            return;
+        };
+        entries.retain(|key, pending| {
+            !should_drop_pending_workspace_session(
+                pending,
+                key,
+                &metadata_sessions,
+                runtime_sessions.as_ref(),
+                require_runtime,
+            )
+        });
+        if entries.is_empty() {
+            sessions.remove(workspace_name);
+        }
+    }
+
+    fn reconcile_active_workspace_state(
+        &self,
+        workspace_name: &str,
+        metadata_workspace: &Workspace,
+        runtime_workspace: Option<&Workspace>,
+    ) {
+        let require_runtime = workspace_requires_runtime_observation(metadata_workspace);
+        let metadata_active = metadata_workspace.active_session().cloned();
+        let runtime_active =
+            runtime_workspace.and_then(|workspace| workspace.active_session().cloned());
+
+        let Ok(mut active_sessions) = self.active_sessions.lock() else {
+            return;
+        };
+        let Some(pending) = active_sessions.get(workspace_name).cloned() else {
+            return;
+        };
+
+        let metadata_converged = pending == metadata_active;
+        let runtime_converged = if require_runtime {
+            runtime_workspace.is_some() && pending == runtime_active
+        } else {
+            true
+        };
+        if metadata_converged && runtime_converged {
+            active_sessions.remove(workspace_name);
+        }
+    }
+
+    fn reconcile_workspace_lifecycle_state(
+        &self,
+        workspace_name: &str,
+        metadata_workspace: &Workspace,
+    ) {
+        let Ok(mut lifecycles) = self.lifecycles.lock() else {
+            return;
+        };
+        let Some(pending) = lifecycles.get(workspace_name).cloned() else {
+            return;
+        };
+        if should_drop_pending_lifecycle(
+            &pending,
+            metadata_workspace.lifecycle(),
+            bootstrap::workspace_startup_attempt_in_flight(workspace_name, pending.attempt_id),
+        ) {
+            lifecycles.remove(workspace_name);
+        }
+    }
+
+    fn reconcile_template_operation_state(
+        &self,
+        workspace_name: &str,
+        metadata_workspace: &Workspace,
+    ) {
+        let Ok(mut template_operations) = self.template_operations.lock() else {
+            return;
+        };
+        let Some(pending) = template_operations.get(workspace_name).cloned() else {
+            return;
+        };
+        if pending == metadata_workspace.template_operation().cloned() {
+            template_operations.remove(workspace_name);
+        }
     }
 
     pub(crate) fn set_active_workspace_session(
@@ -731,7 +835,10 @@ impl WorkspaceMetadataManager {
     pub(crate) fn apply_workspace_states(&self, workspaces: Vec<Workspace>) -> Vec<Workspace> {
         workspaces
             .into_iter()
-            .map(|workspace| self.apply_workspace_state(workspace))
+            .map(|workspace| {
+                self.reconcile_workspace_observation(&workspace, None);
+                self.apply_workspace_state(workspace)
+            })
             .collect()
     }
 
@@ -834,6 +941,54 @@ fn should_drop_pending_lifecycle(
     startup_attempt_in_flight: bool,
 ) -> bool {
     pending.lifecycle == *metadata_lifecycle && !startup_attempt_in_flight
+}
+
+fn observed_workspace_sessions(workspace: &Workspace) -> HashMap<String, WorkspaceSession> {
+    workspace
+        .sessions()
+        .into_iter()
+        .map(|session| {
+            (
+                workspace_session_key(&session.kind, &session.attachment_id),
+                session,
+            )
+        })
+        .collect()
+}
+
+fn workspace_requires_runtime_observation(workspace: &Workspace) -> bool {
+    workspace.is_ready()
+}
+
+fn should_drop_pending_workspace_session(
+    pending: &PendingWorkspaceSession,
+    key: &str,
+    metadata_sessions: &HashMap<String, WorkspaceSession>,
+    runtime_sessions: Option<&HashMap<String, WorkspaceSession>>,
+    require_runtime: bool,
+) -> bool {
+    match pending {
+        PendingWorkspaceSession::Upsert(session) => {
+            let metadata_converged =
+                should_drop_pending_session(session, metadata_sessions.get(key));
+            let runtime_converged = if require_runtime {
+                runtime_sessions
+                    .is_some_and(|sessions| should_drop_pending_session(session, sessions.get(key)))
+            } else {
+                true
+            };
+            metadata_converged && runtime_converged
+        }
+        PendingWorkspaceSession::Remove => {
+            let metadata_converged = !metadata_sessions.contains_key(key);
+            let runtime_converged = if require_runtime {
+                runtime_sessions.is_some_and(|sessions| !sessions.contains_key(key))
+            } else {
+                true
+            };
+            metadata_converged && runtime_converged
+        }
+    }
 }
 
 #[cfg(test)]
