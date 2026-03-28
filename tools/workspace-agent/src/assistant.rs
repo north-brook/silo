@@ -10,7 +10,7 @@ use std::time::Duration;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Deserialize;
 
-use crate::args::required_flag_value;
+use crate::args::{optional_flag_value, required_flag_value};
 use crate::daemon::state::{AssistantProvider, ObserverEvent};
 use crate::runtime::{send_event, RuntimePaths};
 
@@ -22,17 +22,7 @@ pub(crate) fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
     let provider = required_flag_value(args, "--provider")?;
     let provider = AssistantProvider::parse(provider)
         .ok_or_else(|| format!("unsupported assistant provider: {provider}"))?;
-    let command_start = args
-        .iter()
-        .position(|arg| arg == "--")
-        .ok_or_else(|| "assistant-proxy requires `--` before the wrapped command".to_string())?;
-    let _initial_prompt_argv = args[..command_start]
-        .iter()
-        .any(|arg| arg == "--initial-prompt-argv");
-    let command = args[command_start + 1..].to_vec();
-    if command.is_empty() {
-        return Err("assistant-proxy requires a wrapped command".to_string());
-    }
+    let command = build_wrapped_command(args)?;
 
     let session = env::var("ZMX_SESSION").unwrap_or_default();
     if session.trim().is_empty() {
@@ -117,6 +107,34 @@ pub(crate) fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
     }
 
     process::exit(code as i32);
+}
+
+fn build_wrapped_command(args: &[String]) -> Result<Vec<String>, String> {
+    let command_start = args
+        .iter()
+        .position(|arg| arg == "--")
+        .ok_or_else(|| "assistant-proxy requires `--` before the wrapped command".to_string())?;
+    let initial_prompt_argv = args[..command_start]
+        .iter()
+        .any(|arg| arg == "--initial-prompt-argv");
+    let initial_prompt_file = optional_flag_value(&args[..command_start], "--initial-prompt-file")?;
+    if initial_prompt_argv && initial_prompt_file.is_some() {
+        return Err("assistant-proxy accepts only one initial prompt source".to_string());
+    }
+
+    let mut command = args[command_start + 1..].to_vec();
+    if command.is_empty() {
+        return Err("assistant-proxy requires a wrapped command".to_string());
+    }
+
+    if let Some(path) = initial_prompt_file {
+        let prompt = std::fs::read_to_string(path)
+            .map_err(|error| format!("failed to read initial prompt file: {error}"))?;
+        let _ = std::fs::remove_file(path);
+        command.push(prompt);
+    }
+
+    Ok(command)
 }
 
 fn spawn_passthrough(command: Vec<String>) -> Result<(), String> {
@@ -286,14 +304,17 @@ pub(crate) fn observer_event_from_hook_input(
     input: &str,
 ) -> Option<ObserverEvent> {
     let hook = serde_json::from_str::<AssistantHookInput>(input).ok()?;
+    let turn_id = hook.turn_id.and_then(non_empty_string);
     match hook.hook_event_name.as_str() {
         "UserPromptSubmit" => Some(ObserverEvent::AssistantPromptSubmitted {
             session: session.to_string(),
             provider,
+            turn_id,
         }),
         "Stop" => Some(ObserverEvent::AssistantTurnCompleted {
             session: session.to_string(),
             provider,
+            turn_id,
         }),
         _ => None,
     }
@@ -312,6 +333,79 @@ fn assistant_agent_bin_path() -> Option<String> {
 
 #[derive(Debug, Deserialize)]
 struct AssistantHookInput {
-    #[serde(default)]
+    #[serde(default, alias = "hookEventName")]
     hook_event_name: String,
+    #[serde(default, alias = "turnId")]
+    turn_id: Option<String>,
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proxy_args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn build_wrapped_command_keeps_prompt_argv_passthrough() {
+        let command = build_wrapped_command(&proxy_args(&[
+            "--provider",
+            "codex",
+            "--initial-prompt-argv",
+            "--",
+            "codex",
+            "ship it",
+        ]))
+        .expect("argv prompt command should parse");
+
+        assert_eq!(command, vec!["codex".to_string(), "ship it".to_string()]);
+    }
+
+    #[test]
+    fn build_wrapped_command_appends_prompt_from_file() {
+        let prompt_path =
+            std::env::temp_dir().join(format!("assistant-proxy-prompt-{}.txt", std::process::id()));
+        std::fs::write(&prompt_path, "ship it\nexplain why").expect("prompt file should write");
+
+        let command = build_wrapped_command(&proxy_args(&[
+            "--provider",
+            "codex",
+            "--initial-prompt-file",
+            prompt_path.to_str().expect("prompt path should be utf8"),
+            "--",
+            "codex",
+        ]))
+        .expect("file prompt command should parse");
+
+        assert_eq!(
+            command,
+            vec!["codex".to_string(), "ship it\nexplain why".to_string()]
+        );
+        assert!(!prompt_path.exists());
+    }
+
+    #[test]
+    fn build_wrapped_command_rejects_multiple_prompt_sources() {
+        let error = build_wrapped_command(&proxy_args(&[
+            "--provider",
+            "codex",
+            "--initial-prompt-argv",
+            "--initial-prompt-file",
+            "/tmp/prompt.txt",
+            "--",
+            "codex",
+        ]))
+        .expect_err("multiple prompt sources should fail");
+
+        assert_eq!(
+            error,
+            "assistant-proxy accepts only one initial prompt source"
+        );
+    }
 }
