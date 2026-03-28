@@ -568,34 +568,44 @@ pub(crate) struct WorkspaceLookup {
     pub(crate) gcloud_project: String,
 }
 
-pub(crate) async fn hydrate_workspace_lookup(lookup: WorkspaceLookup) -> WorkspaceLookup {
+pub(crate) async fn fetch_workspace_runtime_workspace(
+    lookup: &WorkspaceLookup,
+) -> Option<Workspace> {
     if !lookup.workspace.is_ready() {
-        return lookup;
+        return None;
     }
 
+    match agent_sessions::fetch_session_snapshot(lookup).await {
+        Ok(snapshot) => Some(overlay_workspace_runtime_snapshot(
+            lookup.workspace.clone(),
+            snapshot,
+        )),
+        Err(error) => {
+            log::warn!(
+                "failed to hydrate workspace runtime sessions workspace={}: {}",
+                lookup.workspace.name(),
+                error
+            );
+            None
+        }
+    }
+}
+
+pub(crate) async fn hydrate_workspace_lookup(lookup: WorkspaceLookup) -> WorkspaceLookup {
     let WorkspaceLookup {
         workspace,
         account,
         gcloud_project,
     } = lookup;
 
-    let workspace = match agent_sessions::fetch_session_snapshot(&WorkspaceLookup {
+    let lookup = WorkspaceLookup {
         workspace: workspace.clone(),
         account: account.clone(),
         gcloud_project: gcloud_project.clone(),
-    })
-    .await
-    {
-        Ok(snapshot) => overlay_workspace_runtime_snapshot(workspace, snapshot),
-        Err(error) => {
-            log::warn!(
-                "failed to hydrate workspace runtime sessions workspace={}: {}",
-                workspace.name(),
-                error
-            );
-            workspace
-        }
     };
+    let workspace = fetch_workspace_runtime_workspace(&lookup)
+        .await
+        .unwrap_or(workspace);
 
     WorkspaceLookup {
         workspace,
@@ -805,14 +815,11 @@ pub async fn workspaces_get_workspace(
     workspace: String,
 ) -> Result<Workspace, String> {
     log::trace!("getting workspace {workspace}");
-    // Hydrate from the raw lookup first, then apply local overlays once. Applying
-    // session removal overlays before hydration can drop a close tombstone while
-    // instance metadata still lags the runtime snapshot, which lets a just-closed
-    // tab flash back into the workspace query result.
-    let lookup = hydrate_workspace_lookup(find_workspace_raw(&workspace).await?).await;
-    // Reapply local overlays after hydration because the runtime snapshot replaces session
-    // arrays with agent state, which can temporarily lag local optimistic session updates.
-    let workspace = state.apply_workspace_state(lookup.workspace);
+    let lookup = find_workspace_raw(&workspace).await?;
+    let runtime_workspace = fetch_workspace_runtime_workspace(&lookup).await;
+    state.reconcile_workspace_observation(&lookup.workspace, runtime_workspace.as_ref());
+    let workspace =
+        state.apply_workspace_state(runtime_workspace.unwrap_or_else(|| lookup.workspace.clone()));
     bootstrap::start_workspace_startup_reconcile_if_needed(workspace.clone());
     bootstrap::start_workspace_agent_update_reconcile_if_needed(workspace.clone());
     Ok(workspace)
@@ -836,11 +843,11 @@ pub async fn workspaces_set_active_session(
 
     let active_session = WorkspaceActiveSession::new(kind.clone(), attachment_id);
     state.set_active_workspace_session(&workspace, active_session.clone());
-    // Hydrate from the raw lookup first so session close tombstones survive until the
-    // runtime snapshot catches up. Then verify the requested session still exists after
-    // applying local overlays before updating agent-owned active-session state.
-    let lookup = hydrate_workspace_lookup(find_workspace_raw(&workspace).await?).await;
-    let workspace_with_state = state.apply_workspace_state(lookup.workspace.clone());
+    let lookup = find_workspace_raw(&workspace).await?;
+    let runtime_workspace = fetch_workspace_runtime_workspace(&lookup).await;
+    state.reconcile_workspace_observation(&lookup.workspace, runtime_workspace.as_ref());
+    let workspace_with_state =
+        state.apply_workspace_state(runtime_workspace.unwrap_or_else(|| lookup.workspace.clone()));
     if !workspace_with_state.has_session(&kind, &active_session.attachment_id) {
         log::info!(
             "ignoring active session update for missing workspace session workspace={} kind={} attachment_id={}",
@@ -865,7 +872,6 @@ pub async fn workspaces_set_active_session(
 
 #[tauri::command]
 pub async fn workspaces_submit_prompt(
-    state: State<'_, terminal::TerminalManager>,
     workspace_state: State<'_, crate::state::WorkspaceMetadataManager>,
     workspace: String,
     prompt: String,
@@ -879,12 +885,12 @@ pub async fn workspaces_submit_prompt(
     }
 
     let prompt = trim_prompt_input(&prompt)?;
-    let command = prompt_command_for_model(&model, &prompt)?;
-    let attachment_id = terminal::start_terminal_command(
-        state.inner(),
+    let provider = assistant_provider_for_model(&model)?;
+    let attachment_id = terminal::start_assistant_session(
         workspace_state.inner(),
         &workspace,
-        &command,
+        provider,
+        Some(&prompt),
     )
     .await?;
 
@@ -918,12 +924,8 @@ fn trim_prompt_input(prompt: &str) -> Result<String, String> {
     Ok(prompt.to_string())
 }
 
-fn prompt_command_for_model(model: &str, prompt: &str) -> Result<String, String> {
-    match model.trim() {
-        "codex" => Ok(terminal::codex_prompt_command(prompt)),
-        "claude" => Ok(terminal::claude_prompt_command(prompt)),
-        other => Err(format!("unsupported prompt model: {other}")),
-    }
+fn assistant_provider_for_model(model: &str) -> Result<terminal::AssistantProvider, String> {
+    terminal::AssistantProvider::parse(model)
 }
 
 pub(crate) async fn find_workspace_raw(name: &str) -> Result<WorkspaceLookup, String> {
@@ -2864,6 +2866,45 @@ mod tests {
         )
     }
 
+    fn test_workspace_session(kind: &str, attachment_id: &str) -> WorkspaceSession {
+        WorkspaceSession {
+            kind: kind.to_string(),
+            name: format!("{kind}-{attachment_id}"),
+            attachment_id: attachment_id.to_string(),
+            path: (kind == "file").then(|| "components.json".to_string()),
+            url: None,
+            logical_url: None,
+            resolved_url: None,
+            title: None,
+            favicon_url: None,
+            can_go_back: None,
+            can_go_forward: None,
+            working: None,
+            unread: None,
+        }
+    }
+
+    fn test_branch_workspace_with_sessions(
+        name: &str,
+        active_session: Option<WorkspaceActiveSession>,
+        terminals: Vec<WorkspaceSession>,
+        browsers: Vec<WorkspaceSession>,
+        files: Vec<WorkspaceSession>,
+    ) -> Workspace {
+        let mut base = test_workspace_base(name, None);
+        base.active_session = active_session;
+        Workspace::branch(
+            base,
+            "silo/aare".to_string(),
+            String::new(),
+            false,
+            None,
+            terminals,
+            browsers,
+            files,
+        )
+    }
+
     #[test]
     fn resolve_gcloud_config_applies_project_overrides() {
         let config = SiloConfig {
@@ -3617,6 +3658,94 @@ mod tests {
     }
 
     #[test]
+    fn metadata_only_observation_does_not_drop_session_remove_tombstone() {
+        let manager = crate::state::WorkspaceMetadataManager::default();
+        manager.remove_workspace_session("ws-demo-123", "file", "file-1");
+
+        let metadata_workspace =
+            test_branch_workspace_with_sessions("ws-demo-123", None, vec![], vec![], vec![]);
+        let runtime_workspace = test_branch_workspace_with_sessions(
+            "ws-demo-123",
+            None,
+            vec![],
+            vec![],
+            vec![test_workspace_session("file", "file-1")],
+        );
+
+        manager.reconcile_workspace_observation(&metadata_workspace, None);
+        let projected = manager.apply_workspace_state(runtime_workspace);
+
+        assert!(!projected.has_session("file", "file-1"));
+    }
+
+    #[test]
+    fn session_remove_tombstone_clears_after_metadata_and_runtime_absent() {
+        let manager = crate::state::WorkspaceMetadataManager::default();
+        manager.remove_workspace_session("ws-demo-123", "file", "file-1");
+
+        let metadata_workspace =
+            test_branch_workspace_with_sessions("ws-demo-123", None, vec![], vec![], vec![]);
+        let runtime_workspace = test_branch_workspace_with_sessions(
+            "ws-demo-123",
+            None,
+            vec![],
+            vec![],
+            vec![test_workspace_session("file", "file-1")],
+        );
+
+        manager.reconcile_workspace_observation(&metadata_workspace, Some(&runtime_workspace));
+        let projected_while_runtime_stale =
+            manager.apply_workspace_state(runtime_workspace.clone());
+        assert!(!projected_while_runtime_stale.has_session("file", "file-1"));
+
+        manager.reconcile_workspace_observation(&metadata_workspace, Some(&metadata_workspace));
+        let projected_after_convergence = manager.apply_workspace_state(runtime_workspace);
+        assert!(projected_after_convergence.has_session("file", "file-1"));
+    }
+
+    #[test]
+    fn metadata_only_observation_does_not_drop_session_upsert_overlay() {
+        let manager = crate::state::WorkspaceMetadataManager::default();
+        manager.upsert_workspace_session("ws-demo-123", test_workspace_session("file", "file-1"));
+
+        let metadata_workspace = test_branch_workspace_with_sessions(
+            "ws-demo-123",
+            None,
+            vec![],
+            vec![],
+            vec![test_workspace_session("file", "file-1")],
+        );
+        let runtime_workspace =
+            test_branch_workspace_with_sessions("ws-demo-123", None, vec![], vec![], vec![]);
+
+        manager.reconcile_workspace_observation(&metadata_workspace, None);
+        let projected = manager.apply_workspace_state(runtime_workspace);
+
+        assert!(projected.has_session("file", "file-1"));
+    }
+
+    #[test]
+    fn session_upsert_overlay_clears_after_metadata_and_runtime_match() {
+        let manager = crate::state::WorkspaceMetadataManager::default();
+        manager.upsert_workspace_session("ws-demo-123", test_workspace_session("file", "file-1"));
+
+        let observed_workspace = test_branch_workspace_with_sessions(
+            "ws-demo-123",
+            None,
+            vec![],
+            vec![],
+            vec![test_workspace_session("file", "file-1")],
+        );
+        let stale_runtime_workspace =
+            test_branch_workspace_with_sessions("ws-demo-123", None, vec![], vec![], vec![]);
+
+        manager.reconcile_workspace_observation(&observed_workspace, Some(&observed_workspace));
+        let projected_after_convergence = manager.apply_workspace_state(stale_runtime_workspace);
+
+        assert!(!projected_after_convergence.has_session("file", "file-1"));
+    }
+
+    #[test]
     fn replace_workspace_terminals_replaces_only_terminal_sessions() {
         let mut overlay = HashMap::new();
         overlay.insert(
@@ -3854,19 +3983,18 @@ mod tests {
     }
 
     #[test]
-    fn prompt_command_for_model_rejects_unknown_model() {
+    fn assistant_provider_for_model_rejects_unknown_model() {
         assert_eq!(
-            prompt_command_for_model("gpt", "ship it").expect_err("unknown model should fail"),
-            "unsupported prompt model: gpt"
+            assistant_provider_for_model("gpt").expect_err("unknown model should fail"),
+            "unsupported assistant model: gpt"
         );
     }
 
     #[test]
-    fn prompt_command_for_model_uses_claude_command_builder() {
-        let command = prompt_command_for_model("claude", "ship it")
-            .expect("claude model should build a command");
-
-        assert!(command.starts_with("silo claude "));
-        assert!(command.contains("base64 --decode"));
+    fn assistant_provider_for_model_parses_claude() {
+        assert_eq!(
+            assistant_provider_for_model("claude").expect("claude model should parse"),
+            terminal::AssistantProvider::Claude
+        );
     }
 }
