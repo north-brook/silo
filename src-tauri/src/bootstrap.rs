@@ -137,6 +137,38 @@ fn cached_workspace_bootstrap(workspace: &str) -> Option<WorkspaceBootstrap> {
         .and_then(|state| state.bootstrap.clone())
 }
 
+fn cached_workspace_bootstrap_with_fresh_codex_auth(workspace: &str) -> Option<WorkspaceBootstrap> {
+    let mut bootstrap = cached_workspace_bootstrap(workspace)?;
+    let Ok(config) = ConfigStore::new().and_then(|store| store.load()) else {
+        log::warn!(
+            "using cached workspace bootstrap for {} without refreshing codex auth because config reload failed",
+            workspace
+        );
+        return Some(bootstrap);
+    };
+
+    let (codex_auth_json, codex_auth_fingerprint) = workspace_bootstrap_codex_auth(&config);
+    if bootstrap.codex_auth_json == codex_auth_json
+        && bootstrap.codex_auth_fingerprint == codex_auth_fingerprint
+    {
+        return Some(bootstrap);
+    }
+
+    bootstrap.codex_auth_json = codex_auth_json.clone();
+    bootstrap.codex_auth_fingerprint = codex_auth_fingerprint.clone();
+
+    if let Ok(mut states) = WORKSPACE_STARTUP_RECONCILE_STATE.lock() {
+        if let Some(state) = states.get_mut(workspace) {
+            if let Some(cached) = state.bootstrap.as_mut() {
+                cached.codex_auth_json = codex_auth_json;
+                cached.codex_auth_fingerprint = codex_auth_fingerprint;
+            }
+        }
+    }
+
+    Some(bootstrap)
+}
+
 pub(crate) fn workspace_startup_attempt_in_flight(workspace: &str, attempt_id: u64) -> bool {
     let Ok(states) = WORKSPACE_STARTUP_RECONCILE_STATE.lock() else {
         return false;
@@ -172,8 +204,7 @@ fn build_workspace_bootstrap(
         None => None,
     };
 
-    let codex_auth_json = normalize_codex_auth_json(&config.codex.auth_json).unwrap_or_default();
-    let codex_auth_fingerprint = codex_auth_fingerprint(&codex_auth_json);
+    let (codex_auth_json, codex_auth_fingerprint) = workspace_bootstrap_codex_auth(config);
 
     Ok(WorkspaceBootstrap {
         remote_url: project.remote_url.clone(),
@@ -188,6 +219,12 @@ fn build_workspace_bootstrap(
         git_user_email: config.git.user_email.clone(),
         env_files: load_bootstrap_env_files(project_name, project),
     })
+}
+
+fn workspace_bootstrap_codex_auth(config: &SiloConfig) -> (String, String) {
+    let codex_auth_json = normalize_codex_auth_json(&config.codex.auth_json).unwrap_or_default();
+    let codex_auth_fingerprint = codex_auth_fingerprint(&codex_auth_json);
+    (codex_auth_json, codex_auth_fingerprint)
 }
 
 async fn bootstrap_workspace(lookup: &WorkspaceLookup) -> Result<(), String> {
@@ -921,7 +958,9 @@ impl LifecycleReporter {
 }
 
 fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, String> {
-    if let Some(bootstrap) = cached_workspace_bootstrap(lookup.workspace.name()) {
+    if let Some(bootstrap) =
+        cached_workspace_bootstrap_with_fresh_codex_auth(lookup.workspace.name())
+    {
         return Ok(bootstrap);
     }
 
@@ -1725,7 +1764,7 @@ fn provider_hook_config(provider: &str) -> serde_json::Value {
                 "hooks": [
                     {
                         "type": "command",
-                        "command": assistant_emit_hook_command(
+                        "command": assistant_hook_command(
                             provider,
                             "assistant_prompt_submitted"
                         )
@@ -1738,7 +1777,7 @@ fn provider_hook_config(provider: &str) -> serde_json::Value {
                 "hooks": [
                     {
                         "type": "command",
-                        "command": assistant_emit_hook_command(
+                        "command": assistant_hook_command(
                             provider,
                             "assistant_turn_completed"
                         )
@@ -1749,10 +1788,10 @@ fn provider_hook_config(provider: &str) -> serde_json::Value {
     })
 }
 
-fn assistant_emit_hook_command(provider: &str, kind: &str) -> String {
+fn assistant_hook_command(provider: &str, _kind: &str) -> String {
     format!(
-        "[ -n \"${{SILO_TERMINAL_ID:-}}\" ] || exit 0; SILO_AGENT_HOOK=1 \"${{SILO_WORKSPACE_AGENT_BIN:-{}}}\" emit --kind {} --session \"$SILO_TERMINAL_ID\" --provider {}",
-        REMOTE_WORKSPACE_AGENT_BIN, kind, provider
+        "[ -n \"${{SILO_TERMINAL_ID:-}}\" ] || exit 0; SILO_AGENT_HOOK=1 \"${{SILO_WORKSPACE_AGENT_BIN:-{}}}\" assistant-hook --provider {}",
+        REMOTE_WORKSPACE_AGENT_BIN, provider
     )
 }
 
@@ -1790,20 +1829,18 @@ mod tests {
     }
 
     #[test]
-    fn provider_hook_config_uses_direct_workspace_agent_emits() {
+    fn provider_hook_config_routes_provider_payloads_through_workspace_agent() {
         let codex = codex_hooks_json();
         let claude = claude_settings_json();
 
         assert!(codex.contains("\"UserPromptSubmit\""));
         assert!(codex.contains("\"Stop\""));
-        assert!(codex.contains("emit --kind assistant_prompt_submitted"));
-        assert!(codex.contains("emit --kind assistant_turn_completed"));
+        assert!(codex.contains("assistant-hook --provider codex"));
         assert!(codex.contains("--provider codex"));
         assert!(codex.contains("SILO_TERMINAL_ID"));
         assert!(codex.contains("SILO_WORKSPACE_AGENT_BIN"));
         assert!(claude.contains("\"hooks\""));
-        assert!(claude.contains("emit --kind assistant_prompt_submitted"));
-        assert!(claude.contains("emit --kind assistant_turn_completed"));
+        assert!(claude.contains("assistant-hook --provider claude"));
         assert!(claude.contains("--provider claude"));
     }
 
@@ -2169,6 +2206,85 @@ mod tests {
             bootstrap.codex_auth_fingerprint,
             hex_sha256(b"codex-refresh-token")
         );
+    }
+
+    #[test]
+    fn cached_workspace_bootstrap_refreshes_codex_auth_from_synced_config() {
+        let _guard = ENV_LOCK.lock().expect("env lock should be available");
+        let temp_dir = TempDir::new();
+        let previous_home = env::var_os("HOME");
+        env::set_var("HOME", &temp_dir.path);
+
+        let stale_config = SiloConfig {
+            git: crate::config::GitConfig {
+                gh_username: "octocat".to_string(),
+                gh_token: "gh-secret".to_string(),
+                user_name: "Example User".to_string(),
+                user_email: "user@example.com".to_string(),
+            },
+            codex: crate::config::CodexConfig {
+                auth_json: "{\"tokens\":{\"refresh_token\":\"stale-codex-refresh-token\"}}"
+                    .to_string(),
+            },
+            claude: crate::config::ClaudeConfig {
+                token: "claude-secret".to_string(),
+            },
+            projects: IndexMap::new(),
+            ..SiloConfig::default()
+        };
+        let project = ProjectConfig {
+            name: "demo".to_string(),
+            path: "/tmp/demo".to_string(),
+            image: None,
+            remote_url: "git@github.com:example/demo.git".to_string(),
+            target_branch: "main".to_string(),
+            env_files: Vec::new(),
+            gcloud: crate::config::ProjectGcloudConfig::default(),
+        };
+        let host_codex_dir = temp_dir.path.join(".codex");
+        fs::create_dir_all(&host_codex_dir).expect("host codex dir should exist");
+        fs::write(
+            host_codex_dir.join("auth.json"),
+            "{\n  \"tokens\": {\n    \"refresh_token\": \"fresh-codex-refresh-token\"\n  }\n}\n",
+        )
+        .expect("host auth.json should be written");
+
+        let store = ConfigStore::from_home_dir(temp_dir.path.clone());
+        store
+            .save(&stale_config)
+            .expect("stale config should be persisted");
+        cache_workspace_bootstrap(
+            "demo-silo-auth-refresh",
+            &stale_config,
+            "demo",
+            &project,
+            "main",
+            Some("feature/demo"),
+        )
+        .expect("bootstrap cache should seed");
+
+        let bootstrap = cached_workspace_bootstrap_with_fresh_codex_auth("demo-silo-auth-refresh")
+            .expect("cached bootstrap should exist");
+        assert_eq!(
+            bootstrap.codex_auth_json,
+            "{\"tokens\":{\"refresh_token\":\"fresh-codex-refresh-token\"}}"
+        );
+        assert_eq!(
+            bootstrap.codex_auth_fingerprint,
+            hex_sha256(b"fresh-codex-refresh-token")
+        );
+
+        let persisted = store.load().expect("synced config should load");
+        assert_eq!(persisted.codex.auth_json, bootstrap.codex_auth_json);
+
+        if let Some(previous_home) = previous_home {
+            env::set_var("HOME", previous_home);
+        } else {
+            env::remove_var("HOME");
+        }
+        if let Ok(mut states) = WORKSPACE_STARTUP_RECONCILE_STATE.lock() {
+            states.remove("demo-silo-auth-refresh");
+        }
     }
 
     struct TempDir {
