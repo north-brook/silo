@@ -177,7 +177,7 @@ pub async fn files_save(
 
 #[tauri::command]
 pub async fn files_set_watched_paths(workspace: String, paths: Vec<String>) -> Result<(), String> {
-    let lookup = branch_workspace_lookup(&workspace).await?;
+    let lookup = branch_workspace_lookup_raw(&workspace).await?;
     let mut normalized = paths
         .iter()
         .map(|path| normalize_repo_relative_path(path))
