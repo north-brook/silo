@@ -29,6 +29,7 @@ fn assistant_hook_maps_prompt_submit() {
         Some(ObserverEvent::AssistantPromptSubmitted {
             session,
             provider: AssistantProvider::Claude,
+            turn_id: None,
         }) if session == "terminal-1"
     ));
 }
@@ -38,7 +39,7 @@ fn assistant_hook_maps_stop() {
     let event = observer_event_from_hook_input(
         "terminal-1",
         AssistantProvider::Codex,
-        r#"{"hook_event_name":"Stop","session_id":"provider-session"}"#,
+        r#"{"hookEventName":"Stop","session_id":"provider-session","turn_id":"turn-1"}"#,
     );
 
     assert!(matches!(
@@ -46,7 +47,27 @@ fn assistant_hook_maps_stop() {
         Some(ObserverEvent::AssistantTurnCompleted {
             session,
             provider: AssistantProvider::Codex,
+            turn_id: Some(turn_id),
+        }) if session == "terminal-1" && turn_id == "turn-1"
+    ));
+}
+
+#[test]
+fn assistant_hook_maps_camel_case_prompt_submit_with_turn_id() {
+    let event = observer_event_from_hook_input(
+        "terminal-1",
+        AssistantProvider::Codex,
+        r#"{"hookEventName":"UserPromptSubmit","turn_id":"turn-1"}"#,
+    );
+
+    assert!(matches!(
+        event,
+        Some(ObserverEvent::AssistantPromptSubmitted {
+            session,
+            provider: AssistantProvider::Codex,
+            turn_id: Some(turn_id),
         }) if session == "terminal-1"
+            && turn_id == "turn-1"
     ));
 }
 
@@ -207,6 +228,7 @@ fn assistant_prompt_submitted_updates_last_working() {
         ObserverEvent::AssistantPromptSubmitted {
             session: "terminal-1".to_string(),
             provider: AssistantProvider::Codex,
+            turn_id: Some("turn-1".to_string()),
         },
     );
 
@@ -345,6 +367,8 @@ fn reconcile_sessions_keeps_lifecycle_managed_session_on_transient_poll_miss() {
         SessionState {
             active_command: Some("codex".to_string()),
             assistant_provider: Some(AssistantProvider::Codex),
+            active_turn_id: None,
+            completed_turn_id: None,
             command_running: true,
             working: true,
             unread: false,
@@ -373,6 +397,8 @@ fn reconcile_sessions_clears_finished_assistant_back_to_shell() {
         SessionState {
             active_command: Some("claude".to_string()),
             assistant_provider: Some(AssistantProvider::Claude),
+            active_turn_id: None,
+            completed_turn_id: None,
             command_running: false,
             working: false,
             unread: false,
@@ -405,6 +431,8 @@ fn reconcile_sessions_drops_missing_idle_shell_session_quickly() {
         SessionState {
             active_command: None,
             assistant_provider: None,
+            active_turn_id: None,
+            completed_turn_id: None,
             command_running: false,
             working: false,
             unread: true,
@@ -431,6 +459,8 @@ fn reconcile_sessions_preserves_running_command_without_live_cmd() {
         SessionState {
             active_command: Some("bun run dev".to_string()),
             assistant_provider: None,
+            active_turn_id: None,
+            completed_turn_id: None,
             command_running: true,
             working: false,
             unread: false,
@@ -487,6 +517,8 @@ fn build_published_state_uses_agent_state_without_live_poll_data() {
         SessionState {
             active_command: Some("codex".to_string()),
             assistant_provider: Some(AssistantProvider::Codex),
+            active_turn_id: Some("turn-1".to_string()),
+            completed_turn_id: None,
             command_running: true,
             working: true,
             unread: false,
@@ -503,6 +535,80 @@ fn build_published_state_uses_agent_state_without_live_poll_data() {
     assert_eq!(published.terminals[0].name, "codex");
     assert_eq!(published.terminals[0].attachment_id, "terminal-1");
     assert_eq!(published.terminals[0].working, Some(true));
+}
+
+#[test]
+fn assistant_turn_completed_ignores_stale_turn_ids() {
+    let mut state = ObserverState::default();
+
+    apply_event(
+        &mut state,
+        ObserverEvent::AssistantPromptSubmitted {
+            session: "terminal-1".to_string(),
+            provider: AssistantProvider::Codex,
+            turn_id: Some("turn-2".to_string()),
+        },
+    );
+    apply_event(
+        &mut state,
+        ObserverEvent::AssistantTurnCompleted {
+            session: "terminal-1".to_string(),
+            provider: AssistantProvider::Codex,
+            turn_id: Some("turn-1".to_string()),
+        },
+    );
+
+    let session = state
+        .sessions
+        .get("terminal-1")
+        .expect("session should exist");
+    assert!(session.working);
+    assert!(!session.unread);
+    assert_eq!(session.active_turn_id.as_deref(), Some("turn-2"));
+}
+
+#[test]
+fn assistant_turn_completed_ignores_duplicate_turn_ids_after_mark_read() {
+    let mut state = ObserverState::default();
+
+    apply_event(
+        &mut state,
+        ObserverEvent::AssistantPromptSubmitted {
+            session: "terminal-1".to_string(),
+            provider: AssistantProvider::Codex,
+            turn_id: Some("turn-1".to_string()),
+        },
+    );
+    apply_event(
+        &mut state,
+        ObserverEvent::AssistantTurnCompleted {
+            session: "terminal-1".to_string(),
+            provider: AssistantProvider::Codex,
+            turn_id: Some("turn-1".to_string()),
+        },
+    );
+    apply_event(
+        &mut state,
+        ObserverEvent::MarkRead {
+            session: "terminal-1".to_string(),
+        },
+    );
+    apply_event(
+        &mut state,
+        ObserverEvent::AssistantTurnCompleted {
+            session: "terminal-1".to_string(),
+            provider: AssistantProvider::Codex,
+            turn_id: Some("turn-1".to_string()),
+        },
+    );
+
+    let session = state
+        .sessions
+        .get("terminal-1")
+        .expect("session should exist");
+    assert!(!session.working);
+    assert!(!session.unread);
+    assert_eq!(session.completed_turn_id.as_deref(), Some("turn-1"));
 }
 
 #[test]
