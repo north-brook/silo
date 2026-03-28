@@ -665,7 +665,7 @@ pub(crate) async fn post_instance_action(
 ) -> Result<(), String> {
     let url =
         format!("{COMPUTE_API_BASE}/projects/{project}/zones/{zone}/instances/{name}/{action}");
-    let request = client().request(Method::POST, &url);
+    let request = empty_post_request(&url);
     send_empty(request, context).await
 }
 
@@ -872,6 +872,13 @@ pub(crate) async fn ensure_runtime_oslogin_ready(project: &str) -> Result<String
         }
         Err(error) => Err(error),
     }
+}
+
+fn empty_post_request(url: &str) -> RequestBuilder {
+    client()
+        .request(Method::POST, url)
+        .header(reqwest::header::CONTENT_LENGTH, "0")
+        .body("")
 }
 
 async fn sleep_for(duration: Duration, context: &str) -> Result<(), String> {
@@ -1294,5 +1301,21 @@ mod tests {
             reqwest::StatusCode::UNAUTHORIZED,
             "{\"error\":{\"status\":\"UNAUTHENTICATED\",\"message\":\"other\"}}"
         ));
+    }
+
+    #[test]
+    fn empty_post_request_sets_zero_content_length() {
+        let request = empty_post_request("https://example.com")
+            .build()
+            .expect("request should build");
+
+        assert_eq!(request.method(), Method::POST);
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok()),
+            Some("0")
+        );
     }
 }
