@@ -2,9 +2,9 @@ use crate::agent_sessions;
 use crate::bootstrap;
 use crate::bootstrap::is_retryable_terminal_transport_error;
 use crate::remote::{
-    assistant_prompt_command, build_terminal_attach_command, remote_command_error,
-    run_remote_command, run_terminal_user_command, shell_quote, terminal_shell_command,
-    REMOTE_WORKSPACE_AGENT_BIN,
+    build_terminal_attach_command, remote_command_error, run_remote_command,
+    run_remote_command_with_stdin, run_terminal_user_command, shell_quote, terminal_shell_command,
+    workspace_shell_command_preserving_stdin, REMOTE_WORKSPACE_AGENT_BIN,
 };
 use crate::state::WorkspaceMetadataManager;
 use crate::workspaces::{self, WorkspaceActiveSession, WorkspaceLookup, WorkspaceSession};
@@ -13,7 +13,7 @@ use portable_pty::{native_pty_system, Child, ChildKiller, MasterPty, PtySize};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, EventTarget, State, Window};
@@ -24,7 +24,6 @@ const TERMINAL_ERROR_EVENT: &str = "terminal://error";
 const TERMINAL_DISCONNECT_EVENT: &str = "terminal://disconnect";
 const MAX_ATTACHMENT_RECENT_OUTPUT_BYTES: usize = 16 * 1024;
 const MAX_ATTACHMENT_PENDING_OUTPUT_BYTES: usize = 512 * 1024;
-const ATTACH_COMMAND_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const ATTACH_RESERVATION_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const ATTACH_RESERVATION_WAIT_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -46,6 +45,36 @@ pub struct TerminalAttachResult {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TerminalCreateResult {
     pub(crate) attachment_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssistantProvider {
+    Codex,
+    Claude,
+}
+
+impl AssistantProvider {
+    pub(crate) fn parse(model: &str) -> Result<Self, String> {
+        match model.trim() {
+            "codex" => Ok(Self::Codex),
+            "claude" => Ok(Self::Claude),
+            other => Err(format!("unsupported assistant model: {other}")),
+        }
+    }
+
+    fn command_name(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+        }
+    }
+
+    fn wrapped_command(self) -> &'static [&'static str] {
+        match self {
+            Self::Codex => &["codex"],
+            Self::Claude => &["claude", "--dangerously-skip-permissions"],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -113,8 +142,6 @@ struct Attachment {
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     output_state: Mutex<AttachmentOutputState>,
     window_label: Mutex<String>,
-    connected: Mutex<bool>,
-    connected_cv: Condvar,
     recent_output: Mutex<Vec<u8>>,
 }
 
@@ -129,7 +156,6 @@ struct AttachmentRegistry {
     by_id: HashMap<String, Arc<Attachment>>,
     by_key: HashMap<AttachmentKey, String>,
     reserved_keys: HashSet<AttachmentKey>,
-    startup_commands: HashMap<AttachmentKey, String>,
 }
 
 #[derive(Clone, Default)]
@@ -187,17 +213,6 @@ impl TerminalManager {
         let id = self.inner.lock().ok()?.by_key.get(key)?.clone();
         self.remove_by_id(&id)
     }
-
-    fn set_startup_command(&self, key: AttachmentKey, command: String) {
-        if let Ok(mut registry) = self.inner.lock() {
-            registry.startup_commands.insert(key, command);
-        }
-    }
-
-    fn take_startup_command(&self, key: &AttachmentKey) -> Option<String> {
-        self.inner.lock().ok()?.startup_commands.remove(key)
-    }
-
     fn try_reserve(&self, key: &AttachmentKey) -> Option<AttachmentReservation> {
         let mut registry = self.inner.lock().ok()?;
         if registry.by_key.contains_key(key) || registry.reserved_keys.contains(key) {
@@ -264,18 +279,13 @@ pub(crate) async fn ensure_template_startup_terminal_session(
 
 #[tauri::command]
 pub async fn terminal_create_assistant(
-    state: State<'_, TerminalManager>,
     workspace_state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
     model: String,
 ) -> Result<TerminalCreateResult, String> {
-    let command = match model.trim() {
-        "codex" => "silo codex",
-        "claude" => "silo claude",
-        other => return Err(format!("unsupported assistant model: {other}")),
-    };
+    let provider = AssistantProvider::parse(&model)?;
     let attachment_id =
-        start_terminal_command(state.inner(), workspace_state.inner(), &workspace, command).await?;
+        start_assistant_session(workspace_state.inner(), &workspace, provider, None).await?;
     Ok(TerminalCreateResult { attachment_id })
 }
 
@@ -295,7 +305,6 @@ pub async fn terminal_attach_terminal(
     attachment_id: String,
     cols: u16,
     rows: u16,
-    command: Option<String>,
     output: Channel<Vec<u8>>,
 ) -> Result<TerminalAttachResult, String> {
     let attach_started = Instant::now();
@@ -319,7 +328,6 @@ pub async fn terminal_attach_terminal(
         workspace: workspace.clone(),
         name: attachment_id.clone(),
     };
-    let startup_command = command.or_else(|| state.take_startup_command(&key));
     let attach_command =
         build_terminal_attach_command(&lookup, &terminal_attach_remote_command(&attachment_id))
             .await?;
@@ -334,7 +342,6 @@ pub async fn terminal_attach_terminal(
                 rows,
                 &window,
                 output,
-                startup_command,
                 attach_started,
             )
             .await;
@@ -359,9 +366,6 @@ pub async fn terminal_attach_terminal(
         attachment_id,
         spawn_started.elapsed().as_millis()
     );
-    if let Some(command) = startup_command {
-        queue_attach_command(attachment.clone(), command);
-    }
 
     log::info!(
         "terminal attach ready workspace={} attachment_id={} elapsed_ms={}",
@@ -423,33 +427,56 @@ pub async fn terminal_run_terminal(
     Ok(TerminalRunResult { session, created })
 }
 
-pub(crate) async fn start_terminal_command(
-    manager: &TerminalManager,
+pub(crate) async fn start_assistant_session(
     workspace_state: &WorkspaceMetadataManager,
     workspace: &str,
-    command: &str,
+    provider: AssistantProvider,
+    initial_prompt: Option<&str>,
 ) -> Result<String, String> {
+    let lookup = workspaces::find_workspace_raw(workspace).await?;
+    if !lookup.workspace.is_ready() {
+        bootstrap::start_workspace_startup_reconcile_if_needed(lookup.workspace.clone());
+        return Err(workspaces::workspace_not_ready_error(&lookup.workspace));
+    }
+
     let attachment_id = create_terminal_attachment_id(workspace).await?;
     workspace_state.upsert_workspace_session(
         workspace,
-        startup_session_for_command(&attachment_id, command),
+        pending_assistant_session(&attachment_id, provider),
     );
-    manager.set_startup_command(
-        AttachmentKey {
-            workspace: workspace.to_string(),
-            name: attachment_id.clone(),
-        },
-        command.to_string(),
-    );
-    Ok(attachment_id)
-}
 
-pub(crate) fn codex_prompt_command(prompt: &str) -> String {
-    assistant_prompt_command("silo codex", prompt)
-}
+    let assistant_command =
+        assistant_session_command(provider, initial_prompt.is_some(), &attachment_id);
+    let launch_result = if let Some(prompt) = initial_prompt {
+        let prompt_path = assistant_prompt_file_path(&attachment_id);
+        let remote_command = assistant_prompt_launch_remote_command(
+            &attachment_id,
+            &assistant_command,
+            &prompt_path,
+        );
+        run_remote_command_with_stdin(&lookup, &remote_command, prompt.as_bytes().to_vec()).await
+    } else {
+        run_remote_command(
+            &lookup,
+            &terminal_run_remote_command(&attachment_id, &assistant_command),
+        )
+        .await
+    };
 
-pub(crate) fn claude_prompt_command(prompt: &str) -> String {
-    assistant_prompt_command("silo claude", prompt)
+    match launch_result {
+        Ok(result) if result.success => Ok(attachment_id),
+        Ok(result) => {
+            workspace_state.remove_workspace_session(workspace, "terminal", &attachment_id);
+            Err(remote_command_error(
+                "failed to start assistant session",
+                &result.stderr,
+            ))
+        }
+        Err(error) => {
+            workspace_state.remove_workspace_session(workspace, "terminal", &attachment_id);
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]
@@ -712,8 +739,6 @@ fn spawn_terminal_attachment(
             pending: Vec::new(),
         }),
         window_label: Mutex::new(window_label),
-        connected: Mutex::new(false),
-        connected_cv: Condvar::new(),
         recent_output: Mutex::new(Vec::new()),
     });
 
@@ -730,7 +755,6 @@ fn spawn_reader_loop(mut reader: Box<dyn Read + Send>, attachment: Arc<Attachmen
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(count) => {
-                    mark_attachment_connected(&attachment);
                     let chunk = buffer[..count].to_vec();
                     record_attachment_output(&attachment, &chunk);
                     if let Err(error) = push_attachment_output(&attachment, &chunk) {
@@ -966,39 +990,6 @@ fn recent_attachment_output(attachment: &Attachment) -> String {
         .unwrap_or_default()
 }
 
-fn mark_attachment_connected(attachment: &Attachment) {
-    if let Ok(mut connected) = attachment.connected.lock() {
-        if !*connected {
-            *connected = true;
-            attachment.connected_cv.notify_all();
-        }
-    }
-}
-
-fn queue_attach_command(attachment: Arc<Attachment>, command: String) {
-    let data = terminal_command_bytes(&command);
-    if data.is_empty() {
-        return;
-    }
-
-    std::thread::spawn(move || {
-        if let Ok(connected) = attachment.connected.lock() {
-            let _ = attachment.connected_cv.wait_timeout_while(
-                connected,
-                ATTACH_COMMAND_WAIT_TIMEOUT,
-                |is_connected| !*is_connected,
-            );
-        }
-
-        if let Err(error) = write_attachment_input(&attachment, &data) {
-            emit_terminal_error(
-                &attachment,
-                format!("failed to send attach command to terminal: {error}"),
-            );
-        }
-    });
-}
-
 async fn attach_existing_terminal(
     existing: Arc<Attachment>,
     lookup: &WorkspaceLookup,
@@ -1007,14 +998,10 @@ async fn attach_existing_terminal(
     rows: u16,
     window: &Window<AppRuntime>,
     output: Channel<Vec<u8>>,
-    command: Option<String>,
     attach_started: Instant,
 ) -> Result<TerminalAttachResult, String> {
     resize_attachment(&existing, cols, rows)?;
     let initial_output = handoff_attachment_output(&existing, output, window.label().as_ref())?;
-    if let Some(command) = command {
-        queue_attach_command(existing.clone(), command);
-    }
 
     log::info!(
         "terminal attach reused existing pty workspace={} attachment_id={} elapsed_ms={}",
@@ -1048,19 +1035,6 @@ async fn wait_for_attachment_slot(
         }
         std::thread::sleep(ATTACH_RESERVATION_WAIT_INTERVAL);
     }
-}
-
-fn write_attachment_input(attachment: &Attachment, data: &[u8]) -> Result<(), String> {
-    let mut writer = attachment
-        .writer
-        .lock()
-        .map_err(|_| "terminal writer lock poisoned".to_string())?;
-    writer
-        .write_all(data)
-        .map_err(|error| format!("failed to write terminal input: {error}"))?;
-    writer
-        .flush()
-        .map_err(|error| format!("failed to flush terminal input: {error}"))
 }
 
 pub(crate) async fn list_terminals_in_workspace(
@@ -1166,6 +1140,24 @@ fn pending_terminal_session(attachment_id: &str) -> WorkspaceSession {
     }
 }
 
+fn pending_assistant_session(attachment_id: &str, provider: AssistantProvider) -> WorkspaceSession {
+    WorkspaceSession {
+        kind: "terminal".to_string(),
+        name: provider.command_name().to_string(),
+        attachment_id: attachment_id.to_string(),
+        path: None,
+        url: None,
+        logical_url: None,
+        resolved_url: None,
+        title: None,
+        favicon_url: None,
+        can_go_back: None,
+        can_go_forward: None,
+        working: None,
+        unread: None,
+    }
+}
+
 fn generate_terminal_attachment_id(existing_names: &HashSet<String>) -> String {
     let mut timestamp = current_unix_timestamp_millis();
     loop {
@@ -1225,13 +1217,6 @@ fn session_for_command(attachment_id: &str, command: &str) -> WorkspaceSession {
     }
 }
 
-fn startup_session_for_command(attachment_id: &str, command: &str) -> WorkspaceSession {
-    let mut session = session_for_command(attachment_id, command);
-    session.working = None;
-    session.unread = None;
-    session
-}
-
 fn sanitize_session_display_name(command: &str) -> String {
     let trimmed = command.trim();
     if trimmed.is_empty() {
@@ -1269,8 +1254,59 @@ fn terminal_attach_remote_command(name: &str) -> String {
 }
 
 fn terminal_run_remote_command(name: &str, command: &str) -> String {
-    let command = format!("zmx run {} {}", shell_quote(name), shell_quote(command));
-    run_terminal_user_command(&terminal_shell_command(&command))
+    run_terminal_user_command(&terminal_shell_command(&session_run_command(name, command)))
+}
+
+fn session_run_command(name: &str, command: &str) -> String {
+    format!("zmx run {} {}", shell_quote(name), shell_quote(command))
+}
+
+fn assistant_session_command(
+    provider: AssistantProvider,
+    include_prompt_file: bool,
+    attachment_id: &str,
+) -> String {
+    let mut parts = vec![
+        shell_quote(REMOTE_WORKSPACE_AGENT_BIN),
+        "assistant-proxy".to_string(),
+        "--provider".to_string(),
+        shell_quote(provider.command_name()),
+    ];
+    if include_prompt_file {
+        parts.push("--initial-prompt-file".to_string());
+        parts.push(shell_quote(&assistant_prompt_file_path(attachment_id)));
+    }
+    parts.push("--".to_string());
+    parts.extend(
+        provider
+            .wrapped_command()
+            .iter()
+            .map(|value| shell_quote(value)),
+    );
+    parts.join(" ")
+}
+
+fn assistant_prompt_file_path(attachment_id: &str) -> String {
+    format!("/tmp/silo-assistant-prompt-{attachment_id}.txt")
+}
+
+fn assistant_prompt_launch_remote_command(
+    attachment_id: &str,
+    assistant_command: &str,
+    prompt_path: &str,
+) -> String {
+    workspace_shell_command_preserving_stdin(&format!(
+        "prompt_path={prompt_path}\n\
+umask 077\n\
+cat > \"$prompt_path\"\n\
+chmod 600 \"$prompt_path\"\n\
+if ! {run_command}; then\n\
+  rm -f \"$prompt_path\"\n\
+  exit 1\n\
+fi",
+        prompt_path = shell_quote(prompt_path),
+        run_command = session_run_command(attachment_id, assistant_command),
+    ))
 }
 
 fn is_missing_terminal_session_error(stderr: &str) -> bool {
@@ -1278,18 +1314,6 @@ fn is_missing_terminal_session_error(stderr: &str) -> bool {
     lower.contains("session not found")
         || lower.contains("no such session")
         || lower.contains("unknown session")
-}
-
-fn terminal_command_bytes(command: &str) -> Vec<u8> {
-    if command.is_empty() {
-        return Vec::new();
-    }
-
-    let mut data = command.as_bytes().to_vec();
-    if !data.ends_with(b"\n") {
-        data.push(b'\n');
-    }
-    data
 }
 
 #[cfg(test)]
@@ -1300,7 +1324,7 @@ mod tests {
     use portable_pty::{native_pty_system, ChildKiller};
     use serde_json::json;
     use std::collections::HashSet;
-    use std::sync::{Arc, Condvar, Mutex};
+    use std::sync::{Arc, Mutex};
     use tauri::ipc::{Channel, InvokeResponseBody};
 
     #[test]
@@ -1324,52 +1348,60 @@ mod tests {
     }
 
     #[test]
-    fn codex_prompt_command_encodes_multiline_prompt_on_one_line() {
-        let prompt = "what is this project?\ninclude 'quotes' too";
-        let command = codex_prompt_command(prompt);
-
-        assert!(command.starts_with("silo codex \"$(printf %s '"));
-        assert!(command.ends_with("| base64 --decode)\""));
-
-        let encoded = command
-            .strip_prefix("silo codex \"$(printf %s '")
-            .and_then(|value| value.strip_suffix("' | base64 --decode)\""))
-            .expect("command should embed a base64 prompt");
-        let decoded = String::from_utf8(
-            BASE64_STANDARD
-                .decode(encoded)
-                .expect("embedded prompt should decode"),
-        )
-        .expect("embedded prompt should be utf8");
-        assert_eq!(decoded, prompt);
+    fn assistant_session_command_builds_direct_codex_launch() {
+        assert_eq!(
+            assistant_session_command(AssistantProvider::Codex, false, "terminal-1"),
+            "'/home/silo/.silo/bin/workspace-agent' assistant-proxy --provider 'codex' -- 'codex'"
+        );
     }
 
     #[test]
-    fn claude_prompt_command_encodes_multiline_prompt_on_one_line() {
-        let prompt = "ship the change\ninclude 'quotes' too";
-        let command = claude_prompt_command(prompt);
-
-        assert!(command.starts_with("silo claude \"$(printf %s '"));
-        assert!(command.ends_with("| base64 --decode)\""));
-
-        let encoded = command
-            .strip_prefix("silo claude \"$(printf %s '")
-            .and_then(|value| value.strip_suffix("' | base64 --decode)\""))
-            .expect("command should embed a base64 prompt");
-        let decoded = String::from_utf8(
-            BASE64_STANDARD
-                .decode(encoded)
-                .expect("embedded prompt should decode"),
-        )
-        .expect("embedded prompt should be utf8");
-        assert_eq!(decoded, prompt);
+    fn assistant_session_command_includes_prompt_file_for_claude() {
+        assert_eq!(
+            assistant_session_command(AssistantProvider::Claude, true, "terminal-1"),
+            "'/home/silo/.silo/bin/workspace-agent' assistant-proxy --provider 'claude' --initial-prompt-file '/tmp/silo-assistant-prompt-terminal-1.txt' -- 'claude' '--dangerously-skip-permissions'"
+        );
     }
 
     #[test]
-    fn terminal_command_bytes_appends_newline_once() {
-        assert_eq!(terminal_command_bytes("pwd"), b"pwd\n");
-        assert_eq!(terminal_command_bytes("pwd\n"), b"pwd\n");
-        assert!(terminal_command_bytes("").is_empty());
+    fn assistant_prompt_launch_remote_command_streams_prompt_then_runs_session() {
+        let command = assistant_prompt_launch_remote_command(
+            "terminal-1",
+            &assistant_session_command(AssistantProvider::Codex, true, "terminal-1"),
+            "/tmp/silo-assistant-prompt-terminal-1.txt",
+        );
+
+        assert!(command.starts_with("sudo -iu silo bash -lc 'exec bash -lc \"$(printf %s "));
+        let encoded = command
+            .split("printf %s ")
+            .nth(1)
+            .and_then(|value| value.split(" | base64 --decode").next())
+            .expect("workspace shell command should embed a base64 script");
+        let encoded = encoded
+            .strip_prefix("'\"'\"'")
+            .and_then(|value| value.strip_suffix("'\"'\"'"))
+            .expect("embedded script should be shell quoted");
+        let script = String::from_utf8(
+            BASE64_STANDARD
+                .decode(encoded)
+                .expect("embedded script should decode"),
+        )
+        .expect("embedded script should be utf8");
+        assert!(script.contains("cat > \"$prompt_path\""));
+        assert!(script.contains("chmod 600 \"$prompt_path\""));
+        assert!(script.contains("zmx run 'terminal-1'"));
+        assert!(script.contains("assistant-proxy --provider"));
+        assert!(script.contains("'codex'"));
+        assert!(script.contains("--initial-prompt-file"));
+        assert!(script.contains("'/tmp/silo-assistant-prompt-terminal-1.txt'"));
+    }
+
+    #[test]
+    fn pending_assistant_session_uses_provider_name_without_working_state() {
+        let session = pending_assistant_session("terminal-1", AssistantProvider::Claude);
+        assert_eq!(session.name, "claude");
+        assert_eq!(session.working, None);
+        assert_eq!(session.unread, None);
     }
 
     #[test]
@@ -1471,14 +1503,6 @@ mod tests {
     }
 
     #[test]
-    fn startup_session_for_command_defers_assistant_state_to_agent() {
-        let session = startup_session_for_command("terminal-1", "codex");
-        assert_eq!(session.name, "codex");
-        assert_eq!(session.working, None);
-        assert_eq!(session.unread, None);
-    }
-
-    #[test]
     fn parse_live_terminal_sessions_accepts_agent_published_shape() {
         let sessions = parse_live_terminal_sessions(
             r#"
@@ -1528,8 +1552,6 @@ mod tests {
                 pending: Vec::new(),
             }),
             window_label: Mutex::new("main".to_string()),
-            connected: Mutex::new(false),
-            connected_cv: Condvar::new(),
             recent_output: Mutex::new(Vec::new()),
         });
         manager.insert(attachment.clone());
@@ -1587,8 +1609,6 @@ mod tests {
                 pending: Vec::new(),
             }),
             window_label: Mutex::new("main".to_string()),
-            connected: Mutex::new(false),
-            connected_cv: Condvar::new(),
             recent_output: Mutex::new(Vec::new()),
         });
 
@@ -1630,8 +1650,6 @@ mod tests {
                 pending: b"stale-pending".to_vec(),
             }),
             window_label: Mutex::new("main".to_string()),
-            connected: Mutex::new(false),
-            connected_cv: Condvar::new(),
             recent_output: Mutex::new(b"prompt\r\nstale-pending".to_vec()),
         });
         let replay_channel = Channel::new(move |payload| {
@@ -1671,23 +1689,6 @@ mod tests {
     }
 
     #[test]
-    fn terminal_manager_startup_command_is_consumed_once() {
-        let manager = TerminalManager::default();
-        let key = AttachmentKey {
-            workspace: "ws".to_string(),
-            name: "dev".to_string(),
-        };
-
-        manager.set_startup_command(key.clone(), "codex -- \"hello\"".to_string());
-
-        assert_eq!(
-            manager.take_startup_command(&key),
-            Some("codex -- \"hello\"".to_string())
-        );
-        assert_eq!(manager.take_startup_command(&key), None);
-    }
-
-    #[test]
     fn terminal_probe_attachment_reports_presence() {
         let manager = TerminalManager::default();
         let key = AttachmentKey {
@@ -1718,8 +1719,6 @@ mod tests {
                 pending: Vec::new(),
             }),
             window_label: Mutex::new("main".to_string()),
-            connected: Mutex::new(false),
-            connected_cv: Condvar::new(),
             recent_output: Mutex::new(Vec::new()),
         });
 
