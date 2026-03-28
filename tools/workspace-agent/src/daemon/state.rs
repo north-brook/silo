@@ -52,6 +52,10 @@ pub(crate) struct SessionState {
     #[serde(default)]
     pub(crate) assistant_provider: Option<AssistantProvider>,
     #[serde(default)]
+    pub(crate) active_turn_id: Option<String>,
+    #[serde(default)]
+    pub(crate) completed_turn_id: Option<String>,
+    #[serde(default)]
     pub(crate) command_running: bool,
     #[serde(default)]
     pub(crate) working: bool,
@@ -164,10 +168,12 @@ pub(crate) enum ObserverEvent {
     AssistantPromptSubmitted {
         session: String,
         provider: AssistantProvider,
+        turn_id: Option<String>,
     },
     AssistantTurnCompleted {
         session: String,
         provider: AssistantProvider,
+        turn_id: Option<String>,
     },
     MarkRead {
         session: String,
@@ -205,6 +211,8 @@ pub(crate) fn apply_event(state: &mut ObserverState, event: ObserverEvent) {
             let session_state = state.sessions.entry(session).or_default();
             session_state.active_command = Some(command.clone());
             session_state.assistant_provider = resolve_assistant_provider(&command);
+            session_state.active_turn_id = None;
+            session_state.completed_turn_id = None;
             session_state.command_running = true;
             session_state.working = false;
             session_state.unread = false;
@@ -214,6 +222,7 @@ pub(crate) fn apply_event(state: &mut ObserverState, event: ObserverEvent) {
             if let Some(session_state) = state.sessions.get_mut(&session) {
                 session_state.active_command = None;
                 session_state.assistant_provider = None;
+                session_state.active_turn_id = None;
                 session_state.command_running = false;
                 session_state.working = false;
                 session_state.unread = false;
@@ -224,16 +233,24 @@ pub(crate) fn apply_event(state: &mut ObserverState, event: ObserverEvent) {
             let session_state = state.sessions.entry(session).or_default();
             session_state.active_command = Some(provider.command_name().to_string());
             session_state.assistant_provider = Some(provider);
+            session_state.active_turn_id = None;
+            session_state.completed_turn_id = None;
             session_state.command_running = true;
             session_state.working = false;
             session_state.unread = false;
             session_state.poll_misses = 0;
         }
-        ObserverEvent::AssistantPromptSubmitted { session, provider } => {
+        ObserverEvent::AssistantPromptSubmitted {
+            session,
+            provider,
+            turn_id,
+        } => {
             {
                 let session_state = state.sessions.entry(session).or_default();
                 session_state.active_command = Some(provider.command_name().to_string());
                 session_state.assistant_provider = Some(provider);
+                session_state.active_turn_id = turn_id;
+                session_state.completed_turn_id = None;
                 session_state.command_running = true;
                 session_state.working = true;
                 session_state.unread = false;
@@ -241,10 +258,26 @@ pub(crate) fn apply_event(state: &mut ObserverState, event: ObserverEvent) {
             }
             touch_last_working(state);
         }
-        ObserverEvent::AssistantTurnCompleted { session, provider } => {
+        ObserverEvent::AssistantTurnCompleted {
+            session,
+            provider,
+            turn_id,
+        } => {
             let session_state = state.sessions.entry(session).or_default();
             session_state.active_command = Some(provider.command_name().to_string());
             session_state.assistant_provider = Some(provider);
+            if let Some(turn_id) = turn_id {
+                if session_state.completed_turn_id.as_deref() == Some(turn_id.as_str()) {
+                    return;
+                }
+                if let Some(active_turn_id) = session_state.active_turn_id.as_deref() {
+                    if active_turn_id != turn_id {
+                        return;
+                    }
+                }
+                session_state.completed_turn_id = Some(turn_id);
+            }
+            session_state.active_turn_id = None;
             session_state.command_running = true;
             session_state.working = false;
             session_state.unread = true;
