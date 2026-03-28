@@ -46,14 +46,6 @@ pub(crate) struct CommandResult {
     pub(crate) stderr: String,
 }
 
-pub(crate) fn assistant_prompt_command(prefix: &str, prompt: &str) -> String {
-    let encoded_prompt = BASE64_STANDARD.encode(prompt);
-    format!(
-        "{prefix} \"$(printf %s {} | base64 --decode)\"",
-        shell_quote(&encoded_prompt)
-    )
-}
-
 pub(crate) fn terminal_shell_command(command: &str) -> String {
     format!(
         "if [ -f {credentials_path} ]; then source {credentials_path}; fi; cd {workspace_dir}; {command}",
