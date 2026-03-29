@@ -606,6 +606,7 @@ pub(crate) async fn hydrate_workspace_lookup(lookup: WorkspaceLookup) -> Workspa
     let workspace = fetch_workspace_runtime_workspace(&lookup)
         .await
         .unwrap_or(workspace);
+    let workspace = apply_current_workspace_state(workspace);
 
     WorkspaceLookup {
         workspace,
@@ -962,10 +963,16 @@ pub(crate) async fn find_workspace_raw(name: &str) -> Result<WorkspaceLookup, St
 
 pub(crate) async fn find_workspace(name: &str) -> Result<WorkspaceLookup, String> {
     let mut lookup = find_workspace_raw(name).await?;
-    if let Some(manager) = crate::state::current_workspace_metadata_manager() {
-        lookup.workspace = manager.apply_workspace_state(lookup.workspace);
-    }
+    lookup.workspace = apply_current_workspace_state(lookup.workspace);
     Ok(lookup)
+}
+
+fn apply_current_workspace_state(workspace: Workspace) -> Workspace {
+    if let Some(manager) = crate::state::current_workspace_metadata_manager() {
+        manager.apply_workspace_state(workspace)
+    } else {
+        workspace
+    }
 }
 
 async fn update_workspace_metadata_in_lookup(
