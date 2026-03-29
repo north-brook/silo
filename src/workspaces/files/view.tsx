@@ -47,7 +47,7 @@ import {
 } from "@/workspaces/files/api";
 import { filePathOpensInBrowser } from "@/workspaces/files/browser";
 import { useFileSessions } from "@/workspaces/files/context";
-import { useGitSidebar } from "@/workspaces/git/context";
+import { gitDiffFile } from "@/workspaces/git/api";
 import { useWorkspaceSessionRouteParams } from "@/workspaces/routes/params";
 import { fileSessionHref } from "@/workspaces/routes/paths";
 import { useWorkspaceSessions } from "@/workspaces/state";
@@ -286,7 +286,6 @@ export function WorkspaceFileSessionView() {
 		resolveSession,
 		setSessionState,
 	} = useFileSessions();
-	const { diff: gitDiff } = useGitSidebar();
 	const session = resolveSession(sessions, attachmentId);
 	const path = session?.path ?? null;
 	const watchedFile = getWatchedFileState(path);
@@ -305,21 +304,20 @@ export function WorkspaceFileSessionView() {
 		queryFn: () => filesRead(workspace, path ?? ""),
 		enabled: !!workspace && !!path,
 	});
+	const diffFileQuery = useQuery({
+		queryKey: ["git_diff", workspace, "file", path],
+		queryFn: () => gitDiffFile(workspace, path ?? ""),
+		enabled: !!workspace && !!path,
+		gcTime: 60 * 1000,
+	});
 
 	const dirty = buffer !== savedContent;
 
 	// Parse git diff patch for the current file to get changed line numbers
 	const changedLines = useMemo(() => {
-		if (!gitDiff || !path) return null;
-		// Check both local and remote sections
-		for (const section of [gitDiff.local, gitDiff.remote]) {
-			const file = section.files.find((f) => f.path === path);
-			if (file?.patch) {
-				return parsePatchChangedLines(file.patch);
-			}
-		}
-		return null;
-	}, [gitDiff, path]);
+		if (!path || !diffFileQuery.data?.patch) return null;
+		return parsePatchChangedLines(diffFileQuery.data.patch);
+	}, [diffFileQuery.data?.patch, path]);
 
 	const extensions = useMemo(
 		() => [

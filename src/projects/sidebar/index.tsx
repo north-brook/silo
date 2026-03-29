@@ -33,6 +33,10 @@ import {
 import { useNewWorkspace } from "@/projects/sidebar/new-workspace";
 import { useOpenProject } from "@/projects/sidebar/open-project";
 import { invoke } from "@/shared/lib/invoke";
+import {
+	resolveForegroundPollInterval,
+	usePageIsForeground,
+} from "@/shared/lib/page-foreground";
 import { shortcutEvents } from "@/shared/lib/shortcuts";
 import { useShortcut } from "@/shared/lib/use-shortcut";
 import { SiloIcon } from "@/shared/ui/icons/silo";
@@ -353,6 +357,8 @@ function WorkspaceRow({
 	const navigate = useNavigate();
 	const { workspace: activeWorkspaceName } = useParams();
 	const queryClient = useQueryClient();
+	const { isOpen } = useProjectsSidebar();
+	const isForeground = usePageIsForeground();
 	const isActive = activeWorkspaceName === workspace.name;
 	const isRunning = workspace.status === "RUNNING";
 	const isStopped =
@@ -535,14 +541,28 @@ function WorkspaceRow({
 		queryKey: ["git_pr_summary", workspace.name],
 		queryFn: () => gitPrSummary(workspace.name),
 		enabled: isReadyBranch,
-		refetchInterval: 10000,
+		refetchInterval: resolveForegroundPollInterval({
+			active: isOpen && isActive,
+			activeMs: 10000,
+			enabled: isReadyBranch,
+			hiddenMs: 60000,
+			inactiveMs: 30000,
+			isForeground,
+		}),
 	});
 
 	const dirtyQuery = useQuery({
 		queryKey: ["git_tree_dirty", workspace.name],
 		queryFn: () => gitTreeDirty(workspace.name),
 		enabled: isReadyBranch,
-		refetchInterval: 5000,
+		refetchInterval: resolveForegroundPollInterval({
+			active: isOpen && isActive,
+			activeMs: 5000,
+			enabled: isReadyBranch,
+			hiddenMs: 30000,
+			inactiveMs: 15000,
+			isForeground,
+		}),
 	});
 
 	const openWorkspace = () =>
@@ -759,6 +779,8 @@ function WorkspaceRow({
 
 function BarFooter() {
 	const openProject = useOpenProject();
+	const { isOpen } = useProjectsSidebar();
+	const isForeground = usePageIsForeground();
 
 	const memory = useQuery({
 		queryKey: ["system_memory_usage"],
@@ -769,7 +791,13 @@ function BarFooter() {
 				stateChanged: (previous: number | undefined, next: number) =>
 					Math.round((previous ?? 0) / 50) !== Math.round(next / 50),
 			}),
-		refetchInterval: 5000,
+		refetchInterval: resolveForegroundPollInterval({
+			active: isOpen,
+			activeMs: 5000,
+			hiddenMs: 30000,
+			inactiveMs: 15000,
+			isForeground,
+		}),
 	});
 
 	return (
@@ -801,6 +829,7 @@ function BarFooter() {
 
 export function ProjectsSidebar() {
 	const { isOpen } = useProjectsSidebar();
+	const isForeground = usePageIsForeground();
 	const navigate = useNavigate();
 	const pathname = useLocation().pathname;
 	const isHome = pathname === "/";
@@ -817,7 +846,13 @@ export function ProjectsSidebar() {
 				log: "state_changes_only",
 				key: "poll:workspaces_list_workspaces",
 			}),
-		refetchInterval: 2000,
+		refetchInterval: resolveForegroundPollInterval({
+			active: isOpen,
+			activeMs: 2000,
+			hiddenMs: 20000,
+			inactiveMs: 10000,
+			isForeground,
+		}),
 	});
 	const templates = useQuery({
 		queryKey: ["templates_list_templates"],
@@ -828,7 +863,13 @@ export function ProjectsSidebar() {
 				stateChanged: (previous, next) =>
 					JSON.stringify(previous) !== JSON.stringify(next),
 			}),
-		refetchInterval: 15000,
+		refetchInterval: resolveForegroundPollInterval({
+			active: isOpen,
+			activeMs: 15000,
+			hiddenMs: 60000,
+			inactiveMs: 30000,
+			isForeground,
+		}),
 	});
 	const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 	const [metaKeyHeld, setMetaKeyHeld] = useState(false);

@@ -9,6 +9,10 @@ import {
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { invoke } from "@/shared/lib/invoke";
+import {
+	resolveForegroundPollInterval,
+	usePageIsForeground,
+} from "@/shared/lib/page-foreground";
 import { shortcutEvents } from "@/shared/lib/shortcuts";
 import { useShortcut } from "@/shared/lib/use-shortcut";
 import {
@@ -55,6 +59,7 @@ export function GitTopBarActions() {
 	const isReady = useWorkspaceReady();
 	const navigate = useNavigate();
 	const queryClient = useQueryClient();
+	const isForeground = usePageIsForeground();
 
 	const hasPr = prSummary?.status === "open";
 
@@ -62,7 +67,14 @@ export function GitTopBarActions() {
 		queryKey: ["git_tree_dirty", workspace],
 		queryFn: () => gitTreeDirty(workspace),
 		enabled: !!workspace && hasPr && !isOpen,
-		refetchInterval: 5000,
+		refetchInterval: resolveForegroundPollInterval({
+			active: !isOpen,
+			activeMs: 5000,
+			enabled: !!workspace && hasPr && !isOpen,
+			hiddenMs: 30000,
+			inactiveMs: 15000,
+			isForeground,
+		}),
 	});
 
 	const createPr = useMutation({

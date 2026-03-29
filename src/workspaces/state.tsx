@@ -10,6 +10,10 @@ import {
 } from "react";
 import { useNavigate } from "react-router-dom";
 import {
+	resolveForegroundPollInterval,
+	usePageIsForeground,
+} from "@/shared/lib/page-foreground";
+import {
 	type BrowserStateEventPayload,
 	popupBrowserSessionHrefForEvent,
 } from "@/workspaces/browser/events";
@@ -62,6 +66,7 @@ function WorkspaceStateProviderInner({
 }) {
 	const navigate = useNavigate();
 	const queryClient = useQueryClient();
+	const isForeground = usePageIsForeground();
 
 	const workspaceQuery = useQuery({
 		queryKey: ["workspaces_get_workspace", workspaceName],
@@ -75,7 +80,13 @@ function WorkspaceStateProviderInner({
 				},
 			),
 		enabled: !!workspaceName,
-		refetchInterval: 2000,
+		refetchInterval: resolveForegroundPollInterval({
+			activeMs: 2000,
+			enabled: !!workspaceName,
+			hiddenMs: 15000,
+			inactiveMs: 8000,
+			isForeground,
+		}),
 	});
 
 	const invalidateWorkspace = useCallback(() => {

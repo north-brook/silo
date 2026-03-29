@@ -67,7 +67,12 @@ struct WorkspaceBootstrap {
     gh_token: String,
     codex_auth_json: String,
     codex_auth_fingerprint: String,
+    codex_model: String,
+    codex_model_reasoning_effort: String,
     claude_token: String,
+    claude_model: String,
+    claude_effort_level: String,
+    claude_always_thinking_enabled: bool,
     git_user_name: String,
     git_user_email: String,
     env_files: Vec<BootstrapEnvFile>,
@@ -137,31 +142,53 @@ fn cached_workspace_bootstrap(workspace: &str) -> Option<WorkspaceBootstrap> {
         .and_then(|state| state.bootstrap.clone())
 }
 
-fn cached_workspace_bootstrap_with_fresh_codex_auth(workspace: &str) -> Option<WorkspaceBootstrap> {
+fn cached_workspace_bootstrap_with_fresh_assistant_config(
+    workspace: &str,
+) -> Option<WorkspaceBootstrap> {
     let mut bootstrap = cached_workspace_bootstrap(workspace)?;
     let Ok(config) = ConfigStore::new().and_then(|store| store.load()) else {
         log::warn!(
-            "using cached workspace bootstrap for {} without refreshing codex auth because config reload failed",
+            "using cached workspace bootstrap for {} without refreshing assistant config because config reload failed",
             workspace
         );
         return Some(bootstrap);
     };
 
     let (codex_auth_json, codex_auth_fingerprint) = workspace_bootstrap_codex_auth(&config);
+    let codex_model = config.codex.model.clone();
+    let codex_model_reasoning_effort = config.codex.model_reasoning_effort.clone();
+    let claude_model = config.claude.model.clone();
+    let claude_effort_level = config.claude.effort_level.clone();
+    let claude_always_thinking_enabled = config.claude.always_thinking_enabled;
     if bootstrap.codex_auth_json == codex_auth_json
         && bootstrap.codex_auth_fingerprint == codex_auth_fingerprint
+        && bootstrap.codex_model == codex_model
+        && bootstrap.codex_model_reasoning_effort == codex_model_reasoning_effort
+        && bootstrap.claude_model == claude_model
+        && bootstrap.claude_effort_level == claude_effort_level
+        && bootstrap.claude_always_thinking_enabled == claude_always_thinking_enabled
     {
         return Some(bootstrap);
     }
 
     bootstrap.codex_auth_json = codex_auth_json.clone();
     bootstrap.codex_auth_fingerprint = codex_auth_fingerprint.clone();
+    bootstrap.codex_model = codex_model.clone();
+    bootstrap.codex_model_reasoning_effort = codex_model_reasoning_effort.clone();
+    bootstrap.claude_model = claude_model.clone();
+    bootstrap.claude_effort_level = claude_effort_level.clone();
+    bootstrap.claude_always_thinking_enabled = claude_always_thinking_enabled;
 
     if let Ok(mut states) = WORKSPACE_STARTUP_RECONCILE_STATE.lock() {
         if let Some(state) = states.get_mut(workspace) {
             if let Some(cached) = state.bootstrap.as_mut() {
                 cached.codex_auth_json = codex_auth_json;
                 cached.codex_auth_fingerprint = codex_auth_fingerprint;
+                cached.codex_model = codex_model;
+                cached.codex_model_reasoning_effort = codex_model_reasoning_effort;
+                cached.claude_model = claude_model;
+                cached.claude_effort_level = claude_effort_level;
+                cached.claude_always_thinking_enabled = claude_always_thinking_enabled;
             }
         }
     }
@@ -214,7 +241,12 @@ fn build_workspace_bootstrap(
         gh_token: config.git.gh_token.clone(),
         codex_auth_json,
         codex_auth_fingerprint,
+        codex_model: config.codex.model.clone(),
+        codex_model_reasoning_effort: config.codex.model_reasoning_effort.clone(),
         claude_token: config.claude.token.clone(),
+        claude_model: config.claude.model.clone(),
+        claude_effort_level: config.claude.effort_level.clone(),
+        claude_always_thinking_enabled: config.claude.always_thinking_enabled,
         git_user_name: config.git.user_name.clone(),
         git_user_email: config.git.user_email.clone(),
         env_files: load_bootstrap_env_files(project_name, project),
@@ -959,7 +991,7 @@ impl LifecycleReporter {
 
 fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, String> {
     if let Some(bootstrap) =
-        cached_workspace_bootstrap_with_fresh_codex_auth(lookup.workspace.name())
+        cached_workspace_bootstrap_with_fresh_assistant_config(lookup.workspace.name())
     {
         return Ok(bootstrap);
     }
@@ -1024,9 +1056,16 @@ fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, S
 
 fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBootstrap) -> String {
     let codex_auth_json = bootstrap.codex_auth_json.clone();
-    let codex_config_toml = codex_config_toml();
+    let codex_config_toml = codex_config_toml(
+        &bootstrap.codex_model,
+        &bootstrap.codex_model_reasoning_effort,
+    );
     let codex_hooks_json = codex_hooks_json();
-    let claude_settings_json = claude_settings_json();
+    let claude_settings_json = claude_settings_json(
+        &bootstrap.claude_model,
+        &bootstrap.claude_effort_level,
+        bootstrap.claude_always_thinking_enabled,
+    );
     let claude_state_json = claude_state_json();
     let gh_hosts_yml = gh_hosts_yml(&bootstrap.gh_username, &bootstrap.gh_token);
     let bootstrap_signature = workspace_bootstrap_signature(lookup.workspace.name(), bootstrap);
@@ -1290,7 +1329,7 @@ fi\n"
 
 fn workspace_bootstrap_signature(workspace_name: &str, bootstrap: &WorkspaceBootstrap) -> String {
     format!(
-        "version={}\nworkspace={}\nremote_url={}\ntarget_branch={}\nworkspace_branch={}\ngh_username={}\ngh_token_sha256={}\ncodex_auth_sha256={}\nclaude_token_sha256={}\ngit_user_name={}\ngit_user_email={}\nenv_files={}\nagent_sources={}",
+        "version={}\nworkspace={}\nremote_url={}\ntarget_branch={}\nworkspace_branch={}\ngh_username={}\ngh_token_sha256={}\ncodex_auth_sha256={}\ncodex_model={}\ncodex_model_reasoning_effort={}\nclaude_token_sha256={}\nclaude_model={}\nclaude_effort_level={}\nclaude_always_thinking_enabled={}\ngit_user_name={}\ngit_user_email={}\nenv_files={}\nagent_sources={}",
         WORKSPACE_BOOTSTRAP_VERSION,
         workspace_name,
         bootstrap.remote_url,
@@ -1299,7 +1338,12 @@ fn workspace_bootstrap_signature(workspace_name: &str, bootstrap: &WorkspaceBoot
         bootstrap.gh_username,
         hex_sha256(bootstrap.gh_token.as_bytes()),
         bootstrap.codex_auth_fingerprint,
+        bootstrap.codex_model,
+        bootstrap.codex_model_reasoning_effort,
         hex_sha256(bootstrap.claude_token.as_bytes()),
+        bootstrap.claude_model,
+        bootstrap.claude_effort_level,
+        bootstrap.claude_always_thinking_enabled,
         bootstrap.git_user_name,
         bootstrap.git_user_email,
         bootstrap_env_files_signature(&bootstrap.env_files),
@@ -1696,10 +1740,11 @@ fn codex_auth_fingerprint(auth_json: &str) -> String {
         .unwrap_or_default()
 }
 
-fn codex_config_toml() -> String {
-    r#"personality = "pragmatic"
-model = "gpt-5.4"
-model_reasoning_effort = "high"
+fn codex_config_toml(model: &str, model_reasoning_effort: &str) -> String {
+    format!(
+        r#"personality = "pragmatic"
+model = {model:?}
+model_reasoning_effort = {model_reasoning_effort:?}
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
 suppress_unstable_features_warning = true
@@ -1712,8 +1757,8 @@ trust_level = "trusted"
 
 [notice]
 hide_full_access_warning = true
-"#
-    .to_string()
+"#,
+    )
 }
 
 fn codex_hooks_json() -> String {
@@ -1723,11 +1768,11 @@ fn codex_hooks_json() -> String {
     .to_string()
 }
 
-fn claude_settings_json() -> String {
+fn claude_settings_json(model: &str, effort_level: &str, always_thinking_enabled: bool) -> String {
     json!({
-        "model": "opus",
-        "alwaysThinkingEnabled": true,
-        "effortLevel": "high",
+        "model": model,
+        "alwaysThinkingEnabled": always_thinking_enabled,
+        "effortLevel": effort_level,
         "skipDangerousModePermissionPrompt": true,
         "hooks": provider_hook_config("claude")
     })
@@ -1831,7 +1876,7 @@ mod tests {
     #[test]
     fn provider_hook_config_routes_provider_payloads_through_workspace_agent() {
         let codex = codex_hooks_json();
-        let claude = claude_settings_json();
+        let claude = claude_settings_json("opus", "high", true);
 
         assert!(codex.contains("\"UserPromptSubmit\""));
         assert!(codex.contains("\"Stop\""));
@@ -1846,11 +1891,22 @@ mod tests {
 
     #[test]
     fn codex_config_toml_enables_lifecycle_hooks() {
-        let config = codex_config_toml();
+        let config = codex_config_toml("gpt-5.4", "xhigh");
 
+        assert!(config.contains("model = \"gpt-5.4\""));
+        assert!(config.contains("model_reasoning_effort = \"xhigh\""));
         assert!(config.contains("suppress_unstable_features_warning = true"));
         assert!(config.contains("[features]"));
         assert!(config.contains("codex_hooks = true"));
+    }
+
+    #[test]
+    fn claude_settings_json_uses_configured_model_and_effort() {
+        let settings = claude_settings_json("opus", "high", true);
+
+        assert!(settings.contains("\"model\":\"opus\""));
+        assert!(settings.contains("\"effortLevel\":\"high\""));
+        assert!(settings.contains("\"alwaysThinkingEnabled\":true"));
     }
 
     #[test]
@@ -2126,7 +2182,12 @@ mod tests {
                 gh_token: "gh-secret".to_string(),
                 codex_auth_json: "{\"tokens\":{\"refresh_token\":\"codex-secret\"}}".to_string(),
                 codex_auth_fingerprint: hex_sha256(b"codex-secret"),
+                codex_model: "gpt-5.4".to_string(),
+                codex_model_reasoning_effort: "xhigh".to_string(),
                 claude_token: "claude-secret".to_string(),
+                claude_model: "opus".to_string(),
+                claude_effort_level: "high".to_string(),
+                claude_always_thinking_enabled: true,
                 git_user_name: "Example User".to_string(),
                 git_user_email: "user@example.com".to_string(),
                 env_files: Vec::new(),
@@ -2135,7 +2196,12 @@ mod tests {
 
         assert!(signature.contains("gh_token_sha256="));
         assert!(signature.contains("codex_auth_sha256="));
+        assert!(signature.contains("codex_model=gpt-5.4"));
+        assert!(signature.contains("codex_model_reasoning_effort=xhigh"));
         assert!(signature.contains("claude_token_sha256="));
+        assert!(signature.contains("claude_model=opus"));
+        assert!(signature.contains("claude_effort_level=high"));
+        assert!(signature.contains("claude_always_thinking_enabled=true"));
         assert!(!signature.contains("gh-secret"));
         assert!(!signature.contains("codex-secret"));
         assert!(!signature.contains("claude-secret"));
@@ -2169,9 +2235,11 @@ mod tests {
             },
             codex: crate::config::CodexConfig {
                 auth_json: "{\"tokens\":{\"refresh_token\":\"codex-refresh-token\"}}".to_string(),
+                ..crate::config::CodexConfig::default()
             },
             claude: crate::config::ClaudeConfig {
                 token: "claude-secret".to_string(),
+                ..crate::config::ClaudeConfig::default()
             },
             projects: IndexMap::new(),
             ..SiloConfig::default()
@@ -2206,10 +2274,15 @@ mod tests {
             bootstrap.codex_auth_fingerprint,
             hex_sha256(b"codex-refresh-token")
         );
+        assert_eq!(bootstrap.codex_model, "gpt-5.4");
+        assert_eq!(bootstrap.codex_model_reasoning_effort, "xhigh");
+        assert_eq!(bootstrap.claude_model, "opus");
+        assert_eq!(bootstrap.claude_effort_level, "high");
+        assert!(bootstrap.claude_always_thinking_enabled);
     }
 
     #[test]
-    fn cached_workspace_bootstrap_refreshes_codex_auth_from_synced_config() {
+    fn cached_workspace_bootstrap_refreshes_assistant_preferences_from_updated_config() {
         let _guard = ENV_LOCK.lock().expect("env lock should be available");
         let temp_dir = TempDir::new();
         let previous_home = env::var_os("HOME");
@@ -2225,9 +2298,31 @@ mod tests {
             codex: crate::config::CodexConfig {
                 auth_json: "{\"tokens\":{\"refresh_token\":\"stale-codex-refresh-token\"}}"
                     .to_string(),
+                model: "gpt-5.4".to_string(),
+                model_reasoning_effort: "high".to_string(),
             },
             claude: crate::config::ClaudeConfig {
                 token: "claude-secret".to_string(),
+                model: "opus".to_string(),
+                effort_level: "high".to_string(),
+                always_thinking_enabled: true,
+            },
+            projects: IndexMap::new(),
+            ..SiloConfig::default()
+        };
+        let fresh_config = SiloConfig {
+            git: stale_config.git.clone(),
+            codex: crate::config::CodexConfig {
+                auth_json: "{\"tokens\":{\"refresh_token\":\"fresh-codex-refresh-token\"}}"
+                    .to_string(),
+                model: "gpt-5.4-mini".to_string(),
+                model_reasoning_effort: "xhigh".to_string(),
+            },
+            claude: crate::config::ClaudeConfig {
+                token: "claude-secret".to_string(),
+                model: "sonnet".to_string(),
+                effort_level: "medium".to_string(),
+                always_thinking_enabled: false,
             },
             projects: IndexMap::new(),
             ..SiloConfig::default()
@@ -2241,13 +2336,6 @@ mod tests {
             env_files: Vec::new(),
             gcloud: crate::config::ProjectGcloudConfig::default(),
         };
-        let host_codex_dir = temp_dir.path.join(".codex");
-        fs::create_dir_all(&host_codex_dir).expect("host codex dir should exist");
-        fs::write(
-            host_codex_dir.join("auth.json"),
-            "{\n  \"tokens\": {\n    \"refresh_token\": \"fresh-codex-refresh-token\"\n  }\n}\n",
-        )
-        .expect("host auth.json should be written");
 
         let store = ConfigStore::from_home_dir(temp_dir.path.clone());
         store
@@ -2262,9 +2350,13 @@ mod tests {
             Some("feature/demo"),
         )
         .expect("bootstrap cache should seed");
+        store
+            .save(&fresh_config)
+            .expect("fresh config should be persisted");
 
-        let bootstrap = cached_workspace_bootstrap_with_fresh_codex_auth("demo-silo-auth-refresh")
-            .expect("cached bootstrap should exist");
+        let bootstrap =
+            cached_workspace_bootstrap_with_fresh_assistant_config("demo-silo-auth-refresh")
+                .expect("cached bootstrap should exist");
         assert_eq!(
             bootstrap.codex_auth_json,
             "{\"tokens\":{\"refresh_token\":\"fresh-codex-refresh-token\"}}"
@@ -2273,9 +2365,28 @@ mod tests {
             bootstrap.codex_auth_fingerprint,
             hex_sha256(b"fresh-codex-refresh-token")
         );
+        assert_eq!(bootstrap.codex_model, "gpt-5.4-mini");
+        assert_eq!(bootstrap.codex_model_reasoning_effort, "xhigh");
+        assert_eq!(bootstrap.claude_model, "sonnet");
+        assert_eq!(bootstrap.claude_effort_level, "medium");
+        assert!(!bootstrap.claude_always_thinking_enabled);
 
         let persisted = store.load().expect("synced config should load");
-        assert_eq!(persisted.codex.auth_json, bootstrap.codex_auth_json);
+        assert_eq!(persisted.codex.auth_json, fresh_config.codex.auth_json);
+        assert_eq!(persisted.codex.model, fresh_config.codex.model);
+        assert_eq!(
+            persisted.codex.model_reasoning_effort,
+            fresh_config.codex.model_reasoning_effort
+        );
+        assert_eq!(persisted.claude.model, fresh_config.claude.model);
+        assert_eq!(
+            persisted.claude.effort_level,
+            fresh_config.claude.effort_level
+        );
+        assert_eq!(
+            persisted.claude.always_thinking_enabled,
+            fresh_config.claude.always_thinking_enabled
+        );
 
         if let Some(previous_home) = previous_home {
             env::set_var("HOME", previous_home);

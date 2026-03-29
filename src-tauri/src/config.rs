@@ -38,6 +38,11 @@ pub(crate) const DEFAULT_GCLOUD_DISK_SIZE_GB: u32 = 80;
 pub(crate) const DEFAULT_GCLOUD_DISK_TYPE: &str = "pd-ssd";
 pub(crate) const DEFAULT_GCLOUD_IMAGE_FAMILY: &str = "silo-base";
 pub(crate) const DEFAULT_GCLOUD_IMAGE_PROJECT: &str = "silo-489618";
+pub(crate) const DEFAULT_CODEX_MODEL: &str = "gpt-5.4";
+pub(crate) const DEFAULT_CODEX_MODEL_REASONING_EFFORT: &str = "xhigh";
+pub(crate) const DEFAULT_CLAUDE_MODEL: &str = "opus";
+pub(crate) const DEFAULT_CLAUDE_EFFORT_LEVEL: &str = "high";
+pub(crate) const DEFAULT_CLAUDE_ALWAYS_THINKING_ENABLED: bool = true;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -96,16 +101,42 @@ pub(crate) struct GitConfig {
     pub(crate) user_email: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub(crate) struct CodexConfig {
     pub(crate) auth_json: String,
+    pub(crate) model: String,
+    pub(crate) model_reasoning_effort: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+impl Default for CodexConfig {
+    fn default() -> Self {
+        Self {
+            auth_json: String::new(),
+            model: DEFAULT_CODEX_MODEL.to_string(),
+            model_reasoning_effort: DEFAULT_CODEX_MODEL_REASONING_EFFORT.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub(crate) struct ClaudeConfig {
     pub(crate) token: String,
+    pub(crate) model: String,
+    pub(crate) effort_level: String,
+    pub(crate) always_thinking_enabled: bool,
+}
+
+impl Default for ClaudeConfig {
+    fn default() -> Self {
+        Self {
+            token: String::new(),
+            model: DEFAULT_CLAUDE_MODEL.to_string(),
+            effort_level: DEFAULT_CLAUDE_EFFORT_LEVEL.to_string(),
+            always_thinking_enabled: DEFAULT_CLAUDE_ALWAYS_THINKING_ENABLED,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -454,6 +485,7 @@ fn detect_initial_config(home_dir: &Path) -> SiloConfig {
         },
         codex: CodexConfig {
             auth_json: detect_codex_auth_json(home_dir).unwrap_or_default(),
+            ..CodexConfig::default()
         },
         claude: ClaudeConfig::default(),
         projects: IndexMap::new(),
@@ -506,6 +538,30 @@ fn validate_config(config: &SiloConfig) -> Result<(), ConfigError> {
     if config.gcloud.disk_size_gb == 0 {
         return Err(ConfigError::Schema(
             "gcloud.disk_size_gb must be greater than zero".to_string(),
+        ));
+    }
+
+    if config.codex.model.trim().is_empty() {
+        return Err(ConfigError::Schema(
+            "codex.model must not be empty".to_string(),
+        ));
+    }
+
+    if config.codex.model_reasoning_effort.trim().is_empty() {
+        return Err(ConfigError::Schema(
+            "codex.model_reasoning_effort must not be empty".to_string(),
+        ));
+    }
+
+    if config.claude.model.trim().is_empty() {
+        return Err(ConfigError::Schema(
+            "claude.model must not be empty".to_string(),
+        ));
+    }
+
+    if config.claude.effort_level.trim().is_empty() {
+        return Err(ConfigError::Schema(
+            "claude.effort_level must not be empty".to_string(),
         ));
     }
 
@@ -603,6 +659,8 @@ mod tests {
         assert!(contents.contains("[codex]"));
         assert!(contents.contains("[claude]"));
         assert!(contents.contains("[projects]"));
+        assert!(contents.contains("model_reasoning_effort = \"xhigh\""));
+        assert!(contents.contains("always_thinking_enabled = true"));
     }
 
     #[test]
@@ -884,6 +942,7 @@ mod tests {
                 },
                 codex: CodexConfig {
                     auth_json: "{\"tokens\":{\"refresh_token\":\"codex-token\"}}".to_string(),
+                    ..CodexConfig::default()
                 },
                 claude: ClaudeConfig::default(),
                 projects: IndexMap::new(),
@@ -903,6 +962,17 @@ mod tests {
             "{\"tokens\":{\"refresh_token\":\"codex-token\"}}"
         );
         assert_eq!(config.claude.token, "");
+        assert_eq!(config.codex.model, DEFAULT_CODEX_MODEL);
+        assert_eq!(
+            config.codex.model_reasoning_effort,
+            DEFAULT_CODEX_MODEL_REASONING_EFFORT
+        );
+        assert_eq!(config.claude.model, DEFAULT_CLAUDE_MODEL);
+        assert_eq!(config.claude.effort_level, DEFAULT_CLAUDE_EFFORT_LEVEL);
+        assert_eq!(
+            config.claude.always_thinking_enabled,
+            DEFAULT_CLAUDE_ALWAYS_THINKING_ENABLED
+        );
     }
 
     #[test]
@@ -924,9 +994,14 @@ mod tests {
             },
             codex: CodexConfig {
                 auth_json: "{\"tokens\":{\"refresh_token\":\"existing-codex-token\"}}".to_string(),
+                model: "gpt-5.4-mini".to_string(),
+                model_reasoning_effort: "high".to_string(),
             },
             claude: ClaudeConfig {
                 token: "existing-claude-token".to_string(),
+                model: "sonnet".to_string(),
+                effort_level: "medium".to_string(),
+                always_thinking_enabled: false,
             },
             projects: IndexMap::new(),
         };
@@ -963,6 +1038,7 @@ mod tests {
             codex: CodexConfig {
                 auth_json: "{\"tokens\":{\"refresh_token\":\"stale-codex-refresh-token\"}}"
                     .to_string(),
+                ..CodexConfig::default()
             },
             ..SiloConfig::default()
         };
@@ -1064,6 +1140,7 @@ mod tests {
             },
             codex: CodexConfig {
                 auth_json: detect_codex_auth_json(home_dir).unwrap_or_default(),
+                ..CodexConfig::default()
             },
             claude: ClaudeConfig::default(),
             projects: IndexMap::new(),

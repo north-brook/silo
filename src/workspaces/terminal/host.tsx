@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import "@xterm/xterm/css/xterm.css";
 import { domFocusSnapshot } from "@/shared/lib/focus-debug";
 import { invoke } from "@/shared/lib/invoke";
+import { usePageIsForeground } from "@/shared/lib/page-foreground";
 import type { WorkspaceSession } from "@/workspaces/api";
 import type { CloudSession } from "@/workspaces/hosts/model";
 import { attachTerminalBindings } from "./bindings";
@@ -27,6 +28,7 @@ const MAX_AUTO_RECONNECT_ATTEMPTS = 5;
 const MIN_ATTACH_COLS = 10;
 const MIN_ATTACH_ROWS = 4;
 const MIN_ATTACH_PIXEL_SIZE = 4;
+const ACTIVE_TERMINAL_SCROLLBACK = 2500;
 
 function normalizeTerminalOutput(data: ArrayBuffer | Uint8Array): Uint8Array {
 	const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
@@ -155,36 +157,6 @@ function resolveMeasuredTerminalSize(
 		rows,
 	} satisfies TerminalSize;
 	return hasStableTerminalLayout(bounds, measured) ? measured : null;
-}
-
-function usePageIsForeground() {
-	const [isForeground, setIsForeground] = useState(() => {
-		if (typeof document === "undefined") {
-			return true;
-		}
-		return document.visibilityState === "visible" && document.hasFocus();
-	});
-
-	useEffect(() => {
-		const updateForeground = () => {
-			setIsForeground(
-				document.visibilityState === "visible" && document.hasFocus(),
-			);
-		};
-
-		updateForeground();
-		window.addEventListener("focus", updateForeground);
-		window.addEventListener("blur", updateForeground);
-		document.addEventListener("visibilitychange", updateForeground);
-
-		return () => {
-			window.removeEventListener("focus", updateForeground);
-			window.removeEventListener("blur", updateForeground);
-			document.removeEventListener("visibilitychange", updateForeground);
-		};
-	}, []);
-
-	return isForeground;
 }
 
 const THEME = {
@@ -584,7 +556,7 @@ export function TerminalSessionHost({
 			cursorBlink: true,
 			cursorStyle: "bar",
 			allowTransparency: true,
-			scrollback: 10000,
+			scrollback: ACTIVE_TERMINAL_SCROLLBACK,
 		});
 		const fitAddon = new FitAddon();
 		term.loadAddon(fitAddon);

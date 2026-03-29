@@ -86,16 +86,16 @@ export function GitSidebarTabs() {
 				)}
 				<div className="flex-1 h-9 border-b border-border-light" />
 			</div>
-			<div
-				className={`flex-1 min-h-0 overflow-y-auto bg-surface ${activeTab !== "files" ? "hidden" : ""}`}
-			>
-				<GitFilesTab />
-			</div>
-			<div
-				className={`flex-1 min-h-0 overflow-y-auto bg-surface ${activeTab !== "diff" ? "hidden" : ""}`}
-			>
-				<GitDiffTab />
-			</div>
+			{activeTab === "files" && (
+				<div className="flex-1 min-h-0 overflow-y-auto bg-surface">
+					<GitFilesTab />
+				</div>
+			)}
+			{activeTab === "diff" && (
+				<div className="flex-1 min-h-0 bg-surface">
+					<GitDiffTab />
+				</div>
+			)}
 			{activeTab === "checks" && hasPr && (
 				<div className="flex-1 min-h-0 overflow-y-auto bg-surface">
 					<GitChecksTab />

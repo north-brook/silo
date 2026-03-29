@@ -2,6 +2,10 @@ import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import {
+	resolveForegroundPollInterval,
+	usePageIsForeground,
+} from "@/shared/lib/page-foreground";
 import { Loader } from "@/shared/ui/loader";
 import {
 	type FileTreeDirectory,
@@ -42,6 +46,7 @@ export function GitFilesTab() {
 	const workspaceSessions = useWorkspaceSessions();
 	const { diff } = useGitSidebar();
 	const { openFileTab } = useFileSessions();
+	const isForeground = usePageIsForeground();
 	const [expandedPaths, setExpandedPaths] = useState<Set<string>>(
 		new Set([""]),
 	);
@@ -49,7 +54,13 @@ export function GitFilesTab() {
 		queryKey: ["files_list_directory", workspace, ""],
 		queryFn: () => filesListDirectory(workspace),
 		enabled: !!workspace,
-		refetchInterval: 5000,
+		refetchInterval: resolveForegroundPollInterval({
+			activeMs: 5000,
+			enabled: !!workspace,
+			hiddenMs: 30000,
+			inactiveMs: 15000,
+			isForeground,
+		}),
 	});
 	const expandedDirectoryPaths = useMemo(
 		() => Array.from(expandedPaths).filter((path) => path.length > 0).sort(),
@@ -60,7 +71,13 @@ export function GitFilesTab() {
 			queryKey: ["files_list_directory", workspace, path],
 			queryFn: () => filesListDirectory(workspace, path),
 			enabled: !!workspace,
-			refetchInterval: 5000,
+			refetchInterval: resolveForegroundPollInterval({
+				activeMs: 5000,
+				enabled: !!workspace,
+				hiddenMs: 30000,
+				inactiveMs: 15000,
+				isForeground,
+			}),
 		})),
 	});
 	const diffByPath = useMemo(() => {

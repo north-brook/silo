@@ -1,11 +1,22 @@
-import { useQuery } from "@tanstack/react-query";
-import { createContext, type ReactNode, useContext, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+	createContext,
+	type ReactNode,
+	useContext,
+	useEffect,
+	useState,
+} from "react";
+import {
+	resolveForegroundPollInterval,
+	usePageIsForeground,
+} from "@/shared/lib/page-foreground";
 import { shortcutEvents } from "@/shared/lib/shortcuts";
 import { useShortcut } from "@/shared/lib/use-shortcut";
 import { isTemplateWorkspace, workspaceIsReady } from "@/workspaces/api";
 import {
 	type Diff,
 	gitDiff,
+	gitDiffSummary,
 	gitPrSummary,
 	type PullRequestSummary,
 } from "@/workspaces/git/api";
@@ -20,6 +31,8 @@ interface GitSidebarContextValue {
 	openTab: (tab: GitSidebarTab) => void;
 	diff: Diff | null;
 	diffLoading: boolean;
+	fullDiff: Diff | null;
+	fullDiffLoading: boolean;
 	hasChanges: boolean;
 	workspace: string;
 	project: string;
@@ -35,6 +48,8 @@ const GitSidebarContext = createContext<GitSidebarContextValue>({
 	openTab: () => {},
 	diff: null,
 	diffLoading: false,
+	fullDiff: null,
+	fullDiffLoading: false,
 	hasChanges: false,
 	workspace: "",
 	project: "",
@@ -50,17 +65,28 @@ export function useGitSidebar() {
 export function GitSidebarProvider({ children }: { children: ReactNode }) {
 	const { workspace, workspaceName } = useWorkspaceState();
 	const project = useWorkspaceProject();
+	const queryClient = useQueryClient();
+	const isForeground = usePageIsForeground();
 
 	const isInBranchWorkspace =
 		!!workspaceName && !!workspace && !isTemplateWorkspace(workspace);
 	const isReadyBranchWorkspace =
 		isInBranchWorkspace && !!workspace && workspaceIsReady(workspace);
+	const [isOpen, setIsOpen] = useState(false);
+	const [activeTab, setActiveTab] = useState<GitSidebarTab>("diff");
 
 	const diff = useQuery({
-		queryKey: ["git_diff", workspaceName],
-		queryFn: () => gitDiff(workspaceName),
+		queryKey: ["git_diff", workspaceName, "summary"],
+		queryFn: () => gitDiffSummary(workspaceName),
 		enabled: isReadyBranchWorkspace,
-		refetchInterval: 5000,
+		refetchInterval: resolveForegroundPollInterval({
+			active: isOpen,
+			activeMs: 5000,
+			enabled: isReadyBranchWorkspace,
+			hiddenMs: 30000,
+			inactiveMs: 15000,
+			isForeground,
+		}),
 	});
 
 	const hasChanges =
@@ -72,18 +98,44 @@ export function GitSidebarProvider({ children }: { children: ReactNode }) {
 		queryKey: ["git_pr_summary", workspaceName],
 		queryFn: () => gitPrSummary(workspaceName),
 		enabled: isReadyBranchWorkspace,
-		refetchInterval: 10000,
+		refetchInterval: resolveForegroundPollInterval({
+			active: isOpen || activeTab === "checks",
+			activeMs: 10000,
+			enabled: isReadyBranchWorkspace,
+			hiddenMs: 60000,
+			inactiveMs: 30000,
+			isForeground,
+		}),
 	});
 
 	const hasPr = prSummaryQuery.data?.status === "open";
-
-	const [isOpen, setIsOpen] = useState(false);
-	const [activeTab, setActiveTab] = useState<GitSidebarTab>("diff");
-	const visibleTab = hasPr
+	const resolvedTab = hasPr
 		? activeTab
 		: activeTab === "checks"
 			? "diff"
 			: activeTab;
+	const fullDiffEnabled =
+		isReadyBranchWorkspace &&
+		isOpen &&
+		resolvedTab === "diff" &&
+		isForeground;
+
+	const fullDiff = useQuery({
+		queryKey: ["git_diff", workspaceName, "full"],
+		queryFn: () => gitDiff(workspaceName),
+		enabled: fullDiffEnabled,
+		gcTime: 60 * 1000,
+		staleTime: 0,
+	});
+
+	useEffect(() => {
+		if (fullDiffEnabled || !workspaceName) {
+			return;
+		}
+		queryClient.removeQueries({
+			queryKey: ["git_diff", workspaceName, "full"],
+		});
+	}, [fullDiffEnabled, queryClient, workspaceName]);
 
 	useShortcut<void>({
 		event: shortcutEvents.toggleGitBar,
@@ -154,10 +206,12 @@ export function GitSidebarProvider({ children }: { children: ReactNode }) {
 			value={{
 				isOpen,
 				toggle: () => setIsOpen((open) => !open),
-				activeTab: visibleTab,
+				activeTab: resolvedTab,
 				openTab,
 				diff: diff.data ?? null,
 				diffLoading: diff.isLoading,
+				fullDiff: fullDiff.data ?? null,
+				fullDiffLoading: fullDiff.isLoading || fullDiff.isFetching,
 				hasChanges,
 				workspace: workspaceName,
 				project,

@@ -9,6 +9,10 @@ import {
 	useRef,
 	useState,
 } from "react";
+import {
+	resolveForegroundPollInterval,
+	usePageIsForeground,
+} from "@/shared/lib/page-foreground";
 import { toast } from "@/shared/ui/toaster";
 import {
 	workspaceSessions as listWorkspaceSessions,
@@ -89,6 +93,7 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 	const queryClient = useQueryClient();
 	const { workspaceName } = useWorkspaceState();
 	const workspaceSessions = useWorkspaceSessions();
+	const isForeground = usePageIsForeground();
 	const [workspaceLocalFileStates, setWorkspaceLocalFileStates] = useState<
 		Record<string, WorkspaceLocalFileState>
 	>({});
@@ -322,7 +327,13 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 		queryKey: ["files_get_watched_state", workspaceName],
 		queryFn: () => filesGetWatchedState(workspaceName),
 		enabled: !!workspaceName && watchedPaths.length > 0,
-		refetchInterval: 2000,
+		refetchInterval: resolveForegroundPollInterval({
+			activeMs: 2000,
+			enabled: !!workspaceName && watchedPaths.length > 0,
+			hiddenMs: 12000,
+			inactiveMs: 6000,
+			isForeground,
+		}),
 	});
 	const watchedFilesByPath = useMemo(
 		() =>

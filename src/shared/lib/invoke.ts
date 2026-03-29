@@ -6,6 +6,7 @@ import {
 	warn as pluginWarn,
 } from "@tauri-apps/plugin-log";
 import { domFocusSnapshot } from "./focus-debug";
+import { InvokeResultCache } from "./invoke-cache";
 
 type LogLevel = "debug" | "info" | "warn" | "error";
 type ConsoleMethod = "log" | "debug" | "info" | "warn" | "error";
@@ -22,10 +23,15 @@ interface InvokeOptions<T> {
 const PATCHED_CONSOLE_KEY = "__siloLoggingPatched";
 const MAX_LOG_MESSAGE_LENGTH = 8_000;
 const FRONTEND_BOOT_ID = createBootId();
+const MAX_RETAINED_INVOKE_RESULTS = 96;
+const INVOKE_RESULT_TTL_MS = 10 * 60 * 1000;
 
 let frontendLoggingInitialized = false;
 let frontendLoggingSuppressed = false;
-const lastInvokeResults = new Map<string, unknown>();
+const lastInvokeResults = new InvokeResultCache<unknown>({
+	maxEntries: MAX_RETAINED_INVOKE_RESULTS,
+	ttlMs: INVOKE_RESULT_TTL_MS,
+});
 let webSocketPatched = false;
 
 const pluginWriters: Record<LogLevel, (message: string) => Promise<void>> = {

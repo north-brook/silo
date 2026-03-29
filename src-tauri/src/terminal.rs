@@ -7,12 +7,15 @@ use crate::remote::{
     workspace_shell_command_preserving_stdin, REMOTE_WORKSPACE_AGENT_BIN,
 };
 use crate::state::WorkspaceMetadataManager;
+use crate::state_paths;
 use crate::workspaces::{self, WorkspaceActiveSession, WorkspaceLookup, WorkspaceSession};
 use crate::{emit_workspace_state_changed, AppRuntime};
 use portable_pty::{native_pty_system, Child, ChildKiller, MasterPty, PtySize};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::ipc::Channel;
@@ -24,6 +27,7 @@ const TERMINAL_ERROR_EVENT: &str = "terminal://error";
 const TERMINAL_DISCONNECT_EVENT: &str = "terminal://disconnect";
 const MAX_ATTACHMENT_RECENT_OUTPUT_BYTES: usize = 16 * 1024;
 const MAX_ATTACHMENT_PENDING_OUTPUT_BYTES: usize = 512 * 1024;
+const DEFAULT_TRANSCRIPT_TAIL_BYTES: usize = 128 * 1024;
 const ATTACH_RESERVATION_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const ATTACH_RESERVATION_WAIT_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -106,6 +110,12 @@ pub struct TerminalFinishAttachResult {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TerminalProbeResult {
     exists: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TerminalTranscriptTailResult {
+    content: String,
+    truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -623,6 +633,27 @@ pub async fn terminal_read_terminal(
 }
 
 #[tauri::command]
+pub async fn terminal_read_transcript_tail(
+    workspace: String,
+    attachment_id: String,
+    max_bytes: Option<usize>,
+) -> Result<TerminalTranscriptTailResult, String> {
+    let path = transcript_path_for_attachment(&workspace, &attachment_id)?;
+    if !path.exists() {
+        return Ok(TerminalTranscriptTailResult {
+            content: String::new(),
+            truncated: false,
+        });
+    }
+
+    let (bytes, truncated) = read_transcript_tail_bytes(&path, max_bytes)?;
+    Ok(TerminalTranscriptTailResult {
+        content: String::from_utf8_lossy(&bytes).into_owned(),
+        truncated,
+    })
+}
+
+#[tauri::command]
 pub fn terminal_write_terminal(
     state: State<'_, TerminalManager>,
     terminal: String,
@@ -974,6 +1005,99 @@ fn record_attachment_output(attachment: &Attachment, chunk: &[u8]) {
             recent_output.drain(..overflow);
         }
     }
+    append_transcript_output(&attachment.key, chunk);
+}
+
+fn append_transcript_output(key: &AttachmentKey, chunk: &[u8]) {
+    let path = match transcript_path_for_attachment(&key.workspace, &key.name) {
+        Ok(path) => path,
+        Err(error) => {
+            log::warn!(
+                "failed to resolve transcript path for workspace {} attachment {}: {}",
+                key.workspace,
+                key.name,
+                error
+            );
+            return;
+        }
+    };
+
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if let Err(error) = fs::create_dir_all(parent) {
+        log::warn!(
+            "failed to create transcript directory for workspace {} attachment {}: {}",
+            key.workspace,
+            key.name,
+            error
+        );
+        return;
+    }
+
+    match OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut file) => {
+            if let Err(error) = file.write_all(chunk) {
+                log::warn!(
+                    "failed to append transcript output for workspace {} attachment {}: {}",
+                    key.workspace,
+                    key.name,
+                    error
+                );
+            }
+        }
+        Err(error) => {
+            log::warn!(
+                "failed to open transcript file for workspace {} attachment {}: {}",
+                key.workspace,
+                key.name,
+                error
+            );
+        }
+    }
+}
+
+fn transcript_path_for_attachment(workspace: &str, attachment_id: &str) -> Result<PathBuf, String> {
+    Ok(state_paths::app_state_dir()?
+        .join("terminal-transcripts")
+        .join(sanitize_transcript_segment(workspace))
+        .join(format!(
+            "{}.log",
+            sanitize_transcript_segment(attachment_id)
+        )))
+}
+
+fn sanitize_transcript_segment(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn read_transcript_tail_bytes(
+    path: &std::path::Path,
+    max_bytes: Option<usize>,
+) -> Result<(Vec<u8>, bool), String> {
+    let max_bytes = max_bytes.unwrap_or(DEFAULT_TRANSCRIPT_TAIL_BYTES).max(1);
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("failed to open transcript {}: {error}", path.display()))?;
+    let total_bytes = file
+        .metadata()
+        .map_err(|error| format!("failed to stat transcript {}: {error}", path.display()))?
+        .len() as usize;
+    let start = total_bytes.saturating_sub(max_bytes) as u64;
+    file.seek(SeekFrom::Start(start))
+        .map_err(|error| format!("failed to seek transcript {}: {error}", path.display()))?;
+    let mut content = Vec::with_capacity(total_bytes.saturating_sub(start as usize));
+    file.read_to_end(&mut content)
+        .map_err(|error| format!("failed to read transcript {}: {error}", path.display()))?;
+    Ok((content, total_bytes > max_bytes))
 }
 
 fn probe_terminal_attachment(manager: &TerminalManager, terminal: &str) -> TerminalProbeResult {
@@ -1324,6 +1448,7 @@ mod tests {
     use portable_pty::{native_pty_system, ChildKiller};
     use serde_json::json;
     use std::collections::HashSet;
+    use std::fs;
     use std::sync::{Arc, Mutex};
     use tauri::ipc::{Channel, InvokeResponseBody};
 
@@ -1414,6 +1539,34 @@ mod tests {
         assert!(generated.starts_with("terminal-"));
         assert!(!existing.contains(&generated));
         assert!(generated["terminal-".len()..].parse::<u128>().is_ok());
+    }
+
+    #[test]
+    fn sanitize_transcript_segment_replaces_path_separators() {
+        assert_eq!(
+            sanitize_transcript_segment("workspace/feature:test"),
+            "workspace_feature_test"
+        );
+    }
+
+    #[test]
+    fn read_transcript_tail_bytes_returns_tail_and_truncation_flag() {
+        let dir = std::env::temp_dir().join(format!("silo-terminal-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("temp dir should exist");
+        let path = dir.join("transcript.log");
+        fs::write(&path, b"0123456789").expect("transcript should be written");
+
+        let (tail, truncated) =
+            read_transcript_tail_bytes(&path, Some(4)).expect("tail should read");
+        assert_eq!(tail, b"6789");
+        assert!(truncated);
+
+        let (full, truncated) =
+            read_transcript_tail_bytes(&path, Some(32)).expect("full transcript should read");
+        assert_eq!(full, b"0123456789");
+        assert!(!truncated);
+
+        fs::remove_dir_all(&dir).expect("temp dir should be removed");
     }
 
     #[test]

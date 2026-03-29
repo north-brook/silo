@@ -122,6 +122,31 @@ export function gitDiff(workspace: string): Promise<Diff> {
 	);
 }
 
+export function gitDiffSummary(workspace: string): Promise<Diff> {
+	return invoke<Diff>(
+		"git_diff_summary",
+		{ workspace },
+		{
+			log: "state_changes_only",
+			key: `poll:git_diff_summary:${workspace}`,
+		},
+	);
+}
+
+export function gitDiffFile(
+	workspace: string,
+	path: string,
+): Promise<DiffFile | null> {
+	return invoke<DiffFile | null>(
+		"git_diff_file",
+		{ workspace, path },
+		{
+			log: "state_changes_only",
+			key: `poll:git_diff_file:${workspace}:${path}`,
+		},
+	);
+}
+
 export function gitPrStatus(
 	workspace: string,
 ): Promise<PullRequestStatus | null> {

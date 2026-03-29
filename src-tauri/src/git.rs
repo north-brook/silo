@@ -400,16 +400,21 @@ pub async fn git_project_branches(project: String) -> Result<Vec<String>, String
 #[tauri::command]
 pub async fn git_diff(workspace: String) -> Result<Diff, String> {
     let context = branch_workspace_context(&workspace).await?;
-    let result =
-        run_workspace_command(&context, &diff_remote_command(&context.target_branch)).await?;
-    if !result.success {
-        return Err(git_error(
-            "failed to collect workspace diff",
-            &result.stderr,
-        ));
-    }
+    collect_workspace_diff(&context).await
+}
 
-    parse_diff(&result.stdout)
+#[tauri::command]
+pub async fn git_diff_summary(workspace: String) -> Result<Diff, String> {
+    let context = branch_workspace_context(&workspace).await?;
+    let diff = collect_workspace_diff(&context).await?;
+    Ok(strip_diff_patches(&diff))
+}
+
+#[tauri::command]
+pub async fn git_diff_file(workspace: String, path: String) -> Result<Option<DiffFile>, String> {
+    let context = branch_workspace_context(&workspace).await?;
+    let diff = collect_workspace_diff(&context).await?;
+    Ok(find_diff_file(&diff, &path))
 }
 
 #[tauri::command]
@@ -757,6 +762,19 @@ async fn workspace_tree_dirty(context: &BranchWorkspaceContext) -> Result<bool, 
     }
 
     parse_tree_dirty_output(&result.stdout)
+}
+
+async fn collect_workspace_diff(context: &BranchWorkspaceContext) -> Result<Diff, String> {
+    let result =
+        run_workspace_command(context, &diff_remote_command(&context.target_branch)).await?;
+    if !result.success {
+        return Err(git_error(
+            "failed to collect workspace diff",
+            &result.stderr,
+        ));
+    }
+
+    parse_diff(&result.stdout)
 }
 
 async fn ensure_workspace_tree_clean(
@@ -1642,6 +1660,46 @@ fn parse_diff(stdout: &str) -> Result<Diff, String> {
     })
 }
 
+fn strip_diff_patches(diff: &Diff) -> Diff {
+    Diff {
+        overview: diff.overview.clone(),
+        local: strip_diff_section_patches(&diff.local),
+        remote: strip_diff_section_patches(&diff.remote),
+    }
+}
+
+fn strip_diff_section_patches(section: &DiffSection) -> DiffSection {
+    DiffSection {
+        overview: section.overview.clone(),
+        files: section
+            .files
+            .iter()
+            .map(|file| DiffFile {
+                patch: None,
+                ..file.clone()
+            })
+            .collect(),
+    }
+}
+
+fn find_diff_file(diff: &Diff, path: &str) -> Option<DiffFile> {
+    let path = trim_diff_file_path(path);
+    if path.is_empty() {
+        return None;
+    }
+
+    diff.local
+        .files
+        .iter()
+        .chain(diff.remote.files.iter())
+        .find(|file| file.path == path || file.previous_path.as_deref() == Some(path))
+        .cloned()
+}
+
+fn trim_diff_file_path(path: &str) -> &str {
+    path.trim().trim_start_matches("./")
+}
+
 fn parse_diff_section(stdout: &str) -> Result<DiffSection, String> {
     let mut files = Vec::new();
     let mut additions = 0_u64;
@@ -2412,6 +2470,86 @@ index 1111111..2222222 100644\n\
         assert_eq!(parsed.local.files[0].status, "modified");
         assert_eq!(parsed.local.files[0].path, "src/app.rs");
         assert_eq!(parsed.local.files[0].previous_path, None);
+    }
+
+    #[test]
+    fn strip_diff_patches_clears_patch_content() {
+        let diff = "\
+===REMOTE_DIFF===\n\
+diff --git a/src/old.rs b/src/new.rs\n\
+similarity index 90%\n\
+rename from src/old.rs\n\
+rename to src/new.rs\n\
+--- a/src/old.rs\n\
++++ b/src/new.rs\n\
+@@ -1 +1 @@\n\
+-old\n\
++new\n\
+===LOCAL_DIFF===\n\
+diff --git a/src/app.rs b/src/app.rs\n\
+index 1111111..2222222 100644\n\
+--- a/src/app.rs\n\
++++ b/src/app.rs\n\
+@@ -1 +1 @@\n\
+-before\n\
++after\n\
+";
+
+        let parsed = parse_diff(diff).expect("diff should parse");
+        let stripped = strip_diff_patches(&parsed);
+
+        assert_eq!(stripped.local.files.len(), 1);
+        assert_eq!(stripped.remote.files.len(), 1);
+        assert_eq!(stripped.local.files[0].patch, None);
+        assert_eq!(stripped.remote.files[0].patch, None);
+        assert!(parsed.local.files[0].patch.is_some());
+        assert!(parsed.remote.files[0].patch.is_some());
+    }
+
+    #[test]
+    fn find_diff_file_prefers_local_changes() {
+        let diff = Diff {
+            overview: DiffOverview {
+                additions: 3,
+                deletions: 1,
+                files_changed: 1,
+            },
+            local: DiffSection {
+                overview: DiffOverview {
+                    additions: 2,
+                    deletions: 0,
+                    files_changed: 1,
+                },
+                files: vec![DiffFile {
+                    path: "src/app.rs".to_string(),
+                    previous_path: None,
+                    status: "modified".to_string(),
+                    additions: 2,
+                    deletions: 0,
+                    binary: false,
+                    patch: Some("local patch".to_string()),
+                }],
+            },
+            remote: DiffSection {
+                overview: DiffOverview {
+                    additions: 1,
+                    deletions: 1,
+                    files_changed: 1,
+                },
+                files: vec![DiffFile {
+                    path: "src/app.rs".to_string(),
+                    previous_path: None,
+                    status: "modified".to_string(),
+                    additions: 1,
+                    deletions: 1,
+                    binary: false,
+                    patch: Some("remote patch".to_string()),
+                }],
+            },
+        };
+
+        let file = find_diff_file(&diff, "./src/app.rs").expect("diff file should exist");
+        assert_eq!(file.patch.as_deref(), Some("local patch"));
     }
 
     #[test]

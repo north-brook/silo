@@ -24,11 +24,15 @@ interface CloudHostRecord {
 	key: string;
 	status: CloudHostStatus;
 	errorMessage: string | null;
+	lastActivatedAt: number | null;
 	terminalId: string | null;
 	portalUrl: string | null;
 	skipInitialScrollback: boolean;
 	retryNonce: number;
 }
+
+const HOST_WARM_RETENTION_MS = 3 * 60 * 1000;
+const HOST_EVICTION_TICK_MS = 30 * 1000;
 
 interface SessionHostContextValue {
 	activeSessionKey: string | null;
@@ -60,13 +64,14 @@ const SessionHostContext = createContext<SessionHostContextValue | null>(null);
 function upsertHostRecord(
 	existing: CloudHostRecord | undefined,
 	session: CloudSession,
-	options?: { skipInitialScrollback?: boolean },
+	options?: { skipInitialScrollback?: boolean; warmAt?: number | null },
 ): CloudHostRecord {
 	return {
 		key: existing?.key ?? cloudSessionKey(session),
 		session,
 		status: existing?.status ?? "idle",
 		errorMessage: existing?.errorMessage ?? null,
+		lastActivatedAt: options?.warmAt ?? existing?.lastActivatedAt ?? null,
 		terminalId: existing?.terminalId ?? null,
 		portalUrl: existing?.portalUrl ?? null,
 		skipInitialScrollback:
@@ -95,6 +100,7 @@ export function SessionHostProvider({
 	>({});
 	const [parkingLotElement, setParkingLotElement] =
 		useState<HTMLDivElement | null>(null);
+	const [evictionTick, setEvictionTick] = useState(() => Date.now());
 	const parkingLotRef = useRef<HTMLDivElement>(null);
 	const workspacePreloadedRef = useRef(workspacePreloaded);
 	const clearActiveSessionTimerRef = useRef<number | null>(null);
@@ -115,11 +121,24 @@ export function SessionHostProvider({
 		};
 	}, []);
 
+	useEffect(() => {
+		const intervalId = window.setInterval(() => {
+			setEvictionTick(Date.now());
+		}, HOST_EVICTION_TICK_MS);
+		return () => {
+			window.clearInterval(intervalId);
+		};
+	}, []);
+
 	const ensureSession = useCallback(
 		(session: CloudSession, options?: { skipInitialScrollback?: boolean }) => {
+			const warmAt = Date.now();
 			setHosts((previous) => {
 				const key = cloudSessionKey(session);
-				const next = upsertHostRecord(previous[key], session, options);
+				const next = upsertHostRecord(previous[key], session, {
+					skipInitialScrollback: options?.skipInitialScrollback,
+					warmAt,
+				});
 				const existing = previous[key];
 				if (
 					existing &&
@@ -136,7 +155,8 @@ export function SessionHostProvider({
 					existing.session.canGoForward === next.session.canGoForward &&
 					existing.session.working === next.session.working &&
 					existing.session.unread === next.session.unread &&
-					existing.skipInitialScrollback === next.skipInitialScrollback
+					existing.skipInitialScrollback === next.skipInitialScrollback &&
+					existing.lastActivatedAt === next.lastActivatedAt
 				) {
 					return previous;
 				}
@@ -418,7 +438,16 @@ export function SessionHostProvider({
 				<div ref={parkingLotRef} />
 			</div>
 			{parkingLotElement &&
-				Object.values(hosts).map((record) => {
+				Object.values(hosts)
+					.filter((record) =>
+						shouldRenderHost(
+							record,
+							activeWorkspace,
+							activeSessionKey,
+							evictionTick,
+						),
+					)
+					.map((record) => {
 					const isActive =
 						record.session.workspace === activeWorkspace &&
 						record.key === activeSessionKey;
@@ -473,4 +502,23 @@ export function useSessionHosts() {
 		);
 	}
 	return context;
+}
+
+function shouldRenderHost(
+	record: CloudHostRecord,
+	activeWorkspace: string | null,
+	activeSessionKey: string | null,
+	now: number,
+) {
+	const isActive =
+		record.session.workspace === activeWorkspace && record.key === activeSessionKey;
+	if (isActive) {
+		return true;
+	}
+
+	if (record.lastActivatedAt == null) {
+		return false;
+	}
+
+	return now - record.lastActivatedAt < HOST_WARM_RETENTION_MS;
 }
