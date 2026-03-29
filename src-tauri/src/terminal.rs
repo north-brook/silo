@@ -295,7 +295,7 @@ pub async fn terminal_create_assistant(
 ) -> Result<TerminalCreateResult, String> {
     let provider = AssistantProvider::parse(&model)?;
     let attachment_id =
-        start_assistant_session(workspace_state.inner(), &workspace, provider, None).await?;
+        create_pending_assistant_session(workspace_state.inner(), &workspace, provider).await?;
     Ok(TerminalCreateResult { attachment_id })
 }
 
@@ -338,9 +338,8 @@ pub async fn terminal_attach_terminal(
         workspace: workspace.clone(),
         name: attachment_id.clone(),
     };
-    let attach_command =
-        build_terminal_attach_command(&lookup, &terminal_attach_remote_command(&attachment_id))
-            .await?;
+    let remote_attach_command = terminal_attach_remote_command_for_session(&lookup, &attachment_id);
+    let attach_command = build_terminal_attach_command(&lookup, &remote_attach_command).await?;
 
     let _reservation = match wait_for_attachment_slot(state.inner(), &key, &attachment_id).await? {
         AttachmentSlot::Existing(existing) => {
@@ -443,32 +442,19 @@ pub(crate) async fn start_assistant_session(
     provider: AssistantProvider,
     initial_prompt: Option<&str>,
 ) -> Result<String, String> {
+    let attachment_id =
+        create_pending_assistant_session(workspace_state, workspace, provider).await?;
     let lookup = workspaces::find_workspace_raw(workspace).await?;
-    if !lookup.workspace.is_ready() {
-        bootstrap::start_workspace_startup_reconcile_if_needed(lookup.workspace.clone());
-        return Err(workspaces::workspace_not_ready_error(&lookup.workspace));
-    }
 
-    let attachment_id = create_terminal_attachment_id(workspace).await?;
-    workspace_state.upsert_workspace_session(
-        workspace,
-        pending_assistant_session(&attachment_id, provider),
-    );
-
-    let assistant_command =
-        assistant_session_command(provider, initial_prompt.is_some(), &attachment_id);
     let launch_result = if let Some(prompt) = initial_prompt {
         let prompt_path = assistant_prompt_file_path(&attachment_id);
-        let remote_command = assistant_prompt_launch_remote_command(
-            &attachment_id,
-            &assistant_command,
-            &prompt_path,
-        );
+        let remote_command =
+            assistant_prompt_launch_remote_command(&attachment_id, provider, &prompt_path);
         run_remote_command_with_stdin(&lookup, &remote_command, prompt.as_bytes().to_vec()).await
     } else {
         run_remote_command(
             &lookup,
-            &terminal_run_remote_command(&attachment_id, &assistant_command),
+            &assistant_run_remote_command(&attachment_id, provider, false),
         )
         .await
     };
@@ -1264,6 +1250,25 @@ fn pending_terminal_session(attachment_id: &str) -> WorkspaceSession {
     }
 }
 
+async fn create_pending_assistant_session(
+    workspace_state: &WorkspaceMetadataManager,
+    workspace: &str,
+    provider: AssistantProvider,
+) -> Result<String, String> {
+    let lookup = workspaces::find_workspace_raw(workspace).await?;
+    if !lookup.workspace.is_ready() {
+        bootstrap::start_workspace_startup_reconcile_if_needed(lookup.workspace.clone());
+        return Err(workspaces::workspace_not_ready_error(&lookup.workspace));
+    }
+
+    let attachment_id = create_terminal_attachment_id(workspace).await?;
+    workspace_state.upsert_workspace_session(
+        workspace,
+        pending_assistant_session(&attachment_id, provider),
+    );
+    Ok(attachment_id)
+}
+
 fn pending_assistant_session(attachment_id: &str, provider: AssistantProvider) -> WorkspaceSession {
     WorkspaceSession {
         kind: "terminal".to_string(),
@@ -1355,19 +1360,40 @@ fn sanitize_session_display_name(command: &str) -> String {
     {
         return "claude".to_string();
     }
+    if let Some(provider) = assistant_provider_from_command(trimmed) {
+        return provider.command_name().to_string();
+    }
     trimmed.chars().take(200).collect()
 }
 
 fn assistant_capable_command(command: &str) -> bool {
-    let token = command
+    assistant_provider_from_command(command).is_some()
+}
+
+fn assistant_provider_from_command(command: &str) -> Option<AssistantProvider> {
+    let mut tokens = command.split_whitespace().map(normalize_command_token);
+    if let Some(token) = tokens.next() {
+        let executable = token.rsplit('/').next().unwrap_or(token);
+        if let Ok(provider) = AssistantProvider::parse(executable) {
+            return Some(provider);
+        }
+    }
+
+    let tokens = command
         .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .rsplit('/')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    matches!(token.as_str(), "codex" | "claude" | "cc")
+        .map(normalize_command_token)
+        .collect::<Vec<_>>();
+    tokens.windows(3).find_map(|window| {
+        if window[0] == "assistant-proxy" && window[1] == "--provider" {
+            AssistantProvider::parse(window[2]).ok()
+        } else {
+            None
+        }
+    })
+}
+
+fn normalize_command_token(token: &str) -> &str {
+    token.trim_matches(|ch| ch == '\'' || ch == '"')
 }
 
 fn terminal_attach_remote_command(name: &str) -> String {
@@ -1377,12 +1403,66 @@ fn terminal_attach_remote_command(name: &str) -> String {
     )))
 }
 
+fn terminal_attach_remote_command_for_session(
+    lookup: &WorkspaceLookup,
+    attachment_id: &str,
+) -> String {
+    pending_assistant_provider_for_attachment(lookup, attachment_id)
+        .map(|provider| assistant_attach_remote_command(attachment_id, provider))
+        .unwrap_or_else(|| terminal_attach_remote_command(attachment_id))
+}
+
+fn pending_assistant_provider_for_attachment(
+    lookup: &WorkspaceLookup,
+    attachment_id: &str,
+) -> Option<AssistantProvider> {
+    lookup
+        .workspace
+        .sessions()
+        .into_iter()
+        .find(|session| session.kind == "terminal" && session.attachment_id == attachment_id)
+        .and_then(|session| pending_assistant_provider(&session))
+}
+
+fn pending_assistant_provider(session: &WorkspaceSession) -> Option<AssistantProvider> {
+    if session.kind != "terminal" || session.working.is_some() || session.unread.is_some() {
+        return None;
+    }
+    AssistantProvider::parse(&session.name).ok()
+}
+
 fn terminal_run_remote_command(name: &str, command: &str) -> String {
     run_terminal_user_command(&terminal_shell_command(&session_run_command(name, command)))
 }
 
 fn session_run_command(name: &str, command: &str) -> String {
     format!("zmx run {} {}", shell_quote(name), shell_quote(command))
+}
+
+fn session_run_direct_command(name: &str, command: &str) -> String {
+    format!("zmx run {} {}", shell_quote(name), command)
+}
+
+fn session_attach_direct_command(name: &str, command: &str) -> String {
+    format!("exec zmx attach {} {}", shell_quote(name), command)
+}
+
+fn assistant_run_remote_command(
+    attachment_id: &str,
+    provider: AssistantProvider,
+    include_prompt_file: bool,
+) -> String {
+    run_terminal_user_command(&terminal_shell_command(&session_run_direct_command(
+        attachment_id,
+        &assistant_session_command(provider, include_prompt_file, attachment_id),
+    )))
+}
+
+fn assistant_attach_remote_command(attachment_id: &str, provider: AssistantProvider) -> String {
+    run_terminal_user_command(&terminal_shell_command(&session_attach_direct_command(
+        attachment_id,
+        &assistant_session_command(provider, false, attachment_id),
+    )))
 }
 
 fn assistant_session_command(
@@ -1416,7 +1496,7 @@ fn assistant_prompt_file_path(attachment_id: &str) -> String {
 
 fn assistant_prompt_launch_remote_command(
     attachment_id: &str,
-    assistant_command: &str,
+    provider: AssistantProvider,
     prompt_path: &str,
 ) -> String {
     workspace_shell_command_preserving_stdin(&format!(
@@ -1429,7 +1509,10 @@ if ! {run_command}; then\n\
   exit 1\n\
 fi",
         prompt_path = shell_quote(prompt_path),
-        run_command = session_run_command(attachment_id, assistant_command),
+        run_command = session_run_direct_command(
+            attachment_id,
+            &assistant_session_command(provider, true, attachment_id),
+        ),
     ))
 }
 
@@ -1473,6 +1556,28 @@ mod tests {
     }
 
     #[test]
+    fn session_run_direct_command_passes_assistant_words_as_argv() {
+        assert_eq!(
+            session_run_direct_command(
+                "terminal-1",
+                &assistant_session_command(AssistantProvider::Codex, false, "terminal-1"),
+            ),
+            "zmx run 'terminal-1' '/home/silo/.silo/bin/workspace-agent' assistant-proxy --provider 'codex' -- 'codex'"
+        );
+    }
+
+    #[test]
+    fn session_attach_direct_command_passes_assistant_words_as_argv() {
+        assert_eq!(
+            session_attach_direct_command(
+                "terminal-1",
+                &assistant_session_command(AssistantProvider::Claude, false, "terminal-1"),
+            ),
+            "exec zmx attach 'terminal-1' '/home/silo/.silo/bin/workspace-agent' assistant-proxy --provider 'claude' -- 'claude' '--dangerously-skip-permissions'"
+        );
+    }
+
+    #[test]
     fn assistant_session_command_builds_direct_codex_launch() {
         assert_eq!(
             assistant_session_command(AssistantProvider::Codex, false, "terminal-1"),
@@ -1492,7 +1597,7 @@ mod tests {
     fn assistant_prompt_launch_remote_command_streams_prompt_then_runs_session() {
         let command = assistant_prompt_launch_remote_command(
             "terminal-1",
-            &assistant_session_command(AssistantProvider::Codex, true, "terminal-1"),
+            AssistantProvider::Codex,
             "/tmp/silo-assistant-prompt-terminal-1.txt",
         );
 
@@ -1527,6 +1632,62 @@ mod tests {
         assert_eq!(session.name, "claude");
         assert_eq!(session.working, None);
         assert_eq!(session.unread, None);
+    }
+
+    #[test]
+    fn pending_assistant_provider_only_matches_unstarted_assistants() {
+        let pending = pending_assistant_session("terminal-1", AssistantProvider::Codex);
+        assert_eq!(
+            pending_assistant_provider(&pending),
+            Some(AssistantProvider::Codex)
+        );
+
+        let active = WorkspaceSession {
+            kind: "terminal".to_string(),
+            name: "claude".to_string(),
+            attachment_id: "terminal-2".to_string(),
+            path: None,
+            url: None,
+            logical_url: None,
+            resolved_url: None,
+            title: None,
+            favicon_url: None,
+            can_go_back: None,
+            can_go_forward: None,
+            working: Some(false),
+            unread: Some(false),
+        };
+        assert_eq!(pending_assistant_provider(&active), None);
+        assert_eq!(
+            pending_assistant_provider(&pending_terminal_session("terminal-3")),
+            None
+        );
+    }
+
+    #[test]
+    fn sanitize_session_display_name_canonicalizes_assistant_proxy_commands() {
+        assert_eq!(
+            sanitize_session_display_name(
+                "/home/silo/.silo/bin/workspace-agent assistant-proxy --provider codex -- codex"
+            ),
+            "codex"
+        );
+        assert_eq!(
+            sanitize_session_display_name(
+                "'/home/silo/.silo/bin/workspace-agent' assistant-proxy --provider 'claude' -- 'claude'"
+            ),
+            "claude"
+        );
+    }
+
+    #[test]
+    fn assistant_capable_command_detects_assistant_proxy_commands() {
+        assert!(assistant_capable_command(
+            "/home/silo/.silo/bin/workspace-agent assistant-proxy --provider codex -- codex"
+        ));
+        assert!(assistant_capable_command(
+            "'/home/silo/.silo/bin/workspace-agent' assistant-proxy --provider 'claude' -- 'claude'"
+        ));
     }
 
     #[test]
