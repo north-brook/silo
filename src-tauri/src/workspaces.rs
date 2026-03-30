@@ -350,6 +350,9 @@ impl WorkspaceLifecycle {
         if status != "RUNNING" || self.is_ready() {
             return false;
         }
+        if self.phase == "updating_workspace_agent" {
+            return false;
+        }
         if self.phase != "failed" {
             return true;
         }
@@ -2824,6 +2827,18 @@ mod tests {
             ),
             GcloudResourceErrorKind::Other
         );
+    }
+
+    #[test]
+    fn workspace_lifecycle_does_not_startup_reconcile_while_updating_agent() {
+        let lifecycle = WorkspaceLifecycle::new(
+            "updating_workspace_agent",
+            Some("Updating workspace observer".to_string()),
+            None,
+            Some(current_rfc3339_timestamp()),
+        );
+
+        assert!(!lifecycle.should_reconcile("RUNNING"));
     }
 
     fn test_workspace_base(name: &str, last_active: Option<&str>) -> WorkspaceBase {

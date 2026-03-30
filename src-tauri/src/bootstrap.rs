@@ -918,17 +918,29 @@ async fn wait_for_workspace_agent(
     expected_fingerprint: Option<&str>,
 ) -> Result<(), String> {
     let ready_check_command = workspace_agent_ready_check_command();
+    let mut saw_fresh_heartbeat = false;
+    let mut matched_expected_fingerprint = expected_fingerprint.is_none();
+    let mut last_ready_probe_error = None::<String>;
     for attempt in 0..OBSERVER_READY_POLL_ATTEMPTS {
         let lookup = workspaces::find_workspace(workspace).await?;
-        if agent_heartbeat_is_fresh(&lookup.workspace)
-            && expected_fingerprint
-                .is_none_or(|expected| lookup.workspace.agent_fingerprint() == Some(expected))
-        {
+        let heartbeat_is_fresh = agent_heartbeat_is_fresh(&lookup.workspace);
+        let fingerprint_matches = expected_fingerprint
+            .is_none_or(|expected| lookup.workspace.agent_fingerprint() == Some(expected));
+        saw_fresh_heartbeat |= heartbeat_is_fresh;
+        matched_expected_fingerprint |= fingerprint_matches;
+
+        if heartbeat_is_fresh && fingerprint_matches {
             match run_remote_command(&lookup, &run_terminal_user_command(&ready_check_command))
                 .await
             {
                 Ok(result) if result.success => return Ok(()),
-                Ok(_) | Err(_) => {}
+                Ok(result) => {
+                    last_ready_probe_error = Some(remote_command_error(
+                        "workspace agent readiness probe failed",
+                        &result.stderr,
+                    ));
+                }
+                Err(error) => last_ready_probe_error = Some(error),
             }
         }
         if attempt + 1 == OBSERVER_READY_POLL_ATTEMPTS {
@@ -937,13 +949,13 @@ async fn wait_for_workspace_agent(
         std::thread::sleep(STARTUP_POLL_INTERVAL);
     }
 
-    Err(expected_fingerprint
-        .map(|_| {
-            format!("workspace agent for {workspace} did not publish the expected fingerprint")
-        })
-        .unwrap_or_else(|| {
-            format!("workspace agent for {workspace} did not publish a recent heartbeat")
-        }))
+    Err(workspace_agent_wait_timeout_error(
+        workspace,
+        expected_fingerprint,
+        saw_fresh_heartbeat,
+        matched_expected_fingerprint,
+        last_ready_probe_error.as_deref(),
+    ))
 }
 
 fn agent_heartbeat_is_fresh(workspace: &Workspace) -> bool {
@@ -956,6 +968,35 @@ fn agent_heartbeat_is_fresh(workspace: &Workspace) -> bool {
 
     OffsetDateTime::now_utc() - heartbeat
         <= time::Duration::seconds(OBSERVER_HEARTBEAT_STALE_AFTER_SECS)
+}
+
+fn workspace_agent_wait_timeout_error(
+    workspace: &str,
+    expected_fingerprint: Option<&str>,
+    saw_fresh_heartbeat: bool,
+    matched_expected_fingerprint: bool,
+    last_ready_probe_error: Option<&str>,
+) -> String {
+    if let Some(error) = last_ready_probe_error {
+        return format!(
+            "workspace agent for {workspace} did not accept the readiness probe: {error}"
+        );
+    }
+    if !saw_fresh_heartbeat {
+        return format!("workspace agent for {workspace} did not publish a recent heartbeat");
+    }
+    if expected_fingerprint.is_some() && !matched_expected_fingerprint {
+        return format!("workspace agent for {workspace} did not publish the expected fingerprint");
+    }
+    if expected_fingerprint.is_some() {
+        return format!(
+            "workspace agent for {workspace} did not become ready after publishing the expected fingerprint"
+        );
+    }
+
+    format!(
+        "workspace agent for {workspace} did not become ready after publishing a recent heartbeat"
+    )
 }
 
 impl LifecycleReporter {
@@ -2070,6 +2111,38 @@ mod tests {
         assert!(command.contains("mark-read --session __silo_ready_probe__"));
         assert!(!command.contains("ps -eo pid=,args="));
         assert!(!command.contains("workspace-agent.new"));
+    }
+
+    #[test]
+    fn workspace_agent_wait_timeout_error_prefers_probe_failure() {
+        let error = workspace_agent_wait_timeout_error(
+            "demo-silo-alpha",
+            Some("fingerprint"),
+            true,
+            true,
+            Some("workspace agent readiness probe failed: failed to open fifo"),
+        );
+
+        assert_eq!(
+            error,
+            "workspace agent for demo-silo-alpha did not accept the readiness probe: workspace agent readiness probe failed: failed to open fifo"
+        );
+    }
+
+    #[test]
+    fn workspace_agent_wait_timeout_error_reports_expected_fingerprint_when_never_seen() {
+        let error = workspace_agent_wait_timeout_error(
+            "demo-silo-alpha",
+            Some("fingerprint"),
+            true,
+            false,
+            None,
+        );
+
+        assert_eq!(
+            error,
+            "workspace agent for demo-silo-alpha did not publish the expected fingerprint"
+        );
     }
 
     #[test]
