@@ -873,6 +873,7 @@ pub async fn workspaces_set_active_session(
 
 #[tauri::command]
 pub async fn workspaces_submit_prompt(
+    terminal_state: State<'_, crate::terminal::TerminalManager>,
     workspace_state: State<'_, crate::state::WorkspaceMetadataManager>,
     workspace: String,
     prompt: String,
@@ -888,6 +889,7 @@ pub async fn workspaces_submit_prompt(
     let prompt = trim_prompt_input(&prompt)?;
     let provider = assistant_provider_for_model(&model)?;
     let attachment_id = terminal::start_assistant_session(
+        terminal_state.inner(),
         workspace_state.inner(),
         &workspace,
         provider,

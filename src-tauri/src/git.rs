@@ -562,6 +562,7 @@ pub async fn git_pr_deployments(workspace: String) -> Result<Vec<Deployment>, St
 
 #[tauri::command]
 pub async fn git_push(
+    terminal_state: State<'_, crate::terminal::TerminalManager>,
     workspace_state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
 ) -> Result<GitTerminalResult, String> {
@@ -571,6 +572,7 @@ pub async fn git_push(
     let branch = current_workspace_branch(&context).await?;
     let prompt = prompts::git_push_prompt(&branch, &context.target_branch);
     let attachment_id = terminal::start_assistant_session(
+        terminal_state.inner(),
         workspace_state.inner(),
         &workspace,
         AssistantProvider::Codex,
@@ -606,6 +608,7 @@ pub async fn git_merge_pr(workspace: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn git_resolve_conflicts(
+    terminal_state: State<'_, crate::terminal::TerminalManager>,
     workspace_state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
 ) -> Result<GitTerminalResult, String> {
@@ -620,6 +623,7 @@ pub async fn git_resolve_conflicts(
 
     let prompt = prompts::git_resolve_conflicts_prompt(&branch, &context.target_branch);
     let attachment_id = terminal::start_assistant_session(
+        terminal_state.inner(),
         workspace_state.inner(),
         &workspace,
         AssistantProvider::Codex,
@@ -670,6 +674,7 @@ pub async fn git_rerun_failed_checks(workspace: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn git_create_pr(
+    terminal_state: State<'_, crate::terminal::TerminalManager>,
     workspace_state: State<'_, WorkspaceMetadataManager>,
     workspace: String,
 ) -> Result<GitTerminalResult, String> {
@@ -679,6 +684,7 @@ pub async fn git_create_pr(
     let branch = current_workspace_branch(&context).await?;
     let prompt = prompts::git_create_pr_prompt(&branch, &context.target_branch);
     let attachment_id = terminal::start_assistant_session(
+        terminal_state.inner(),
         workspace_state.inner(),
         &workspace,
         AssistantProvider::Codex,
