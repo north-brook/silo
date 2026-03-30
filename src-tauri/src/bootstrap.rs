@@ -917,13 +917,19 @@ async fn wait_for_workspace_agent(
     workspace: &str,
     expected_fingerprint: Option<&str>,
 ) -> Result<(), String> {
+    let ready_check_command = workspace_agent_ready_check_command();
     for attempt in 0..OBSERVER_READY_POLL_ATTEMPTS {
         let lookup = workspaces::find_workspace(workspace).await?;
         if agent_heartbeat_is_fresh(&lookup.workspace)
             && expected_fingerprint
                 .is_none_or(|expected| lookup.workspace.agent_fingerprint() == Some(expected))
         {
-            return Ok(());
+            match run_remote_command(&lookup, &run_terminal_user_command(&ready_check_command))
+                .await
+            {
+                Ok(result) if result.success => return Ok(()),
+                Ok(_) | Err(_) => {}
+            }
         }
         if attempt + 1 == OBSERVER_READY_POLL_ATTEMPTS {
             break;
@@ -1587,6 +1593,17 @@ exit 1",
     )
 }
 
+fn workspace_agent_ready_check_command() -> String {
+    let bin_path = shell_quote(REMOTE_WORKSPACE_AGENT_BIN);
+    format!(
+        "if [ ! -x {bin_path} ]; then\n\
+  exit 1\n\
+fi\n\
+{bin_path} mark-read --session __silo_ready_probe__",
+        bin_path = bin_path,
+    )
+}
+
 fn workspace_agent_source_signature() -> String {
     let mut hasher = Sha256::new();
     hasher.update(WORKSPACE_AGENT_BIN_BYTES);
@@ -2043,6 +2060,15 @@ mod tests {
         assert!(command.contains("ps -eo pid=,args="));
         assert!(command.contains("/home/silo/.silo/workspace-agent/daemon.pid"));
         assert!(!command.contains("EOF_AGENT_BIN"));
+        assert!(!command.contains("workspace-agent.new"));
+    }
+
+    #[test]
+    fn workspace_agent_ready_check_command_probes_fifo_delivery() {
+        let command = workspace_agent_ready_check_command();
+
+        assert!(command.contains("mark-read --session __silo_ready_probe__"));
+        assert!(!command.contains("ps -eo pid=,args="));
         assert!(!command.contains("workspace-agent.new"));
     }
 

@@ -14,6 +14,8 @@ use serde::Serialize;
 use crate::daemon::state::{ObserverEvent, ObserverState};
 
 const FIFO_MODE: u32 = 0o622;
+const SEND_EVENT_OPEN_ATTEMPTS: usize = 10;
+const SEND_EVENT_OPEN_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimePaths {
@@ -176,16 +178,10 @@ fn clear_nonblocking(fd: i32) -> io::Result<()> {
 
 pub(crate) fn send_event(path: &Path, event: &ObserverEvent) -> Result<(), String> {
     let payload = serde_json::to_string(event).map_err(|error| error.to_string())?;
+    ensure_fifo(path)?;
     let path_cstring = CString::new(path.to_string_lossy().as_bytes())
         .map_err(|error| format!("invalid fifo path: {error}"))?;
-    let fd = unsafe { libc::open(path_cstring.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK) };
-    if fd == -1 {
-        return Err(format!(
-            "failed to open event fifo {}: {}",
-            path.display(),
-            io::Error::last_os_error()
-        ));
-    }
+    let fd = open_fifo_writer_with_retry(path, &path_cstring)?;
 
     let bytes = format!("{payload}\n").into_bytes();
     let result = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
@@ -206,6 +202,40 @@ pub(crate) fn send_event(path: &Path, event: &ObserverEvent) -> Result<(), Strin
     }
 
     Ok(())
+}
+
+fn open_fifo_writer_with_retry(path: &Path, path_cstring: &CString) -> Result<i32, String> {
+    for attempt in 0..SEND_EVENT_OPEN_ATTEMPTS {
+        let fd = unsafe { libc::open(path_cstring.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK) };
+        if fd != -1 {
+            return Ok(fd);
+        }
+
+        let error = io::Error::last_os_error();
+        if attempt + 1 < SEND_EVENT_OPEN_ATTEMPTS && should_retry_fifo_open(&error) {
+            thread::sleep(SEND_EVENT_OPEN_RETRY_DELAY);
+            continue;
+        }
+
+        return Err(format!(
+            "failed to open event fifo {}: {}",
+            path.display(),
+            error
+        ));
+    }
+
+    Err(format!(
+        "failed to open event fifo {} after {} attempts",
+        path.display(),
+        SEND_EVENT_OPEN_ATTEMPTS
+    ))
+}
+
+fn should_retry_fifo_open(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(code) if code == libc::ENXIO || code == libc::ENOENT || code == libc::EINTR
+    )
 }
 
 pub(crate) fn acquire_pidfile(path: &Path) -> Result<bool, String> {
@@ -230,6 +260,7 @@ mod tests {
     use super::*;
     use std::io::BufReader;
     use std::os::unix::fs::FileTypeExt;
+    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -259,6 +290,38 @@ mod tests {
             .expect("reader should receive payload");
         assert!(line.contains("\"MarkRead\""));
         assert!(line.contains("\"demo\""));
+
+        fs::remove_file(&path).expect("cleanup fifo");
+    }
+
+    #[test]
+    fn send_event_retries_until_reader_is_available() {
+        let path = fifo_test_path("retry");
+        create_fifo(&path);
+
+        let reader_path = path.clone();
+        let reader_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            let (reader, _keepalive) =
+                open_fifo_reader(&reader_path).expect("reader should open after retry");
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .expect("reader should receive payload");
+            line
+        });
+
+        send_event(
+            &path,
+            &ObserverEvent::MarkRead {
+                session: "retry".to_string(),
+            },
+        )
+        .expect("writer should retry until a reader is present");
+
+        let line = reader_thread.join().expect("reader thread should finish");
+        assert!(line.contains("\"retry\""));
 
         fs::remove_file(&path).expect("cleanup fifo");
     }

@@ -1403,10 +1403,9 @@ fn startup_session_for_command(attachment_id: &str, command: &str) -> WorkspaceS
 
 fn assistant_startup_command(provider: AssistantProvider, prompt: Option<&str>) -> String {
     match prompt {
-        Some(prompt) => assistant_prompt_command(
-            &format!("silo {}", provider.command_name()),
-            prompt,
-        ),
+        Some(prompt) => {
+            assistant_prompt_command(&format!("silo {}", provider.command_name()), prompt)
+        }
         None => provider.command_name().to_string(),
     }
 }

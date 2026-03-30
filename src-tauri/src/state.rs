@@ -977,7 +977,11 @@ fn should_drop_pending_workspace_session(
             } else {
                 true
             };
-            metadata_converged && runtime_converged
+            if session.kind == "terminal" && require_runtime {
+                runtime_converged
+            } else {
+                metadata_converged && runtime_converged
+            }
         }
         PendingWorkspaceSession::Remove => {
             let metadata_converged = !metadata_sessions.contains_key(key);
@@ -1099,6 +1103,75 @@ mod tests {
         };
 
         assert!(should_drop_pending_session(&pending, Some(&metadata)));
+    }
+
+    #[test]
+    fn should_drop_pending_terminal_when_runtime_renames_shell_to_assistant() {
+        let pending = WorkspaceSession {
+            kind: "terminal".to_string(),
+            name: "shell".to_string(),
+            attachment_id: "terminal-1".to_string(),
+            path: None,
+            url: None,
+            logical_url: None,
+            resolved_url: None,
+            title: None,
+            favicon_url: None,
+            can_go_back: None,
+            can_go_forward: None,
+            working: None,
+            unread: None,
+        };
+        let runtime = WorkspaceSession {
+            name: "codex".to_string(),
+            working: Some(false),
+            unread: Some(false),
+            ..pending.clone()
+        };
+        let runtime_sessions =
+            HashMap::from([(workspace_session_key("terminal", "terminal-1"), runtime)]);
+
+        assert!(should_drop_pending_workspace_session(
+            &PendingWorkspaceSession::Upsert(pending),
+            "terminal:terminal-1",
+            &HashMap::new(),
+            Some(&runtime_sessions),
+            true,
+        ));
+    }
+
+    #[test]
+    fn should_drop_pending_terminal_when_runtime_populates_assistant_status() {
+        let pending = WorkspaceSession {
+            kind: "terminal".to_string(),
+            name: "codex".to_string(),
+            attachment_id: "terminal-1".to_string(),
+            path: None,
+            url: None,
+            logical_url: None,
+            resolved_url: None,
+            title: None,
+            favicon_url: None,
+            can_go_back: None,
+            can_go_forward: None,
+            working: None,
+            unread: None,
+        };
+        let runtime = WorkspaceSession {
+            working: Some(true),
+            unread: Some(false),
+            ..pending.clone()
+        };
+        let runtime_sessions =
+            HashMap::from([(workspace_session_key("terminal", "terminal-1"), runtime)]);
+
+        assert!(should_drop_pending_workspace_session(
+            &PendingWorkspaceSession::Upsert(pending),
+            "terminal:terminal-1",
+            &HashMap::new(),
+            Some(&runtime_sessions),
+            true,
+        ));
     }
 
     #[test]
