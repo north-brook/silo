@@ -366,12 +366,17 @@ pub(crate) fn build_published_state(state: &ObserverState) -> PublishedState {
         .sessions
         .iter()
         .map(|(session_name, session_state)| {
-            let name = session_state
-                .active_command
-                .clone()
+            let assistant_provider = session_state.assistant_provider.or_else(|| {
+                session_state
+                    .active_command
+                    .as_deref()
+                    .and_then(resolve_assistant_provider)
+            });
+            let name = assistant_provider
+                .map(|provider| provider.command_name().to_string())
+                .or_else(|| session_state.active_command.clone())
                 .unwrap_or_else(|| "shell".to_string());
-            let assistant_capable = session_state.assistant_provider.is_some()
-                || resolve_assistant_provider(&name).is_some();
+            let assistant_capable = assistant_provider.is_some();
             working |= session_state.working;
             unread |= session_state.unread;
 
@@ -539,28 +544,44 @@ pub(crate) fn sanitize_command_name(command: &str) -> String {
     if trimmed.is_empty() {
         return "shell".to_string();
     }
-    if trimmed.eq("cc") || trimmed.starts_with("cc ") {
-        return "claude".to_string();
-    }
-    if trimmed.eq("silo codex") || trimmed.starts_with("silo codex ") {
-        return "codex".to_string();
-    }
-    if trimmed.eq("silo claude") || trimmed.starts_with("silo claude ") {
-        return "claude".to_string();
+    if let Some(provider) = resolve_assistant_provider(trimmed) {
+        return provider.command_name().to_string();
     }
 
     trimmed.chars().take(200).collect()
 }
 
 pub(crate) fn resolve_assistant_provider(command: &str) -> Option<AssistantProvider> {
-    let token = command
+    let tokens = command
         .split_whitespace()
-        .next()
+        .map(|token| token.trim_matches(|ch| ch == '\'' || ch == '"'))
+        .collect::<Vec<_>>();
+
+    for window in tokens.windows(3) {
+        let command_token = window[0]
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if command_token == "assistant-proxy" && window[1] == "--provider" {
+            return AssistantProvider::parse(&window[2].to_ascii_lowercase());
+        }
+    }
+
+    let token = tokens
+        .first()
+        .copied()
         .unwrap_or_default()
         .rsplit('/')
         .next()
         .unwrap_or_default()
         .to_ascii_lowercase();
+
+    if token == "silo" {
+        return tokens
+            .get(1)
+            .and_then(|value| AssistantProvider::parse(&value.to_ascii_lowercase()));
+    }
 
     match token.as_str() {
         "codex" => Some(AssistantProvider::Codex),

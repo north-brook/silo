@@ -89,6 +89,22 @@ fn sanitize_command_name_normalizes_silo_assistants() {
 }
 
 #[test]
+fn sanitize_command_name_normalizes_assistant_proxy_commands() {
+    assert_eq!(
+        sanitize_command_name(
+            "/home/silo/.silo/bin/workspace-agent assistant-proxy --provider codex -- codex"
+        ),
+        "codex"
+    );
+    assert_eq!(
+        sanitize_command_name(
+            "'/home/silo/.silo/bin/workspace-agent' assistant-proxy --provider 'claude' -- 'claude'"
+        ),
+        "claude"
+    );
+}
+
+#[test]
 fn zmx_session_parser_reads_legacy_session_name_and_command() {
     let session = parse_zmx_session("session_name=terminal-1\tpid=2\tcmd=codex")
         .expect("session should parse");
@@ -126,6 +142,12 @@ fn assistant_provider_resolution_handles_cc_alias() {
     );
     assert_eq!(
         resolve_assistant_provider("codex"),
+        Some(AssistantProvider::Codex)
+    );
+    assert_eq!(
+        resolve_assistant_provider(
+            "/home/silo/.silo/bin/workspace-agent assistant-proxy --provider codex -- codex"
+        ),
         Some(AssistantProvider::Codex)
     );
     assert_eq!(resolve_assistant_provider("bun run dev"), None);
@@ -535,6 +557,35 @@ fn build_published_state_uses_agent_state_without_live_poll_data() {
     assert_eq!(published.terminals[0].name, "codex");
     assert_eq!(published.terminals[0].attachment_id, "terminal-1");
     assert_eq!(published.terminals[0].working, Some(true));
+}
+
+#[test]
+fn build_published_state_canonicalizes_assistant_proxy_session_names() {
+    let mut state = ObserverState::default();
+    state.sessions.insert(
+        "terminal-1".to_string(),
+        SessionState {
+            active_command: Some(
+                "/home/silo/.silo/bin/workspace-agent assistant-proxy --provider codex -- codex"
+                    .to_string(),
+            ),
+            assistant_provider: None,
+            active_turn_id: None,
+            completed_turn_id: None,
+            command_running: true,
+            working: false,
+            unread: true,
+            lifecycle_managed: true,
+            poll_misses: 0,
+        },
+    );
+
+    let published = build_published_state(&state);
+
+    assert_eq!(published.terminals.len(), 1);
+    assert_eq!(published.terminals[0].name, "codex");
+    assert_eq!(published.terminals[0].working, Some(false));
+    assert_eq!(published.terminals[0].unread, Some(true));
 }
 
 #[test]
