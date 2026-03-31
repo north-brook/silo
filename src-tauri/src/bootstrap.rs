@@ -1477,7 +1477,6 @@ fn workspace_assistant_config_sync_script(bootstrap: &WorkspaceBootstrap) -> Str
         &bootstrap.codex_model,
         &bootstrap.codex_model_reasoning_effort,
     );
-    let codex_hooks_json = codex_hooks_json();
     let claude_settings_json = claude_settings_json(
         &bootstrap.claude_model,
         &bootstrap.claude_effort_level,
@@ -1489,15 +1488,13 @@ fn workspace_assistant_config_sync_script(bootstrap: &WorkspaceBootstrap) -> Str
         "mkdir -p \"$HOME/.codex\" \"$HOME/.claude\"\n\
 {codex_auth_write}\n\
 printf '%s\\n' {codex_config_toml} > \"$HOME/.codex/config.toml\"\n\
-printf '%s\\n' {codex_hooks_json} > \"$HOME/.codex/hooks.json\"\n\
 printf '%s\\n' {claude_settings_json} > \"$HOME/.claude/settings.json\"\n\
 printf '%s\\n' {claude_state_json} > \"$HOME/.claude.json\"\n\
 chmod 700 \"$HOME/.codex\" \"$HOME/.claude\"\n\
 if [ -f \"$HOME/.codex/auth.json\" ]; then chmod 600 \"$HOME/.codex/auth.json\"; fi\n\
-chmod 600 \"$HOME/.codex/config.toml\" \"$HOME/.codex/hooks.json\" \"$HOME/.claude/settings.json\" \"$HOME/.claude.json\"\n",
+chmod 600 \"$HOME/.codex/config.toml\" \"$HOME/.claude/settings.json\" \"$HOME/.claude.json\"\n",
         codex_auth_write = codex_auth_write,
         codex_config_toml = shell_quote(&codex_config_toml),
-        codex_hooks_json = shell_quote(&codex_hooks_json),
         claude_settings_json = shell_quote(&claude_settings_json),
         claude_state_json = shell_quote(&claude_state_json),
     )
@@ -1676,14 +1673,6 @@ fn workspace_agent_source_signature() -> String {
     let mut hasher = Sha256::new();
     hasher.update(WORKSPACE_AGENT_BIN_BYTES);
     hasher.update(workspace_agent_shell_script().as_bytes());
-    hasher.update(workspace_assistant_hook_signature().as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
-fn workspace_assistant_hook_signature() -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(codex_hooks_json().as_bytes());
-    hasher.update(provider_hook_config("claude").to_string().as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
@@ -1842,9 +1831,6 @@ approval_policy = "never"
 sandbox_mode = "danger-full-access"
 suppress_unstable_features_warning = true
 
-[features]
-codex_hooks = true
-
 [projects."/home/silo/workspace"]
 trust_level = "trusted"
 
@@ -1854,20 +1840,12 @@ hide_full_access_warning = true
     )
 }
 
-fn codex_hooks_json() -> String {
-    json!({
-        "hooks": provider_hook_config("codex")
-    })
-    .to_string()
-}
-
 fn claude_settings_json(model: &str, effort_level: &str, always_thinking_enabled: bool) -> String {
     json!({
         "model": model,
         "alwaysThinkingEnabled": always_thinking_enabled,
         "effortLevel": effort_level,
-        "skipDangerousModePermissionPrompt": true,
-        "hooks": provider_hook_config("claude")
+        "skipDangerousModePermissionPrompt": true
     })
     .to_string()
 }
@@ -1893,65 +1871,6 @@ pub(crate) fn claude_state_json() -> String {
         }
     })
     .to_string()
-}
-
-fn provider_hook_config(provider: &str) -> serde_json::Value {
-    let command = assistant_hook_command(provider, "assistant_event");
-    match provider {
-        "codex" => json!({
-            "SessionStart": [hook_group(&command, Some("startup|resume"))],
-            "PreToolUse": [hook_group(&command, Some("Bash"))],
-            "PostToolUse": [hook_group(&command, Some("Bash"))],
-            "UserPromptSubmit": [hook_group(&command, None)],
-            "Stop": [hook_group(&command, None)],
-        }),
-        "claude" => json!({
-            "SessionStart": [hook_group(&command, None)],
-            "UserPromptSubmit": [hook_group(&command, None)],
-            "PreToolUse": [hook_group(&command, None)],
-            "PostToolUse": [hook_group(&command, None)],
-            "PostToolUseFailure": [hook_group(&command, None)],
-            "PermissionRequest": [hook_group(&command, None)],
-            "Notification": [hook_group(&command, None)],
-            "SubagentStart": [hook_group(&command, None)],
-            "SubagentStop": [hook_group(&command, None)],
-            "TaskCreated": [hook_group(&command, None)],
-            "TaskCompleted": [hook_group(&command, None)],
-            "Stop": [hook_group(&command, None)],
-            "StopFailure": [hook_group(&command, None)],
-            "TeammateIdle": [hook_group(&command, None)],
-            "PreCompact": [hook_group(&command, None)],
-            "PostCompact": [hook_group(&command, None)],
-            "SessionEnd": [hook_group(&command, None)],
-            "Elicitation": [hook_group(&command, None)],
-            "ElicitationResult": [hook_group(&command, None)],
-        }),
-        _ => json!({}),
-    }
-}
-
-fn assistant_hook_command(provider: &str, _kind: &str) -> String {
-    format!(
-        "[ -n \"${{SILO_TERMINAL_ID:-}}\" ] || exit 0; SILO_AGENT_HOOK=1 \"${{SILO_WORKSPACE_AGENT_BIN:-{}}}\" assistant-hook --provider {}",
-        REMOTE_WORKSPACE_AGENT_BIN, provider
-    )
-}
-
-fn hook_group(command: &str, matcher: Option<&str>) -> serde_json::Value {
-    let mut group = serde_json::Map::new();
-    if let Some(matcher) = matcher {
-        group.insert("matcher".to_string(), json!(matcher));
-    }
-    group.insert(
-        "hooks".to_string(),
-        json!([
-            {
-                "type": "command",
-                "command": command,
-            }
-        ]),
-    );
-    serde_json::Value::Object(group)
 }
 
 fn gh_hosts_yml(username: &str, token: &str) -> String {
@@ -1988,40 +1907,13 @@ mod tests {
     }
 
     #[test]
-    fn provider_hook_config_routes_provider_payloads_through_workspace_agent() {
-        let codex = codex_hooks_json();
-        let claude = claude_settings_json("opus", "high", true);
-
-        assert!(codex.contains("\"SessionStart\""));
-        assert!(codex.contains("\"PreToolUse\""));
-        assert!(codex.contains("\"PostToolUse\""));
-        assert!(codex.contains("\"UserPromptSubmit\""));
-        assert!(codex.contains("\"Stop\""));
-        assert!(codex.contains("\"matcher\":\"startup|resume\""));
-        assert!(codex.contains("\"matcher\":\"Bash\""));
-        assert!(codex.contains("assistant-hook --provider codex"));
-        assert!(codex.contains("--provider codex"));
-        assert!(codex.contains("SILO_TERMINAL_ID"));
-        assert!(codex.contains("SILO_WORKSPACE_AGENT_BIN"));
-        assert!(claude.contains("\"hooks\""));
-        assert!(claude.contains("\"PermissionRequest\""));
-        assert!(claude.contains("\"SubagentStart\""));
-        assert!(claude.contains("\"TaskCompleted\""));
-        assert!(claude.contains("\"StopFailure\""));
-        assert!(claude.contains("\"ElicitationResult\""));
-        assert!(claude.contains("assistant-hook --provider claude"));
-        assert!(claude.contains("--provider claude"));
-    }
-
-    #[test]
-    fn codex_config_toml_enables_lifecycle_hooks() {
+    fn codex_config_toml_uses_configured_model_and_reasoning() {
         let config = codex_config_toml("gpt-5.4", "xhigh");
 
         assert!(config.contains("model = \"gpt-5.4\""));
         assert!(config.contains("model_reasoning_effort = \"xhigh\""));
         assert!(config.contains("suppress_unstable_features_warning = true"));
-        assert!(config.contains("[features]"));
-        assert!(config.contains("codex_hooks = true"));
+        assert!(!config.contains("codex_hooks = true"));
     }
 
     #[test]
@@ -2354,7 +2246,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_assistant_config_sync_script_writes_hook_files() {
+    fn workspace_assistant_config_sync_script_writes_assistant_config_files() {
         let script = workspace_assistant_config_sync_script(&WorkspaceBootstrap {
             remote_url: "https://github.com/example/repo.git".to_string(),
             target_branch: "main".to_string(),
@@ -2374,11 +2266,11 @@ mod tests {
             env_files: Vec::new(),
         });
 
-        assert!(script.contains("$HOME/.codex/hooks.json"));
+        assert!(!script.contains("$HOME/.codex/hooks.json"));
         assert!(script.contains("$HOME/.claude/settings.json"));
-        assert!(script.contains("\"SessionStart\""));
-        assert!(script.contains("\"PermissionRequest\""));
-        assert!(script.contains("codex_hooks = true"));
+        assert!(script.contains("model = \"gpt-5.4\""));
+        assert!(script.contains("\"model\":\"opus\""));
+        assert!(!script.contains("codex_hooks = true"));
     }
 
     #[test]

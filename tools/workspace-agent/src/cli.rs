@@ -2,7 +2,7 @@ use std::env;
 use std::io;
 
 use crate::args::required_flag_value;
-use crate::assistant::{run_assistant_hook, run_assistant_proxy};
+use crate::assistant::run_assistant_proxy;
 use crate::daemon::run_daemon;
 use crate::daemon::state::{
     build_published_state, reconcile_sessions, AssistantProvider, ObserverEvent, PublishedSession,
@@ -12,7 +12,9 @@ use crate::files::{
     run_files_directory, run_files_read, run_files_sync_watch_set, run_files_tree,
     run_files_watch_state, run_files_write,
 };
-use crate::runtime::{load_state_or_default_if_missing, send_event, write_json_stdout, RuntimePaths};
+use crate::runtime::{
+    load_state_or_default_if_missing, send_event, write_json_stdout, RuntimePaths,
+};
 
 pub(crate) fn run() -> Result<(), String> {
     let args = env::args().skip(1).collect::<Vec<_>>();
@@ -31,7 +33,6 @@ pub(crate) fn run() -> Result<(), String> {
         "session-set-active" => run_session_set_active(&args[1..]),
         "session-clear-active" => run_session_clear_active(),
         "assistant-proxy" => run_assistant_proxy(&args[1..]),
-        "assistant-hook" => run_assistant_hook(&args[1..]),
         "files-directory" => run_files_directory(&args[1..]),
         "files-tree" => run_files_tree(),
         "files-read" => run_files_read(&args[1..]),
@@ -134,13 +135,11 @@ fn parse_emit_event(args: &[String]) -> Result<ObserverEvent, String> {
             session,
             provider: AssistantProvider::parse(required_flag_value(args, "--provider")?)
                 .ok_or_else(|| "invalid assistant provider".to_string())?,
-            turn_id: None,
         }),
         "assistant_turn_completed" => Ok(ObserverEvent::AssistantTurnCompleted {
             session,
             provider: AssistantProvider::parse(required_flag_value(args, "--provider")?)
                 .ok_or_else(|| "invalid assistant provider".to_string())?,
-            turn_id: None,
         }),
         "mark_read" => Ok(ObserverEvent::MarkRead { session }),
         other => Err(format!("unsupported event kind: {other}")),

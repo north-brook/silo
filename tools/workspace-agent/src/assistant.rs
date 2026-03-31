@@ -2,26 +2,25 @@ use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{self, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
-use serde::Deserialize;
-use serde_json::Value;
 
 use crate::args::{optional_flag_value, required_flag_value};
-use crate::daemon::state::{AssistantEvent, AssistantEventKind, AssistantProvider, ObserverEvent};
+use crate::daemon::state::{AssistantProvider, ObserverEvent};
 use crate::runtime::{send_event, RuntimePaths};
 
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const CODEX_ROLLOUT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
-const CODEX_ROLLOUT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+pub(crate) const TURN_OUTPUT_IDLE_TIMEOUT: Duration = Duration::from_secs(6);
+pub(crate) const INITIAL_PROMPT_STARTUP_GRACE: Duration = Duration::from_secs(6);
+pub(crate) const SOFT_NEWLINE_SENTINEL: char = '\u{e000}';
 
 pub(crate) fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
     let provider = required_flag_value(args, "--provider")?;
@@ -51,12 +50,6 @@ pub(crate) fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
     builder.cwd(&cwd);
     builder.env("PWD", &cwd);
     builder.env("ZMX_SESSION", &session);
-    builder.env("SILO_TERMINAL_ID", &session);
-    builder.env("SILO_ASSISTANT_PROVIDER", provider.command_name());
-    builder.env(
-        "SILO_WORKSPACE_AGENT_BIN",
-        assistant_agent_bin_path().as_deref().unwrap_or_default(),
-    );
     let mut child = pair
         .slave
         .spawn_command(builder)
@@ -75,62 +68,42 @@ pub(crate) fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
         .take_writer()
         .map_err(|error| format!("failed to open pty writer: {error}"))?;
 
+    let tracker = AssistantTracker::new(session.clone(), provider, runtime.fifo);
     send_event(
-        &runtime.fifo,
+        &tracker.fifo,
         &ObserverEvent::AssistantSessionStarted {
             session: session.clone(),
             provider,
         },
     )?;
-    if wrapped.has_initial_prompt {
-        send_synthetic_assistant_event(
-            &runtime,
-            &session,
-            provider,
-            AssistantEventKind::UserPromptSubmit,
-        )?;
+    if wrapped
+        .initial_prompt
+        .as_deref()
+        .is_some_and(|prompt| !prompt.trim().is_empty())
+    {
+        tracker.record_initial_prompt();
     }
-    let child_exited = Arc::new(AtomicBool::new(false));
-    let completion_reported = Arc::new(AtomicBool::new(false));
-    let initial_prompt_monitor = spawn_initial_prompt_monitor(
-        runtime.clone(),
-        session.clone(),
-        provider,
-        wrapped.initial_prompt.clone(),
-        Arc::clone(&child_exited),
-        Arc::clone(&completion_reported),
-    );
+    let reader_tracker = Arc::clone(&tracker);
     let reader_done = Arc::new(AtomicBool::new(false));
     let reader_done_signal = Arc::clone(&reader_done);
     let reader_thread = thread::spawn(move || {
-        proxy_output(reader, io::stdout());
+        proxy_output(reader, io::stdout(), reader_tracker);
         reader_done_signal.store(true, Ordering::Relaxed);
     });
     let resize_stop = Arc::new(AtomicBool::new(false));
     let resize_thread = spawn_resize_forwarder(Arc::clone(&master), Arc::clone(&resize_stop));
 
     let raw_mode = RawModeGuard::new().map_err(|error| error.to_string())?;
+    let input_tracker = Arc::clone(&tracker);
     let _input_thread = thread::spawn(move || {
-        let _ = proxy_input(io::stdin(), writer);
+        let _ = proxy_input(io::stdin(), writer, input_tracker);
     });
     let status = child
         .wait()
         .map_err(|error| format!("assistant command wait failed: {error}"))?;
-    child_exited.store(true, Ordering::Relaxed);
-    if wrapped.has_initial_prompt {
-        let should_report_exit = completion_reported
-            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok();
-        if should_report_exit {
-            let kind = if status.exit_code() == 0 {
-                AssistantEventKind::Stop
-            } else {
-                AssistantEventKind::StopFailure
-            };
-            let _ = send_synthetic_assistant_event(&runtime, &session, provider, kind);
-        }
-    }
     drop(raw_mode);
+    tracker.finish_turn_if_needed();
+    tracker.stop();
     resize_stop.store(true, Ordering::Relaxed);
 
     while !reader_done.load(Ordering::Relaxed) {
@@ -138,9 +111,6 @@ pub(crate) fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
     }
     let _ = reader_thread.join();
     let _ = resize_thread.join();
-    if let Some(monitor) = initial_prompt_monitor {
-        let _ = monitor.join();
-    }
 
     let code = status.exit_code();
     if code == 0 {
@@ -153,7 +123,6 @@ pub(crate) fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
 #[derive(Debug)]
 struct WrappedAssistantCommand {
     command: Vec<String>,
-    has_initial_prompt: bool,
     initial_prompt: Option<String>,
 }
 
@@ -175,23 +144,21 @@ fn build_wrapped_command(args: &[String]) -> Result<WrappedAssistantCommand, Str
         return Err("assistant-proxy requires a wrapped command".to_string());
     }
 
-    let has_initial_prompt = initial_prompt_argv || initial_prompt_file.is_some();
-    let mut prompt_text = None;
+    let mut initial_prompt = None;
     if initial_prompt_argv {
-        prompt_text = command.last().cloned();
+        initial_prompt = command.last().cloned();
     }
     if let Some(path) = initial_prompt_file {
-        let prompt = std::fs::read_to_string(path)
+        let prompt = fs::read_to_string(path)
             .map_err(|error| format!("failed to read initial prompt file: {error}"))?;
-        let _ = std::fs::remove_file(path);
-        prompt_text = Some(prompt.clone());
+        let _ = fs::remove_file(path);
+        initial_prompt = Some(prompt.clone());
         command.push(prompt);
     }
 
     Ok(WrappedAssistantCommand {
         command,
-        has_initial_prompt,
-        initial_prompt: prompt_text,
+        initial_prompt,
     })
 }
 
@@ -207,7 +174,11 @@ fn spawn_passthrough(command: Vec<String>) -> Result<(), String> {
     }
 }
 
-fn proxy_input<R: Read>(mut stdin: R, mut writer: Box<dyn Write + Send>) -> Result<(), String> {
+fn proxy_input<R: Read>(
+    mut stdin: R,
+    mut writer: Box<dyn Write + Send>,
+    tracker: Arc<AssistantTracker>,
+) -> Result<(), String> {
     let mut buffer = [0u8; 4096];
     loop {
         let count = stdin
@@ -223,10 +194,11 @@ fn proxy_input<R: Read>(mut stdin: R, mut writer: Box<dyn Write + Send>) -> Resu
         writer
             .flush()
             .map_err(|error| format!("failed to flush pty input: {error}"))?;
+        tracker.record_input(&String::from_utf8_lossy(chunk));
     }
 }
 
-fn proxy_output<R: Read, W: Write>(mut reader: R, mut stdout: W) {
+fn proxy_output<R: Read, W: Write>(mut reader: R, mut stdout: W, tracker: Arc<AssistantTracker>) {
     let mut buffer = [0u8; 8192];
     loop {
         let count = match reader.read(&mut buffer) {
@@ -241,6 +213,7 @@ fn proxy_output<R: Read, W: Write>(mut reader: R, mut stdout: W) {
         if stdout.flush().is_err() {
             break;
         }
+        tracker.record_output(count);
     }
 }
 
@@ -265,6 +238,170 @@ fn spawn_resize_forwarder(
             last_size = next_size;
         }
     })
+}
+
+struct AssistantTracker {
+    provider: AssistantProvider,
+    session: String,
+    fifo: PathBuf,
+    state: Mutex<AssistantTrackerState>,
+    wake: Condvar,
+    stopped: AtomicBool,
+}
+
+#[derive(Default)]
+struct AssistantTrackerState {
+    awaiting_turn: bool,
+    input_buffer: String,
+    deadline: Option<Instant>,
+    initial_prompt_argv_turn: bool,
+    saw_output_for_turn: bool,
+}
+
+impl AssistantTracker {
+    fn new(session: String, provider: AssistantProvider, fifo: PathBuf) -> Arc<Self> {
+        let tracker = Arc::new(Self {
+            provider,
+            session,
+            fifo,
+            state: Mutex::new(AssistantTrackerState::default()),
+            wake: Condvar::new(),
+            stopped: AtomicBool::new(false),
+        });
+
+        let completion_tracker = Arc::clone(&tracker);
+        thread::spawn(move || completion_tracker.completion_loop());
+        tracker
+    }
+
+    fn record_input(&self, input: &str) {
+        let prompts = {
+            let mut state = self.state.lock().expect("tracker lock should not poison");
+            collect_submitted_assistant_prompts(&mut state.input_buffer, input)
+        };
+
+        if prompts.is_empty() {
+            return;
+        }
+
+        self.record_prompt_submission(false);
+    }
+
+    fn record_initial_prompt(&self) {
+        self.record_prompt_submission(true);
+    }
+
+    fn record_output(&self, count: usize) {
+        if count == 0 {
+            return;
+        }
+
+        let mut state = self.state.lock().expect("tracker lock should not poison");
+        if !state.awaiting_turn {
+            return;
+        }
+        let timeout =
+            turn_output_timeout(state.initial_prompt_argv_turn, state.saw_output_for_turn);
+        state.saw_output_for_turn = true;
+        state.deadline = Some(Instant::now() + timeout);
+        self.wake.notify_all();
+    }
+
+    fn record_prompt_submission(&self, initial_prompt_argv_turn: bool) {
+        {
+            let mut state = self.state.lock().expect("tracker lock should not poison");
+            state.awaiting_turn = true;
+            state.deadline = None;
+            state.initial_prompt_argv_turn = initial_prompt_argv_turn;
+            state.saw_output_for_turn = false;
+        }
+
+        let _ = send_event(
+            &self.fifo,
+            &ObserverEvent::AssistantPromptSubmitted {
+                session: self.session.clone(),
+                provider: self.provider,
+            },
+        );
+        self.wake.notify_all();
+    }
+
+    fn finish_turn_if_needed(&self) {
+        let should_emit = {
+            let mut state = self.state.lock().expect("tracker lock should not poison");
+            if !state.awaiting_turn {
+                false
+            } else {
+                state.awaiting_turn = false;
+                state.input_buffer.clear();
+                state.deadline = None;
+                state.initial_prompt_argv_turn = false;
+                state.saw_output_for_turn = false;
+                true
+            }
+        };
+
+        if should_emit {
+            let _ = send_event(
+                &self.fifo,
+                &ObserverEvent::AssistantTurnCompleted {
+                    session: self.session.clone(),
+                    provider: self.provider,
+                },
+            );
+        }
+    }
+
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Relaxed);
+        self.wake.notify_all();
+    }
+
+    fn completion_loop(self: Arc<Self>) {
+        loop {
+            let mut state = self.state.lock().expect("tracker lock should not poison");
+            while !self.stopped.load(Ordering::Relaxed) && state.deadline.is_none() {
+                state = self.wake.wait(state).expect("condvar wait should succeed");
+            }
+            if self.stopped.load(Ordering::Relaxed) {
+                return;
+            }
+
+            let Some(deadline) = state.deadline else {
+                continue;
+            };
+            let now = Instant::now();
+            if now < deadline {
+                let timeout = deadline - now;
+                let (next_state, _) = self
+                    .wake
+                    .wait_timeout(state, timeout)
+                    .expect("condvar timeout wait should succeed");
+                drop(next_state);
+                continue;
+            }
+
+            if !state.awaiting_turn {
+                state.deadline = None;
+                continue;
+            }
+
+            state.awaiting_turn = false;
+            state.deadline = None;
+            state.input_buffer.clear();
+            state.initial_prompt_argv_turn = false;
+            state.saw_output_for_turn = false;
+            drop(state);
+
+            let _ = send_event(
+                &self.fifo,
+                &ObserverEvent::AssistantTurnCompleted {
+                    session: self.session.clone(),
+                    provider: self.provider,
+                },
+            );
+        }
+    }
 }
 
 struct RawModeGuard {
@@ -334,385 +471,99 @@ fn pty_size(cols: u16, rows: u16) -> PtySize {
     }
 }
 
-pub(crate) fn run_assistant_hook(args: &[String]) -> Result<(), String> {
-    let provider = required_flag_value(args, "--provider")?;
-    let provider = AssistantProvider::parse(provider)
-        .ok_or_else(|| format!("unsupported assistant provider: {provider}"))?;
-    let session = match env::var("SILO_TERMINAL_ID") {
-        Ok(session) if !session.trim().is_empty() => session,
-        _ => return Ok(()),
-    };
-
-    let mut input = String::new();
-    if io::stdin().read_to_string(&mut input).is_err() {
-        return Ok(());
-    }
-
-    let Some(event) = observer_event_from_hook_input(&session, provider, &input) else {
-        return Ok(());
-    };
-
-    let _ = send_event(&RuntimePaths::new().fifo, &event);
-    Ok(())
-}
-
-pub(crate) fn observer_event_from_hook_input(
-    session: &str,
-    provider: AssistantProvider,
-    input: &str,
-) -> Option<ObserverEvent> {
-    let hook = serde_json::from_str::<AssistantHookInput>(input).ok()?;
-    let kind = assistant_event_kind(&hook.hook_event_name)?;
-
-    Some(ObserverEvent::AssistantEvent {
-        session: session.to_string(),
-        provider,
-        event: AssistantEvent {
-            kind,
-            provider_session_id: hook.session_id.and_then(non_empty_string),
-            turn_id: hook.turn_id.and_then(non_empty_string),
-            tool_name: hook.tool_name.and_then(non_empty_string),
-            tool_call_id: hook.tool_use_id.and_then(non_empty_string),
-            notification_type: hook.notification_type.and_then(non_empty_string),
-            agent_id: hook.agent_id.and_then(non_empty_string),
-            agent_type: hook.agent_type.and_then(non_empty_string),
-            task_id: hook.task_id.and_then(non_empty_string),
-            compact_trigger: hook.trigger.and_then(non_empty_string),
-        },
-    })
-}
-
-fn assistant_event_kind(value: &str) -> Option<AssistantEventKind> {
-    match value {
-        "SessionStart" => Some(AssistantEventKind::SessionStart),
-        "UserPromptSubmit" => Some(AssistantEventKind::UserPromptSubmit),
-        "PreToolUse" => Some(AssistantEventKind::PreToolUse),
-        "PostToolUse" => Some(AssistantEventKind::PostToolUse),
-        "PostToolUseFailure" => Some(AssistantEventKind::PostToolUseFailure),
-        "PermissionRequest" => Some(AssistantEventKind::PermissionRequest),
-        "Notification" => Some(AssistantEventKind::Notification),
-        "SubagentStart" => Some(AssistantEventKind::SubagentStart),
-        "SubagentStop" => Some(AssistantEventKind::SubagentStop),
-        "TaskCreated" => Some(AssistantEventKind::TaskCreated),
-        "TaskCompleted" => Some(AssistantEventKind::TaskCompleted),
-        "Stop" => Some(AssistantEventKind::Stop),
-        "StopFailure" => Some(AssistantEventKind::StopFailure),
-        "TeammateIdle" => Some(AssistantEventKind::TeammateIdle),
-        "PreCompact" => Some(AssistantEventKind::PreCompact),
-        "PostCompact" => Some(AssistantEventKind::PostCompact),
-        "SessionEnd" => Some(AssistantEventKind::SessionEnd),
-        "Elicitation" => Some(AssistantEventKind::Elicitation),
-        "ElicitationResult" => Some(AssistantEventKind::ElicitationResult),
-        _ => None,
+pub(crate) fn turn_output_timeout(
+    initial_prompt_argv_turn: bool,
+    saw_output_for_turn: bool,
+) -> Duration {
+    if !saw_output_for_turn && initial_prompt_argv_turn {
+        TURN_OUTPUT_IDLE_TIMEOUT + INITIAL_PROMPT_STARTUP_GRACE
+    } else {
+        TURN_OUTPUT_IDLE_TIMEOUT
     }
 }
 
-fn assistant_agent_bin_path() -> Option<String> {
-    env::var("SILO_WORKSPACE_AGENT_BIN")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            env::current_exe()
-                .ok()
-                .map(|path| path.display().to_string())
-        })
-}
+pub(crate) fn normalize_assistant_input(input: &str) -> String {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::new();
+    let mut index = 0usize;
 
-fn send_synthetic_assistant_event(
-    runtime: &RuntimePaths,
-    session: &str,
-    provider: AssistantProvider,
-    kind: AssistantEventKind,
-) -> Result<(), String> {
-    send_event(
-        &runtime.fifo,
-        &ObserverEvent::AssistantEvent {
-            session: session.to_string(),
-            provider,
-            event: AssistantEvent {
-                kind,
-                ..AssistantEvent::default()
-            },
-        },
-    )
-}
-
-fn spawn_initial_prompt_monitor(
-    runtime: RuntimePaths,
-    session: String,
-    provider: AssistantProvider,
-    prompt: Option<String>,
-    child_exited: Arc<AtomicBool>,
-    completion_reported: Arc<AtomicBool>,
-) -> Option<thread::JoinHandle<()>> {
-    if provider != AssistantProvider::Codex {
-        return None;
-    }
-    let prompt = prompt?;
-    let launched_at = SystemTime::now();
-    Some(thread::spawn(move || {
-        monitor_codex_initial_prompt(
-            runtime,
-            session,
-            prompt,
-            launched_at,
-            child_exited,
-            completion_reported,
-        );
-    }))
-}
-
-fn monitor_codex_initial_prompt(
-    runtime: RuntimePaths,
-    session: String,
-    prompt: String,
-    launched_at: SystemTime,
-    child_exited: Arc<AtomicBool>,
-    completion_reported: Arc<AtomicBool>,
-) {
-    let discovery_deadline = launched_at
-        .checked_add(CODEX_ROLLOUT_DISCOVERY_TIMEOUT)
-        .unwrap_or(launched_at);
-    let mut matched_rollout: Option<PathBuf> = None;
-    let mut metadata_reported = false;
-
-    loop {
-        if child_exited.load(Ordering::Relaxed) || completion_reported.load(Ordering::Relaxed) {
-            return;
+    while index < chars.len() {
+        let current = chars[index];
+        if current != '\u{001b}' {
+            output.push(current);
+            index += 1;
+            continue;
         }
 
-        if matched_rollout.is_none() {
-            matched_rollout = find_matching_codex_rollout(&prompt, launched_at);
-            if matched_rollout.is_none() && SystemTime::now() >= discovery_deadline {
-                return;
-            }
-        }
-
-        if let Some(path) = matched_rollout.as_deref() {
-            let Some(status) = read_codex_rollout_status(path, &prompt) else {
-                thread::sleep(CODEX_ROLLOUT_POLL_INTERVAL);
-                continue;
-            };
-
-            if !metadata_reported {
-                if let Some(provider_session_id) = status.provider_session_id.clone() {
-                    let _ = send_event(
-                        &runtime.fifo,
-                        &ObserverEvent::AssistantEvent {
-                            session: session.clone(),
-                            provider: AssistantProvider::Codex,
-                            event: AssistantEvent {
-                                kind: AssistantEventKind::SessionStart,
-                                provider_session_id: Some(provider_session_id.clone()),
-                                ..AssistantEvent::default()
-                            },
-                        },
-                    );
-                    if let Some(turn_id) = status.started_turn_id.clone() {
-                        let _ = send_event(
-                            &runtime.fifo,
-                            &ObserverEvent::AssistantEvent {
-                                session: session.clone(),
-                                provider: AssistantProvider::Codex,
-                                event: AssistantEvent {
-                                    kind: AssistantEventKind::UserPromptSubmit,
-                                    provider_session_id: Some(provider_session_id),
-                                    turn_id: Some(turn_id),
-                                    ..AssistantEvent::default()
-                                },
-                            },
-                        );
+        let next = chars.get(index + 1).copied();
+        if next == Some('[') {
+            let params_start = index + 2;
+            index = params_start;
+            while index < chars.len() {
+                let control = chars[index];
+                if ('@'..='~').contains(&control) {
+                    let params = chars[params_start..index].iter().collect::<String>();
+                    if is_soft_newline_escape(&params, control) {
+                        output.push(SOFT_NEWLINE_SENTINEL);
                     }
-                    metadata_reported = true;
+                    index += 1;
+                    break;
                 }
+                index += 1;
             }
-
-            if let Some(turn_id) = status.completed_turn_id {
-                if completion_reported
-                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    let _ = send_event(
-                        &runtime.fifo,
-                        &ObserverEvent::AssistantEvent {
-                            session: session.clone(),
-                            provider: AssistantProvider::Codex,
-                            event: AssistantEvent {
-                                kind: AssistantEventKind::Stop,
-                                provider_session_id: status.provider_session_id,
-                                turn_id: Some(turn_id),
-                                ..AssistantEvent::default()
-                            },
-                        },
-                    );
-                }
-                return;
-            }
+            continue;
         }
 
-        thread::sleep(CODEX_ROLLOUT_POLL_INTERVAL);
-    }
-}
+        if next == Some(']') {
+            index += 2;
+            while index < chars.len() {
+                let control = chars[index];
+                if control == '\u{0007}' {
+                    index += 1;
+                    break;
+                }
+                if control == '\u{001b}' && chars.get(index + 1) == Some(&'\\') {
+                    index += 2;
+                    break;
+                }
+                index += 1;
+            }
+            continue;
+        }
 
-#[derive(Debug, Default)]
-struct CodexRolloutStatus {
-    provider_session_id: Option<String>,
-    started_turn_id: Option<String>,
-    completed_turn_id: Option<String>,
-}
-
-fn find_matching_codex_rollout(prompt: &str, launched_at: SystemTime) -> Option<PathBuf> {
-    let root = env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".codex/sessions"))?;
-    if !root.is_dir() {
-        return None;
+        index += if next.is_some() { 2 } else { 1 };
     }
 
-    let cutoff = launched_at
-        .checked_sub(Duration::from_secs(10))
-        .unwrap_or(launched_at);
-    let mut candidates = Vec::new();
-    collect_recent_rollout_paths(&root, cutoff, &mut candidates);
-    candidates.sort_by(|left, right| right.cmp(left));
-    candidates
-        .into_iter()
-        .find(|path| read_codex_rollout_status(path, prompt).is_some())
+    output
 }
 
-fn collect_recent_rollout_paths(root: &Path, cutoff: SystemTime, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if file_type.is_dir() {
-            collect_recent_rollout_paths(&path, cutoff, out);
-            continue;
-        }
-        if !file_type.is_file() {
-            continue;
-        }
-        if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        if !name.starts_with("rollout-") {
-            continue;
-        }
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        let Ok(modified) = metadata.modified() else {
-            continue;
-        };
-        if modified < cutoff {
-            continue;
-        }
-        out.push(path);
-    }
-}
+pub(crate) fn collect_submitted_assistant_prompts(buffer: &mut String, input: &str) -> Vec<String> {
+    let normalized = normalize_assistant_input(input);
+    let mut prompts = Vec::new();
 
-fn read_codex_rollout_status(path: &Path, prompt: &str) -> Option<CodexRolloutStatus> {
-    let contents = fs::read_to_string(path).ok()?;
-    let mut status = CodexRolloutStatus::default();
-    let mut prompt_matched = false;
-
-    for line in contents.lines() {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        match value.get("type").and_then(Value::as_str) {
-            Some("session_meta") => {
-                status.provider_session_id = value
-                    .pointer("/payload/id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
+    for character in normalized.chars() {
+        match character {
+            '\r' | '\n' => {
+                let prompt = buffer.trim().to_string();
+                if !prompt.is_empty() {
+                    prompts.push(prompt);
+                }
+                buffer.clear();
             }
-            Some("response_item") => {
-                let is_user_message = value.pointer("/payload/type").and_then(Value::as_str)
-                    == Some("message")
-                    && value.pointer("/payload/role").and_then(Value::as_str) == Some("user");
-                if !is_user_message {
-                    continue;
-                }
-                prompt_matched |= value
-                    .pointer("/payload/content")
-                    .and_then(extract_rollout_message_text)
-                    .is_some_and(|text| text.trim() == prompt.trim());
+            SOFT_NEWLINE_SENTINEL => buffer.push('\n'),
+            '\u{0008}' | '\u{007f}' => {
+                buffer.pop();
             }
-            Some("event_msg") => match value.pointer("/payload/type").and_then(Value::as_str) {
-                Some("task_started") => {
-                    status.started_turn_id = value
-                        .pointer("/payload/turn_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                }
-                Some("task_complete") => {
-                    status.completed_turn_id = value
-                        .pointer("/payload/turn_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                }
-                _ => {}
-            },
+            character if character >= ' ' => buffer.push(character),
             _ => {}
         }
     }
 
-    prompt_matched.then_some(status)
+    prompts
 }
 
-fn extract_rollout_message_text(value: &Value) -> Option<String> {
-    let items = value.as_array()?;
-    let mut text = String::new();
-    for item in items {
-        let item_type = item.get("type").and_then(Value::as_str);
-        let item_text = item.get("text").and_then(Value::as_str);
-        if matches!(item_type, Some("input_text" | "output_text")) {
-            if !text.is_empty() {
-                text.push('\n');
-            }
-            text.push_str(item_text.unwrap_or_default());
-        }
-    }
-    (!text.trim().is_empty()).then_some(text)
-}
-
-#[derive(Debug, Deserialize)]
-struct AssistantHookInput {
-    #[serde(default, alias = "hookEventName")]
-    hook_event_name: String,
-    #[serde(default, alias = "turnId")]
-    turn_id: Option<String>,
-    #[serde(default, alias = "sessionId")]
-    session_id: Option<String>,
-    #[serde(default, alias = "toolName")]
-    tool_name: Option<String>,
-    #[serde(default, alias = "toolUseId")]
-    tool_use_id: Option<String>,
-    #[serde(default, alias = "notificationType")]
-    notification_type: Option<String>,
-    #[serde(default, alias = "agentId")]
-    agent_id: Option<String>,
-    #[serde(default, alias = "agentType")]
-    agent_type: Option<String>,
-    #[serde(default, alias = "taskId")]
-    task_id: Option<String>,
-    #[serde(default)]
-    trigger: Option<String>,
-    #[serde(flatten)]
-    _extra: std::collections::BTreeMap<String, Value>,
-}
-
-fn non_empty_string(value: String) -> Option<String> {
-    let trimmed = value.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
+fn is_soft_newline_escape(params: &str, final_char: char) -> bool {
+    matches!((params, final_char), ("13;2", 'u') | ("27;2;13", '~'))
 }
 
 #[cfg(test)]
@@ -739,7 +590,6 @@ mod tests {
             wrapped.command,
             vec!["codex".to_string(), "ship it".to_string()]
         );
-        assert!(wrapped.has_initial_prompt);
         assert_eq!(wrapped.initial_prompt.as_deref(), Some("ship it"));
     }
 
@@ -763,19 +613,19 @@ mod tests {
             wrapped.command,
             vec!["codex".to_string(), "ship it\nexplain why".to_string()]
         );
-        assert!(wrapped.has_initial_prompt);
-        assert_eq!(wrapped.initial_prompt.as_deref(), Some("ship it\nexplain why"));
+        assert_eq!(
+            wrapped.initial_prompt.as_deref(),
+            Some("ship it\nexplain why")
+        );
         assert!(!prompt_path.exists());
     }
 
     #[test]
-    fn build_wrapped_command_marks_plain_assistant_launch_without_initial_prompt() {
-        let wrapped =
-            build_wrapped_command(&proxy_args(&["--provider", "codex", "--", "codex"]))
-                .expect("plain assistant launch should parse");
+    fn build_wrapped_command_marks_plain_launch_without_initial_prompt() {
+        let wrapped = build_wrapped_command(&proxy_args(&["--provider", "codex", "--", "codex"]))
+            .expect("plain assistant launch should parse");
 
         assert_eq!(wrapped.command, vec!["codex".to_string()]);
-        assert!(!wrapped.has_initial_prompt);
         assert!(wrapped.initial_prompt.is_none());
     }
 
@@ -796,63 +646,5 @@ mod tests {
             error,
             "assistant-proxy accepts only one initial prompt source"
         );
-    }
-
-    #[test]
-    fn read_codex_rollout_status_matches_prompt_and_turn_ids() {
-        let nonce = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("system time should be monotonic enough for test files")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "codex-rollout-{}-{nonce}.jsonl",
-            std::process::id(),
-        ));
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"provider-session\"}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"ship it\"}]}}\n",
-                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-1\"}}\n",
-                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-1\"}}\n"
-            ),
-        )
-        .expect("rollout file should write");
-
-        let status =
-            read_codex_rollout_status(&path, "ship it").expect("prompt should match rollout");
-        assert_eq!(
-            status.provider_session_id.as_deref(),
-            Some("provider-session")
-        );
-        assert_eq!(status.started_turn_id.as_deref(), Some("turn-1"));
-        assert_eq!(status.completed_turn_id.as_deref(), Some("turn-1"));
-
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn read_codex_rollout_status_ignores_non_matching_prompt() {
-        let nonce = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("system time should be monotonic enough for test files")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "codex-rollout-miss-{}-{nonce}.jsonl",
-            std::process::id(),
-        ));
-        std::fs::write(
-            &path,
-            concat!(
-                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"provider-session\"}}\n",
-                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"different prompt\"}]}}\n",
-                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-1\"}}\n"
-            ),
-        )
-        .expect("rollout file should write");
-
-        assert!(read_codex_rollout_status(&path, "ship it").is_none());
-
-        let _ = std::fs::remove_file(path);
     }
 }

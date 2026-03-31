@@ -2,11 +2,13 @@ use std::collections::BTreeMap;
 
 use time::Duration as TimeDuration;
 
-use crate::assistant::observer_event_from_hook_input;
+use crate::assistant::{
+    collect_submitted_assistant_prompts, normalize_assistant_input, turn_output_timeout,
+    INITIAL_PROMPT_STARTUP_GRACE, SOFT_NEWLINE_SENTINEL, TURN_OUTPUT_IDLE_TIMEOUT,
+};
 use crate::daemon::state::{
-    apply_event, apply_event_at, build_published_state, effective_activity_at, parse_timestamp,
-    reconcile_assistant_state_at, reconcile_sessions, resolve_assistant_provider,
-    sanitize_command_name, should_suspend_for_inactivity_at, AssistantEvent, AssistantEventKind,
+    apply_event, build_published_state, effective_activity_at, parse_timestamp, reconcile_sessions,
+    resolve_assistant_provider, sanitize_command_name, should_suspend_for_inactivity_at,
     AssistantProvider, ObserverEvent, ObserverState, PublishedActiveSession, PublishedSession,
     PublishedState, SessionState, POLL_MISS_THRESHOLD_LIFECYCLE,
 };
@@ -18,110 +20,60 @@ use crate::metadata::{
 };
 
 #[test]
-fn assistant_hook_maps_prompt_submit() {
-    let event = observer_event_from_hook_input(
-        "terminal-1",
-        AssistantProvider::Claude,
-        r#"{"hook_event_name":"UserPromptSubmit","session_id":"provider-session"}"#,
+fn assistant_input_strips_escape_sequences() {
+    assert_eq!(
+        normalize_assistant_input("hello\u{001b}[31m world\u{001b}[0m"),
+        "hello world"
     );
-
-    assert!(matches!(
-        event,
-        Some(ObserverEvent::AssistantEvent {
-            session,
-            provider: AssistantProvider::Claude,
-            event:
-                AssistantEvent {
-                    kind: AssistantEventKind::UserPromptSubmit,
-                    provider_session_id: Some(provider_session_id),
-                    turn_id: None,
-                    ..
-                },
-        }) if session == "terminal-1" && provider_session_id == "provider-session"
-    ));
 }
 
 #[test]
-fn assistant_hook_maps_stop() {
-    let event = observer_event_from_hook_input(
-        "terminal-1",
-        AssistantProvider::Codex,
-        r#"{"hookEventName":"Stop","session_id":"provider-session","turn_id":"turn-1"}"#,
+fn assistant_input_collects_prompts() {
+    let mut buffer = String::new();
+    assert_eq!(
+        collect_submitted_assistant_prompts(&mut buffer, "hello world\r"),
+        vec!["hello world".to_string()]
     );
-
-    assert!(matches!(
-        event,
-        Some(ObserverEvent::AssistantEvent {
-            session,
-            provider: AssistantProvider::Codex,
-            event:
-                AssistantEvent {
-                    kind: AssistantEventKind::Stop,
-                    provider_session_id: Some(provider_session_id),
-                    turn_id: Some(turn_id),
-                    ..
-                },
-        }) if session == "terminal-1"
-            && provider_session_id == "provider-session"
-            && turn_id == "turn-1"
-    ));
+    assert!(buffer.is_empty());
 }
 
 #[test]
-fn assistant_hook_maps_camel_case_prompt_submit_with_turn_id() {
-    let event = observer_event_from_hook_input(
-        "terminal-1",
-        AssistantProvider::Codex,
-        r#"{"hookEventName":"UserPromptSubmit","turn_id":"turn-1"}"#,
-    );
+fn assistant_input_treats_shift_enter_as_soft_newline() {
+    let mut buffer = String::new();
 
-    assert!(matches!(
-        event,
-        Some(ObserverEvent::AssistantEvent {
-            session,
-            provider: AssistantProvider::Codex,
-            event:
-                AssistantEvent {
-                    kind: AssistantEventKind::UserPromptSubmit,
-                    turn_id: Some(turn_id),
-                    ..
-                },
-        }) if session == "terminal-1"
-            && turn_id == "turn-1"
-    ));
+    assert!(
+        collect_submitted_assistant_prompts(&mut buffer, "line 1\u{001b}[13;2uline 2").is_empty()
+    );
+    assert_eq!(buffer, "line 1\nline 2");
+    assert_eq!(
+        collect_submitted_assistant_prompts(&mut buffer, "\r"),
+        vec!["line 1\nline 2".to_string()]
+    );
+    assert!(buffer.is_empty());
 }
 
 #[test]
-fn assistant_hook_ignores_unknown_events() {
-    let event = observer_event_from_hook_input(
-        "terminal-1",
-        AssistantProvider::Codex,
-        r#"{"hook_event_name":"DefinitelyUnknown"}"#,
+fn assistant_input_normalizes_shift_enter_escape() {
+    assert_eq!(
+        normalize_assistant_input("hello\u{001b}[13;2uworld"),
+        format!("hello{SOFT_NEWLINE_SENTINEL}world")
     );
+}
 
-    assert!(event.is_none());
+#[test]
+fn turn_output_timeout_adds_startup_grace_only_before_first_output() {
+    assert_eq!(
+        turn_output_timeout(true, false),
+        TURN_OUTPUT_IDLE_TIMEOUT + INITIAL_PROMPT_STARTUP_GRACE
+    );
+    assert_eq!(turn_output_timeout(true, true), TURN_OUTPUT_IDLE_TIMEOUT);
+    assert_eq!(turn_output_timeout(false, false), TURN_OUTPUT_IDLE_TIMEOUT);
 }
 
 #[test]
 fn sanitize_command_name_normalizes_silo_assistants() {
     assert_eq!(sanitize_command_name("silo codex \"ship it\""), "codex");
     assert_eq!(sanitize_command_name("silo claude \"ship it\""), "claude");
-}
-
-#[test]
-fn sanitize_command_name_normalizes_assistant_proxy_commands() {
-    assert_eq!(
-        sanitize_command_name(
-            "/home/silo/.silo/bin/workspace-agent assistant-proxy --provider codex -- codex"
-        ),
-        "codex"
-    );
-    assert_eq!(
-        sanitize_command_name(
-            "'/home/silo/.silo/bin/workspace-agent' assistant-proxy --provider 'claude' -- 'claude'"
-        ),
-        "claude"
-    );
 }
 
 #[test]
@@ -162,12 +114,6 @@ fn assistant_provider_resolution_handles_cc_alias() {
     );
     assert_eq!(
         resolve_assistant_provider("codex"),
-        Some(AssistantProvider::Codex)
-    );
-    assert_eq!(
-        resolve_assistant_provider(
-            "/home/silo/.silo/bin/workspace-agent assistant-proxy --provider codex -- codex"
-        ),
         Some(AssistantProvider::Codex)
     );
     assert_eq!(resolve_assistant_provider("bun run dev"), None);
@@ -270,7 +216,6 @@ fn assistant_prompt_submitted_updates_last_working() {
         ObserverEvent::AssistantPromptSubmitted {
             session: "terminal-1".to_string(),
             provider: AssistantProvider::Codex,
-            turn_id: Some("turn-1".to_string()),
         },
     );
 
@@ -409,14 +354,11 @@ fn reconcile_sessions_keeps_lifecycle_managed_session_on_transient_poll_miss() {
         SessionState {
             active_command: Some("codex".to_string()),
             assistant_provider: Some(AssistantProvider::Codex),
-            active_turn_id: None,
-            completed_turn_id: None,
             command_running: true,
             working: true,
             unread: false,
             lifecycle_managed: true,
             poll_misses: 0,
-            ..SessionState::default()
         },
     );
 
@@ -440,14 +382,11 @@ fn reconcile_sessions_clears_finished_assistant_back_to_shell() {
         SessionState {
             active_command: Some("claude".to_string()),
             assistant_provider: Some(AssistantProvider::Claude),
-            active_turn_id: None,
-            completed_turn_id: None,
             command_running: false,
             working: false,
             unread: false,
             lifecycle_managed: true,
             poll_misses: 0,
-            ..SessionState::default()
         },
     );
 
@@ -475,14 +414,11 @@ fn reconcile_sessions_drops_missing_idle_shell_session_quickly() {
         SessionState {
             active_command: None,
             assistant_provider: None,
-            active_turn_id: None,
-            completed_turn_id: None,
             command_running: false,
             working: false,
             unread: true,
             lifecycle_managed: true,
             poll_misses: 0,
-            ..SessionState::default()
         },
     );
 
@@ -504,14 +440,11 @@ fn reconcile_sessions_preserves_running_command_without_live_cmd() {
         SessionState {
             active_command: Some("bun run dev".to_string()),
             assistant_provider: None,
-            active_turn_id: None,
-            completed_turn_id: None,
             command_running: true,
             working: false,
             unread: false,
             lifecycle_managed: true,
             poll_misses: 0,
-            ..SessionState::default()
         },
     );
 
@@ -556,6 +489,70 @@ fn assistant_session_started_marks_claude_active_immediately() {
 }
 
 #[test]
+fn shell_command_started_preserves_assistant_working_when_prompt_wins_race() {
+    let mut state = ObserverState::default();
+
+    apply_event(
+        &mut state,
+        ObserverEvent::AssistantPromptSubmitted {
+            session: "terminal-1".to_string(),
+            provider: AssistantProvider::Codex,
+        },
+    );
+    apply_event(
+        &mut state,
+        ObserverEvent::ShellCommandStarted {
+            session: "terminal-1".to_string(),
+            command:
+                "/home/silo/.silo/bin/workspace-agent assistant-proxy --provider codex -- codex"
+                    .to_string(),
+        },
+    );
+
+    let session = state
+        .sessions
+        .get("terminal-1")
+        .expect("session should exist");
+    assert_eq!(session.active_command.as_deref(), Some("codex"));
+    assert_eq!(session.assistant_provider, Some(AssistantProvider::Codex));
+    assert!(session.command_running);
+    assert!(session.working);
+    assert!(!session.unread);
+}
+
+#[test]
+fn shell_command_started_preserves_assistant_unread_when_completion_wins_race() {
+    let mut state = ObserverState::default();
+
+    apply_event(
+        &mut state,
+        ObserverEvent::AssistantTurnCompleted {
+            session: "terminal-1".to_string(),
+            provider: AssistantProvider::Codex,
+        },
+    );
+    apply_event(
+        &mut state,
+        ObserverEvent::ShellCommandStarted {
+            session: "terminal-1".to_string(),
+            command:
+                "/home/silo/.silo/bin/workspace-agent assistant-proxy --provider codex -- codex"
+                    .to_string(),
+        },
+    );
+
+    let session = state
+        .sessions
+        .get("terminal-1")
+        .expect("session should exist");
+    assert_eq!(session.active_command.as_deref(), Some("codex"));
+    assert_eq!(session.assistant_provider, Some(AssistantProvider::Codex));
+    assert!(session.command_running);
+    assert!(!session.working);
+    assert!(session.unread);
+}
+
+#[test]
 fn build_published_state_uses_agent_state_without_live_poll_data() {
     let mut state = ObserverState::default();
     state.sessions.insert(
@@ -563,14 +560,11 @@ fn build_published_state_uses_agent_state_without_live_poll_data() {
         SessionState {
             active_command: Some("codex".to_string()),
             assistant_provider: Some(AssistantProvider::Codex),
-            active_turn_id: Some("turn-1".to_string()),
-            completed_turn_id: None,
             command_running: true,
             working: true,
             unread: false,
             lifecycle_managed: true,
             poll_misses: 2,
-            ..SessionState::default()
         },
     );
 
@@ -582,362 +576,6 @@ fn build_published_state_uses_agent_state_without_live_poll_data() {
     assert_eq!(published.terminals[0].name, "codex");
     assert_eq!(published.terminals[0].attachment_id, "terminal-1");
     assert_eq!(published.terminals[0].working, Some(true));
-}
-
-#[test]
-fn build_published_state_canonicalizes_assistant_proxy_session_names() {
-    let mut state = ObserverState::default();
-    state.sessions.insert(
-        "terminal-1".to_string(),
-        SessionState {
-            active_command: Some(
-                "/home/silo/.silo/bin/workspace-agent assistant-proxy --provider codex -- codex"
-                    .to_string(),
-            ),
-            assistant_provider: None,
-            active_turn_id: None,
-            completed_turn_id: None,
-            command_running: true,
-            working: false,
-            unread: true,
-            lifecycle_managed: true,
-            poll_misses: 0,
-            ..SessionState::default()
-        },
-    );
-
-    let published = build_published_state(&state);
-
-    assert_eq!(published.terminals.len(), 1);
-    assert_eq!(published.terminals[0].name, "codex");
-    assert_eq!(published.terminals[0].working, Some(false));
-    assert_eq!(published.terminals[0].unread, Some(true));
-}
-
-#[test]
-fn assistant_turn_completed_ignores_stale_turn_ids() {
-    let mut state = ObserverState::default();
-
-    apply_event(
-        &mut state,
-        ObserverEvent::AssistantPromptSubmitted {
-            session: "terminal-1".to_string(),
-            provider: AssistantProvider::Codex,
-            turn_id: Some("turn-2".to_string()),
-        },
-    );
-    apply_event(
-        &mut state,
-        ObserverEvent::AssistantTurnCompleted {
-            session: "terminal-1".to_string(),
-            provider: AssistantProvider::Codex,
-            turn_id: Some("turn-1".to_string()),
-        },
-    );
-
-    let session = state
-        .sessions
-        .get("terminal-1")
-        .expect("session should exist");
-    assert!(session.working);
-    assert!(!session.unread);
-    assert_eq!(session.active_turn_id.as_deref(), Some("turn-2"));
-}
-
-#[test]
-fn assistant_turn_completed_ignores_duplicate_turn_ids_after_mark_read() {
-    let mut state = ObserverState::default();
-    let start = parse_timestamp("2026-03-14T00:00:00Z").expect("timestamp should parse");
-
-    apply_event_at(
-        &mut state,
-        ObserverEvent::AssistantPromptSubmitted {
-            session: "terminal-1".to_string(),
-            provider: AssistantProvider::Codex,
-            turn_id: Some("turn-1".to_string()),
-        },
-        start,
-    );
-    apply_event_at(
-        &mut state,
-        ObserverEvent::AssistantTurnCompleted {
-            session: "terminal-1".to_string(),
-            provider: AssistantProvider::Codex,
-            turn_id: Some("turn-1".to_string()),
-        },
-        start + TimeDuration::seconds(1),
-    );
-    reconcile_assistant_state_at(&mut state, start + TimeDuration::seconds(7));
-    apply_event_at(
-        &mut state,
-        ObserverEvent::MarkRead {
-            session: "terminal-1".to_string(),
-        },
-        start + TimeDuration::seconds(8),
-    );
-    apply_event_at(
-        &mut state,
-        ObserverEvent::AssistantTurnCompleted {
-            session: "terminal-1".to_string(),
-            provider: AssistantProvider::Codex,
-            turn_id: Some("turn-1".to_string()),
-        },
-        start + TimeDuration::seconds(9),
-    );
-    reconcile_assistant_state_at(&mut state, start + TimeDuration::seconds(15));
-
-    let session = state
-        .sessions
-        .get("terminal-1")
-        .expect("session should exist");
-    assert!(!session.working);
-    assert!(!session.unread);
-    assert_eq!(session.completed_turn_id.as_deref(), Some("turn-1"));
-}
-
-#[test]
-fn codex_completion_waits_for_settle_window_before_unread() {
-    let mut state = ObserverState::default();
-    let start = parse_timestamp("2026-03-14T00:00:00Z").expect("timestamp should parse");
-
-    apply_event_at(
-        &mut state,
-        ObserverEvent::AssistantPromptSubmitted {
-            session: "terminal-1".to_string(),
-            provider: AssistantProvider::Codex,
-            turn_id: Some("turn-1".to_string()),
-        },
-        start,
-    );
-    apply_event_at(
-        &mut state,
-        ObserverEvent::AssistantTurnCompleted {
-            session: "terminal-1".to_string(),
-            provider: AssistantProvider::Codex,
-            turn_id: Some("turn-1".to_string()),
-        },
-        start + TimeDuration::seconds(1),
-    );
-
-    let session = state
-        .sessions
-        .get("terminal-1")
-        .expect("session should exist");
-    assert!(session.working);
-    assert!(!session.unread);
-
-    reconcile_assistant_state_at(&mut state, start + TimeDuration::seconds(5));
-    let session = state
-        .sessions
-        .get("terminal-1")
-        .expect("session should exist");
-    assert!(session.working);
-    assert!(!session.unread);
-
-    reconcile_assistant_state_at(&mut state, start + TimeDuration::seconds(6));
-    let session = state
-        .sessions
-        .get("terminal-1")
-        .expect("session should exist");
-    assert!(!session.working);
-    assert!(session.unread);
-}
-
-#[test]
-fn codex_nested_activity_defers_completion_until_quiet() {
-    let mut state = ObserverState::default();
-    let start = parse_timestamp("2026-03-14T00:00:00Z").expect("timestamp should parse");
-
-    apply_event_at(
-        &mut state,
-        ObserverEvent::AssistantEvent {
-            session: "terminal-1".to_string(),
-            provider: AssistantProvider::Codex,
-            event: AssistantEvent {
-                kind: AssistantEventKind::UserPromptSubmit,
-                provider_session_id: Some("root-session".to_string()),
-                turn_id: Some("turn-1".to_string()),
-                ..AssistantEvent::default()
-            },
-        },
-        start,
-    );
-    apply_event_at(
-        &mut state,
-        ObserverEvent::AssistantEvent {
-            session: "terminal-1".to_string(),
-            provider: AssistantProvider::Codex,
-            event: AssistantEvent {
-                kind: AssistantEventKind::Stop,
-                provider_session_id: Some("root-session".to_string()),
-                turn_id: Some("turn-1".to_string()),
-                ..AssistantEvent::default()
-            },
-        },
-        start + TimeDuration::seconds(1),
-    );
-    apply_event_at(
-        &mut state,
-        ObserverEvent::AssistantEvent {
-            session: "terminal-1".to_string(),
-            provider: AssistantProvider::Codex,
-            event: AssistantEvent {
-                kind: AssistantEventKind::PreToolUse,
-                provider_session_id: Some("nested-session".to_string()),
-                tool_name: Some("Bash".to_string()),
-                tool_call_id: Some("tool-1".to_string()),
-                ..AssistantEvent::default()
-            },
-        },
-        start + TimeDuration::seconds(2),
-    );
-
-    reconcile_assistant_state_at(&mut state, start + TimeDuration::seconds(8));
-    let session = state
-        .sessions
-        .get("terminal-1")
-        .expect("session should exist");
-    assert!(session.working);
-    assert!(!session.unread);
-
-    apply_event_at(
-        &mut state,
-        ObserverEvent::AssistantEvent {
-            session: "terminal-1".to_string(),
-            provider: AssistantProvider::Codex,
-            event: AssistantEvent {
-                kind: AssistantEventKind::PostToolUse,
-                provider_session_id: Some("nested-session".to_string()),
-                tool_name: Some("Bash".to_string()),
-                tool_call_id: Some("tool-1".to_string()),
-                ..AssistantEvent::default()
-            },
-        },
-        start + TimeDuration::seconds(9),
-    );
-    reconcile_assistant_state_at(&mut state, start + TimeDuration::seconds(9));
-
-    let session = state
-        .sessions
-        .get("terminal-1")
-        .expect("session should exist");
-    assert!(!session.working);
-    assert!(session.unread);
-}
-
-#[test]
-fn codex_leaked_root_tools_clear_after_settle_window() {
-    let mut state = ObserverState::default();
-    let start = parse_timestamp("2026-03-14T00:00:00Z").expect("timestamp should parse");
-
-    apply_event_at(
-        &mut state,
-        ObserverEvent::AssistantEvent {
-            session: "terminal-1".to_string(),
-            provider: AssistantProvider::Codex,
-            event: AssistantEvent {
-                kind: AssistantEventKind::UserPromptSubmit,
-                provider_session_id: Some("root-session".to_string()),
-                turn_id: Some("turn-1".to_string()),
-                ..AssistantEvent::default()
-            },
-        },
-        start,
-    );
-    apply_event_at(
-        &mut state,
-        ObserverEvent::AssistantEvent {
-            session: "terminal-1".to_string(),
-            provider: AssistantProvider::Codex,
-            event: AssistantEvent {
-                kind: AssistantEventKind::PreToolUse,
-                provider_session_id: Some("root-session".to_string()),
-                tool_name: Some("Bash".to_string()),
-                tool_call_id: Some("tool-1".to_string()),
-                ..AssistantEvent::default()
-            },
-        },
-        start + TimeDuration::seconds(1),
-    );
-    apply_event_at(
-        &mut state,
-        ObserverEvent::AssistantEvent {
-            session: "terminal-1".to_string(),
-            provider: AssistantProvider::Codex,
-            event: AssistantEvent {
-                kind: AssistantEventKind::Stop,
-                provider_session_id: Some("root-session".to_string()),
-                turn_id: Some("turn-1".to_string()),
-                ..AssistantEvent::default()
-            },
-        },
-        start + TimeDuration::seconds(2),
-    );
-
-    reconcile_assistant_state_at(&mut state, start + TimeDuration::seconds(6));
-    let session = state
-        .sessions
-        .get("terminal-1")
-        .expect("session should exist");
-    assert!(session.working);
-    assert!(!session.unread);
-    assert_eq!(session.active_tools.len(), 1);
-
-    reconcile_assistant_state_at(&mut state, start + TimeDuration::seconds(7));
-    let session = state
-        .sessions
-        .get("terminal-1")
-        .expect("session should exist");
-    assert!(!session.working);
-    assert!(session.unread);
-    assert!(session.active_tools.is_empty());
-    assert_eq!(session.completed_turn_id.as_deref(), Some("turn-1"));
-}
-
-#[test]
-fn claude_attention_events_set_unread_without_working() {
-    let mut state = ObserverState::default();
-    let start = parse_timestamp("2026-03-14T00:00:00Z").expect("timestamp should parse");
-
-    apply_event_at(
-        &mut state,
-        ObserverEvent::AssistantEvent {
-            session: "terminal-1".to_string(),
-            provider: AssistantProvider::Claude,
-            event: AssistantEvent {
-                kind: AssistantEventKind::UserPromptSubmit,
-                provider_session_id: Some("claude-session".to_string()),
-                turn_id: Some("turn-1".to_string()),
-                ..AssistantEvent::default()
-            },
-        },
-        start,
-    );
-    apply_event_at(
-        &mut state,
-        ObserverEvent::AssistantEvent {
-            session: "terminal-1".to_string(),
-            provider: AssistantProvider::Claude,
-            event: AssistantEvent {
-                kind: AssistantEventKind::PermissionRequest,
-                provider_session_id: Some("claude-session".to_string()),
-                ..AssistantEvent::default()
-            },
-        },
-        start + TimeDuration::seconds(1),
-    );
-
-    let session = state
-        .sessions
-        .get("terminal-1")
-        .expect("session should exist");
-    assert!(!session.working);
-    assert!(session.unread);
-    assert!(session.attention_pending);
-    assert_eq!(
-        session.blocked_reason.as_deref(),
-        Some("permission_request")
-    );
 }
 
 #[test]
