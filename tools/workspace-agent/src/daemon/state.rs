@@ -662,6 +662,9 @@ fn reconcile_session_completion(session_state: &mut SessionState, now: OffsetDat
         Some(deadline) => now >= deadline,
         None => true,
     };
+    if deadline_reached {
+        clear_stale_codex_root_tools_after_completion(session_state);
+    }
     if !deadline_reached
         || session_state.root_turn_active
         || session_state.compacting
@@ -687,6 +690,48 @@ fn reconcile_session_completion(session_state: &mut SessionState, now: OffsetDat
     {
         session_state.unread = true;
     }
+}
+
+fn clear_stale_codex_root_tools_after_completion(session_state: &mut SessionState) {
+    if session_state.assistant_provider != Some(AssistantProvider::Codex)
+        || session_state.pending_completion.is_none()
+        || session_state.root_turn_active
+        || session_state.compacting
+        || !session_state.active_subagents.is_empty()
+        || !session_state.active_tasks.is_empty()
+        || session_state.active_tools.is_empty()
+    {
+        return;
+    }
+
+    let owner = session_state
+        .pending_completion
+        .as_ref()
+        .and_then(|pending| pending.provider_session_id.as_deref())
+        .or(session_state.root_provider_session_id.as_deref())
+        .unwrap_or("root")
+        .to_string();
+    let owner_prefix = format!("{owner}:");
+    let leaked_tools: Vec<String> = session_state
+        .active_tools
+        .iter()
+        .filter(|tool| tool.starts_with(&owner_prefix))
+        .cloned()
+        .collect();
+    if leaked_tools.is_empty() {
+        return;
+    }
+
+    for tool in &leaked_tools {
+        session_state.active_tools.remove(tool);
+    }
+
+    eprintln!(
+        "workspace-agent: cleared {} leaked codex root tools after settled completion owner={} tools={}",
+        leaked_tools.len(),
+        owner,
+        leaked_tools.join(",")
+    );
 }
 
 fn apply_assistant_event_at(

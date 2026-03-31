@@ -826,6 +826,75 @@ fn codex_nested_activity_defers_completion_until_quiet() {
 }
 
 #[test]
+fn codex_leaked_root_tools_clear_after_settle_window() {
+    let mut state = ObserverState::default();
+    let start = parse_timestamp("2026-03-14T00:00:00Z").expect("timestamp should parse");
+
+    apply_event_at(
+        &mut state,
+        ObserverEvent::AssistantEvent {
+            session: "terminal-1".to_string(),
+            provider: AssistantProvider::Codex,
+            event: AssistantEvent {
+                kind: AssistantEventKind::UserPromptSubmit,
+                provider_session_id: Some("root-session".to_string()),
+                turn_id: Some("turn-1".to_string()),
+                ..AssistantEvent::default()
+            },
+        },
+        start,
+    );
+    apply_event_at(
+        &mut state,
+        ObserverEvent::AssistantEvent {
+            session: "terminal-1".to_string(),
+            provider: AssistantProvider::Codex,
+            event: AssistantEvent {
+                kind: AssistantEventKind::PreToolUse,
+                provider_session_id: Some("root-session".to_string()),
+                tool_name: Some("Bash".to_string()),
+                tool_call_id: Some("tool-1".to_string()),
+                ..AssistantEvent::default()
+            },
+        },
+        start + TimeDuration::seconds(1),
+    );
+    apply_event_at(
+        &mut state,
+        ObserverEvent::AssistantEvent {
+            session: "terminal-1".to_string(),
+            provider: AssistantProvider::Codex,
+            event: AssistantEvent {
+                kind: AssistantEventKind::Stop,
+                provider_session_id: Some("root-session".to_string()),
+                turn_id: Some("turn-1".to_string()),
+                ..AssistantEvent::default()
+            },
+        },
+        start + TimeDuration::seconds(2),
+    );
+
+    reconcile_assistant_state_at(&mut state, start + TimeDuration::seconds(6));
+    let session = state
+        .sessions
+        .get("terminal-1")
+        .expect("session should exist");
+    assert!(session.working);
+    assert!(!session.unread);
+    assert_eq!(session.active_tools.len(), 1);
+
+    reconcile_assistant_state_at(&mut state, start + TimeDuration::seconds(7));
+    let session = state
+        .sessions
+        .get("terminal-1")
+        .expect("session should exist");
+    assert!(!session.working);
+    assert!(session.unread);
+    assert!(session.active_tools.is_empty());
+    assert_eq!(session.completed_turn_id.as_deref(), Some("turn-1"));
+}
+
+#[test]
 fn claude_attention_events_set_unread_without_working() {
     let mut state = ObserverState::default();
     let start = parse_timestamp("2026-03-14T00:00:00Z").expect("timestamp should parse");
