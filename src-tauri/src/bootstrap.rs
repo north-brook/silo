@@ -4,8 +4,8 @@ use crate::config::{ConfigStore, ProjectConfig, SiloConfig};
 use crate::gcp;
 use crate::remote::{
     remote_command_error, run_remote_command, run_remote_command_with_stdin,
-    run_terminal_user_command, shell_quote, workspace_shell_command_with_credentials,
-    REMOTE_WORKSPACE_AGENT_BIN, TERMINAL_WORKSPACE_DIR,
+    run_terminal_user_command, shell_quote, workspace_shell_command,
+    workspace_shell_command_with_credentials, REMOTE_WORKSPACE_AGENT_BIN, TERMINAL_WORKSPACE_DIR,
 };
 use crate::state::WorkspaceMetadataManager;
 use crate::state_paths;
@@ -889,9 +889,8 @@ async fn bootstrap_workspace_until_ready(lookup: &WorkspaceLookup) -> Result<(),
 }
 
 async fn ensure_workspace_agent_running(lookup: &WorkspaceLookup) -> Result<(), String> {
-    let check_command = workspace_agent_running_check_command();
-    let check_result =
-        run_remote_command(lookup, &run_terminal_user_command(&check_command)).await?;
+    let check_command = workspace_agent_running_check_remote_command();
+    let check_result = run_remote_command(lookup, &check_command).await?;
     if check_result.success {
         return Ok(());
     }
@@ -917,7 +916,7 @@ async fn wait_for_workspace_agent(
     workspace: &str,
     expected_fingerprint: Option<&str>,
 ) -> Result<(), String> {
-    let ready_check_command = workspace_agent_ready_check_command();
+    let ready_check_command = workspace_agent_ready_check_remote_command();
     let mut saw_fresh_heartbeat = false;
     let mut matched_expected_fingerprint = expected_fingerprint.is_none();
     let mut last_ready_probe_error = None::<String>;
@@ -930,9 +929,7 @@ async fn wait_for_workspace_agent(
         matched_expected_fingerprint |= fingerprint_matches;
 
         if heartbeat_is_fresh && fingerprint_matches {
-            match run_remote_command(&lookup, &run_terminal_user_command(&ready_check_command))
-                .await
-            {
+            match run_remote_command(&lookup, &ready_check_command).await {
                 Ok(result) if result.success => return Ok(()),
                 Ok(result) => {
                     last_ready_probe_error = Some(remote_command_error(
@@ -1634,6 +1631,10 @@ exit 1",
     )
 }
 
+fn workspace_agent_running_check_remote_command() -> String {
+    workspace_shell_command(&workspace_agent_running_check_command())
+}
+
 fn workspace_agent_ready_check_command() -> String {
     let bin_path = shell_quote(REMOTE_WORKSPACE_AGENT_BIN);
     format!(
@@ -1643,6 +1644,10 @@ fi\n\
 {bin_path} mark-read --session __silo_ready_probe__",
         bin_path = bin_path,
     )
+}
+
+fn workspace_agent_ready_check_remote_command() -> String {
+    workspace_shell_command(&workspace_agent_ready_check_command())
 }
 
 fn workspace_agent_source_signature() -> String {
@@ -2105,12 +2110,30 @@ mod tests {
     }
 
     #[test]
+    fn workspace_agent_running_check_remote_command_uses_encoded_workspace_shell() {
+        let command = workspace_agent_running_check_remote_command();
+
+        assert!(command.contains("base64 --decode | bash"));
+        assert!(command.contains("printf %s"));
+        assert!(!command.contains("sudo -iu silo bash -lc 'if ["));
+    }
+
+    #[test]
     fn workspace_agent_ready_check_command_probes_fifo_delivery() {
         let command = workspace_agent_ready_check_command();
 
         assert!(command.contains("mark-read --session __silo_ready_probe__"));
         assert!(!command.contains("ps -eo pid=,args="));
         assert!(!command.contains("workspace-agent.new"));
+    }
+
+    #[test]
+    fn workspace_agent_ready_check_remote_command_uses_encoded_workspace_shell() {
+        let command = workspace_agent_ready_check_remote_command();
+
+        assert!(command.contains("base64 --decode | bash"));
+        assert!(command.contains("printf %s"));
+        assert!(!command.contains("sudo -iu silo bash -lc 'if ["));
     }
 
     #[test]
