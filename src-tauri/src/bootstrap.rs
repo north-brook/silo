@@ -627,7 +627,8 @@ async fn reconcile_workspace_agent_update(workspace: &str, attempt_id: u64) -> R
 
     wait_for_workspace_ssh(&lookup).await?;
 
-    let install_script = workspace_agent_install_script(&lookup);
+    let bootstrap = workspace_bootstrap(&lookup)?;
+    let install_script = workspace_agent_update_script(&lookup, &bootstrap);
     let install_result = run_remote_command_with_stdin(
         &lookup,
         &run_terminal_user_command("bash -se"),
@@ -1099,30 +1100,11 @@ fn workspace_bootstrap(lookup: &WorkspaceLookup) -> Result<WorkspaceBootstrap, S
 }
 
 fn workspace_bootstrap_script(lookup: &WorkspaceLookup, bootstrap: &WorkspaceBootstrap) -> String {
-    let codex_auth_json = bootstrap.codex_auth_json.clone();
-    let codex_config_toml = codex_config_toml(
-        &bootstrap.codex_model,
-        &bootstrap.codex_model_reasoning_effort,
-    );
-    let codex_hooks_json = codex_hooks_json();
-    let claude_settings_json = claude_settings_json(
-        &bootstrap.claude_model,
-        &bootstrap.claude_effort_level,
-        bootstrap.claude_always_thinking_enabled,
-    );
-    let claude_state_json = claude_state_json();
     let gh_hosts_yml = gh_hosts_yml(&bootstrap.gh_username, &bootstrap.gh_token);
     let bootstrap_signature = workspace_bootstrap_signature(lookup.workspace.name(), bootstrap);
     let agent_install = workspace_agent_install_script(lookup);
+    let assistant_config_sync = workspace_assistant_config_sync_script(bootstrap);
     let cli_update = workspace_cli_update_script();
-    let codex_auth_write = if codex_auth_json.is_empty() {
-        "rm -f \"$HOME/.codex/auth.json\"".to_string()
-    } else {
-        format!(
-            "printf '%s\\n' {} > \"$HOME/.codex/auth.json\"",
-            shell_quote(&codex_auth_json)
-        )
-    };
     let env_file_sync = if lookup.workspace.is_template() {
         workspace_env_file_sync_script(&bootstrap.env_files)
     } else {
@@ -1246,15 +1228,7 @@ mkdir -p \"$HOME/.config/gh\"\n\
 printf '%s\\n' {gh_hosts_yml} > \"$HOME/.config/gh/hosts.yml\"\n\
 chmod 700 \"$HOME/.config\" \"$HOME/.config/gh\"\n\
 chmod 600 \"$HOME/.config/gh/hosts.yml\"\n\
-mkdir -p \"$HOME/.codex\" \"$HOME/.claude\"\n\
-{codex_auth_write}\n\
-printf '%s\\n' {codex_config_toml} > \"$HOME/.codex/config.toml\"\n\
-printf '%s\\n' {codex_hooks_json} > \"$HOME/.codex/hooks.json\"\n\
-printf '%s\\n' {claude_settings_json} > \"$HOME/.claude/settings.json\"\n\
-printf '%s\\n' {claude_state_json} > \"$HOME/.claude.json\"\n\
-chmod 700 \"$HOME/.codex\" \"$HOME/.claude\"\n\
-if [ -f \"$HOME/.codex/auth.json\" ]; then chmod 600 \"$HOME/.codex/auth.json\"; fi\n\
-chmod 600 \"$HOME/.codex/config.toml\" \"$HOME/.codex/hooks.json\" \"$HOME/.claude/settings.json\" \"$HOME/.claude.json\"\n\
+{assistant_config_sync}\
 rm -f \"$HOME/.gitconfig.lock\"\n\
 bootstrap_log 'step=configure_git'\n\
 if [ -n \"$GIT_USER_NAME\" ] && [ \"$(git config --global --get user.name || true)\" != \"$GIT_USER_NAME\" ]; then\n\
@@ -1291,11 +1265,7 @@ bootstrap_log 'step=completed'\n",
         credentials_path = shell_quote(REMOTE_CREDENTIALS_FILE),
         credentials_lines = credentials_lines,
         gh_hosts_yml = shell_quote(&gh_hosts_yml),
-        codex_auth_write = codex_auth_write,
-        codex_config_toml = shell_quote(&codex_config_toml),
-        codex_hooks_json = shell_quote(&codex_hooks_json),
-        claude_settings_json = shell_quote(&claude_settings_json),
-        claude_state_json = shell_quote(&claude_state_json),
+        assistant_config_sync = assistant_config_sync,
         branch_setup = branch_setup,
         git_lfs_setup = git_lfs_setup,
         git_lfs_sync = git_lfs_sync,
@@ -1494,6 +1464,45 @@ pub(crate) fn workspace_env_file_sync_script(env_files: &[BootstrapEnvFile]) -> 
     script
 }
 
+fn workspace_assistant_config_sync_script(bootstrap: &WorkspaceBootstrap) -> String {
+    let codex_auth_write = if bootstrap.codex_auth_json.is_empty() {
+        "rm -f \"$HOME/.codex/auth.json\"".to_string()
+    } else {
+        format!(
+            "printf '%s\\n' {} > \"$HOME/.codex/auth.json\"",
+            shell_quote(&bootstrap.codex_auth_json)
+        )
+    };
+    let codex_config_toml = codex_config_toml(
+        &bootstrap.codex_model,
+        &bootstrap.codex_model_reasoning_effort,
+    );
+    let codex_hooks_json = codex_hooks_json();
+    let claude_settings_json = claude_settings_json(
+        &bootstrap.claude_model,
+        &bootstrap.claude_effort_level,
+        bootstrap.claude_always_thinking_enabled,
+    );
+    let claude_state_json = claude_state_json();
+
+    format!(
+        "mkdir -p \"$HOME/.codex\" \"$HOME/.claude\"\n\
+{codex_auth_write}\n\
+printf '%s\\n' {codex_config_toml} > \"$HOME/.codex/config.toml\"\n\
+printf '%s\\n' {codex_hooks_json} > \"$HOME/.codex/hooks.json\"\n\
+printf '%s\\n' {claude_settings_json} > \"$HOME/.claude/settings.json\"\n\
+printf '%s\\n' {claude_state_json} > \"$HOME/.claude.json\"\n\
+chmod 700 \"$HOME/.codex\" \"$HOME/.claude\"\n\
+if [ -f \"$HOME/.codex/auth.json\" ]; then chmod 600 \"$HOME/.codex/auth.json\"; fi\n\
+chmod 600 \"$HOME/.codex/config.toml\" \"$HOME/.codex/hooks.json\" \"$HOME/.claude/settings.json\" \"$HOME/.claude.json\"\n",
+        codex_auth_write = codex_auth_write,
+        codex_config_toml = shell_quote(&codex_config_toml),
+        codex_hooks_json = shell_quote(&codex_hooks_json),
+        claude_settings_json = shell_quote(&claude_settings_json),
+        claude_state_json = shell_quote(&claude_state_json),
+    )
+}
+
 fn workspace_cli_update_script() -> String {
     String::from(
         "if command -v brew >/dev/null 2>&1; then\n\
@@ -1515,6 +1524,19 @@ fn workspace_agent_install_script(lookup: &WorkspaceLookup) -> String {
         lookup.workspace.name(),
         &lookup.gcloud_project,
         lookup.workspace.zone(),
+    )
+}
+
+fn workspace_agent_update_script(
+    lookup: &WorkspaceLookup,
+    bootstrap: &WorkspaceBootstrap,
+) -> String {
+    format!(
+        "set -euo pipefail\n\
+{assistant_config_sync}\
+{agent_install}",
+        assistant_config_sync = workspace_assistant_config_sync_script(bootstrap),
+        agent_install = workspace_agent_install_script(lookup),
     )
 }
 
@@ -1654,6 +1676,14 @@ fn workspace_agent_source_signature() -> String {
     let mut hasher = Sha256::new();
     hasher.update(WORKSPACE_AGENT_BIN_BYTES);
     hasher.update(workspace_agent_shell_script().as_bytes());
+    hasher.update(workspace_assistant_hook_signature().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn workspace_assistant_hook_signature() -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(codex_hooks_json().as_bytes());
+    hasher.update(provider_hook_config("claude").to_string().as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
@@ -1866,34 +1896,38 @@ pub(crate) fn claude_state_json() -> String {
 }
 
 fn provider_hook_config(provider: &str) -> serde_json::Value {
-    json!({
-        "UserPromptSubmit": [
-            {
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": assistant_hook_command(
-                            provider,
-                            "assistant_prompt_submitted"
-                        )
-                    }
-                ]
-            }
-        ],
-        "Stop": [
-            {
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": assistant_hook_command(
-                            provider,
-                            "assistant_turn_completed"
-                        )
-                    }
-                ]
-            }
-        ]
-    })
+    let command = assistant_hook_command(provider, "assistant_event");
+    match provider {
+        "codex" => json!({
+            "SessionStart": [hook_group(&command, Some("startup|resume"))],
+            "PreToolUse": [hook_group(&command, Some("Bash"))],
+            "PostToolUse": [hook_group(&command, Some("Bash"))],
+            "UserPromptSubmit": [hook_group(&command, None)],
+            "Stop": [hook_group(&command, None)],
+        }),
+        "claude" => json!({
+            "SessionStart": [hook_group(&command, None)],
+            "UserPromptSubmit": [hook_group(&command, None)],
+            "PreToolUse": [hook_group(&command, None)],
+            "PostToolUse": [hook_group(&command, None)],
+            "PostToolUseFailure": [hook_group(&command, None)],
+            "PermissionRequest": [hook_group(&command, None)],
+            "Notification": [hook_group(&command, None)],
+            "SubagentStart": [hook_group(&command, None)],
+            "SubagentStop": [hook_group(&command, None)],
+            "TaskCreated": [hook_group(&command, None)],
+            "TaskCompleted": [hook_group(&command, None)],
+            "Stop": [hook_group(&command, None)],
+            "StopFailure": [hook_group(&command, None)],
+            "TeammateIdle": [hook_group(&command, None)],
+            "PreCompact": [hook_group(&command, None)],
+            "PostCompact": [hook_group(&command, None)],
+            "SessionEnd": [hook_group(&command, None)],
+            "Elicitation": [hook_group(&command, None)],
+            "ElicitationResult": [hook_group(&command, None)],
+        }),
+        _ => json!({}),
+    }
 }
 
 fn assistant_hook_command(provider: &str, _kind: &str) -> String {
@@ -1901,6 +1935,23 @@ fn assistant_hook_command(provider: &str, _kind: &str) -> String {
         "[ -n \"${{SILO_TERMINAL_ID:-}}\" ] || exit 0; SILO_AGENT_HOOK=1 \"${{SILO_WORKSPACE_AGENT_BIN:-{}}}\" assistant-hook --provider {}",
         REMOTE_WORKSPACE_AGENT_BIN, provider
     )
+}
+
+fn hook_group(command: &str, matcher: Option<&str>) -> serde_json::Value {
+    let mut group = serde_json::Map::new();
+    if let Some(matcher) = matcher {
+        group.insert("matcher".to_string(), json!(matcher));
+    }
+    group.insert(
+        "hooks".to_string(),
+        json!([
+            {
+                "type": "command",
+                "command": command,
+            }
+        ]),
+    );
+    serde_json::Value::Object(group)
 }
 
 fn gh_hosts_yml(username: &str, token: &str) -> String {
@@ -1941,13 +1992,23 @@ mod tests {
         let codex = codex_hooks_json();
         let claude = claude_settings_json("opus", "high", true);
 
+        assert!(codex.contains("\"SessionStart\""));
+        assert!(codex.contains("\"PreToolUse\""));
+        assert!(codex.contains("\"PostToolUse\""));
         assert!(codex.contains("\"UserPromptSubmit\""));
         assert!(codex.contains("\"Stop\""));
+        assert!(codex.contains("\"matcher\":\"startup|resume\""));
+        assert!(codex.contains("\"matcher\":\"Bash\""));
         assert!(codex.contains("assistant-hook --provider codex"));
         assert!(codex.contains("--provider codex"));
         assert!(codex.contains("SILO_TERMINAL_ID"));
         assert!(codex.contains("SILO_WORKSPACE_AGENT_BIN"));
         assert!(claude.contains("\"hooks\""));
+        assert!(claude.contains("\"PermissionRequest\""));
+        assert!(claude.contains("\"SubagentStart\""));
+        assert!(claude.contains("\"TaskCompleted\""));
+        assert!(claude.contains("\"StopFailure\""));
+        assert!(claude.contains("\"ElicitationResult\""));
         assert!(claude.contains("assistant-hook --provider claude"));
         assert!(claude.contains("--provider claude"));
     }
@@ -2290,6 +2351,34 @@ mod tests {
         assert!(script.contains("brew update"));
         assert!(script.contains("brew install codex"));
         assert!(script.contains("https://claude.ai/install.sh"));
+    }
+
+    #[test]
+    fn workspace_assistant_config_sync_script_writes_hook_files() {
+        let script = workspace_assistant_config_sync_script(&WorkspaceBootstrap {
+            remote_url: "https://github.com/example/repo.git".to_string(),
+            target_branch: "main".to_string(),
+            workspace_branch: Some("feature/demo".to_string()),
+            gh_username: "octocat".to_string(),
+            gh_token: "gh-secret".to_string(),
+            codex_auth_json: "{\"tokens\":{\"refresh_token\":\"codex-secret\"}}".to_string(),
+            codex_auth_fingerprint: hex_sha256(b"codex-secret"),
+            codex_model: "gpt-5.4".to_string(),
+            codex_model_reasoning_effort: "xhigh".to_string(),
+            claude_token: "claude-secret".to_string(),
+            claude_model: "opus".to_string(),
+            claude_effort_level: "high".to_string(),
+            claude_always_thinking_enabled: true,
+            git_user_name: "Example User".to_string(),
+            git_user_email: "user@example.com".to_string(),
+            env_files: Vec::new(),
+        });
+
+        assert!(script.contains("$HOME/.codex/hooks.json"));
+        assert!(script.contains("$HOME/.claude/settings.json"));
+        assert!(script.contains("\"SessionStart\""));
+        assert!(script.contains("\"PermissionRequest\""));
+        assert!(script.contains("codex_hooks = true"));
     }
 
     #[test]

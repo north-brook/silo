@@ -11,7 +11,7 @@ use time::OffsetDateTime;
 
 use crate::args::{optional_flag_value, required_flag_value};
 use crate::daemon::state::{FileWatchState, ObserverEvent};
-use crate::runtime::{load_state, send_event, write_json_stdout, RuntimePaths};
+use crate::runtime::{load_state_or_default_if_missing, send_event, write_json_stdout, RuntimePaths};
 
 const WORKSPACE_ROOT: &str = "/home/silo/workspace";
 
@@ -128,7 +128,7 @@ pub(crate) fn run_files_sync_watch_set() -> Result<(), String> {
 }
 
 pub(crate) fn run_files_watch_state() -> Result<(), String> {
-    let state = load_state(&RuntimePaths::new().state_file).unwrap_or_default();
+    let state = load_state_or_default_if_missing(&RuntimePaths::new().state_file)?;
     let mut entries = state
         .files
         .watched

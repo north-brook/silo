@@ -4,8 +4,9 @@ use time::Duration as TimeDuration;
 
 use crate::assistant::observer_event_from_hook_input;
 use crate::daemon::state::{
-    apply_event, build_published_state, effective_activity_at, parse_timestamp, reconcile_sessions,
-    resolve_assistant_provider, sanitize_command_name, should_suspend_for_inactivity_at,
+    apply_event, apply_event_at, build_published_state, effective_activity_at, parse_timestamp,
+    reconcile_assistant_state_at, reconcile_sessions, resolve_assistant_provider,
+    sanitize_command_name, should_suspend_for_inactivity_at, AssistantEvent, AssistantEventKind,
     AssistantProvider, ObserverEvent, ObserverState, PublishedActiveSession, PublishedSession,
     PublishedState, SessionState, POLL_MISS_THRESHOLD_LIFECYCLE,
 };
@@ -26,11 +27,17 @@ fn assistant_hook_maps_prompt_submit() {
 
     assert!(matches!(
         event,
-        Some(ObserverEvent::AssistantPromptSubmitted {
+        Some(ObserverEvent::AssistantEvent {
             session,
             provider: AssistantProvider::Claude,
-            turn_id: None,
-        }) if session == "terminal-1"
+            event:
+                AssistantEvent {
+                    kind: AssistantEventKind::UserPromptSubmit,
+                    provider_session_id: Some(provider_session_id),
+                    turn_id: None,
+                    ..
+                },
+        }) if session == "terminal-1" && provider_session_id == "provider-session"
     ));
 }
 
@@ -44,11 +51,19 @@ fn assistant_hook_maps_stop() {
 
     assert!(matches!(
         event,
-        Some(ObserverEvent::AssistantTurnCompleted {
+        Some(ObserverEvent::AssistantEvent {
             session,
             provider: AssistantProvider::Codex,
-            turn_id: Some(turn_id),
-        }) if session == "terminal-1" && turn_id == "turn-1"
+            event:
+                AssistantEvent {
+                    kind: AssistantEventKind::Stop,
+                    provider_session_id: Some(provider_session_id),
+                    turn_id: Some(turn_id),
+                    ..
+                },
+        }) if session == "terminal-1"
+            && provider_session_id == "provider-session"
+            && turn_id == "turn-1"
     ));
 }
 
@@ -62,10 +77,15 @@ fn assistant_hook_maps_camel_case_prompt_submit_with_turn_id() {
 
     assert!(matches!(
         event,
-        Some(ObserverEvent::AssistantPromptSubmitted {
+        Some(ObserverEvent::AssistantEvent {
             session,
             provider: AssistantProvider::Codex,
-            turn_id: Some(turn_id),
+            event:
+                AssistantEvent {
+                    kind: AssistantEventKind::UserPromptSubmit,
+                    turn_id: Some(turn_id),
+                    ..
+                },
         }) if session == "terminal-1"
             && turn_id == "turn-1"
     ));
@@ -76,7 +96,7 @@ fn assistant_hook_ignores_unknown_events() {
     let event = observer_event_from_hook_input(
         "terminal-1",
         AssistantProvider::Codex,
-        r#"{"hook_event_name":"SessionStart"}"#,
+        r#"{"hook_event_name":"DefinitelyUnknown"}"#,
     );
 
     assert!(event.is_none());
@@ -396,6 +416,7 @@ fn reconcile_sessions_keeps_lifecycle_managed_session_on_transient_poll_miss() {
             unread: false,
             lifecycle_managed: true,
             poll_misses: 0,
+            ..SessionState::default()
         },
     );
 
@@ -426,6 +447,7 @@ fn reconcile_sessions_clears_finished_assistant_back_to_shell() {
             unread: false,
             lifecycle_managed: true,
             poll_misses: 0,
+            ..SessionState::default()
         },
     );
 
@@ -460,6 +482,7 @@ fn reconcile_sessions_drops_missing_idle_shell_session_quickly() {
             unread: true,
             lifecycle_managed: true,
             poll_misses: 0,
+            ..SessionState::default()
         },
     );
 
@@ -488,6 +511,7 @@ fn reconcile_sessions_preserves_running_command_without_live_cmd() {
             unread: false,
             lifecycle_managed: true,
             poll_misses: 0,
+            ..SessionState::default()
         },
     );
 
@@ -546,6 +570,7 @@ fn build_published_state_uses_agent_state_without_live_poll_data() {
             unread: false,
             lifecycle_managed: true,
             poll_misses: 2,
+            ..SessionState::default()
         },
     );
 
@@ -577,6 +602,7 @@ fn build_published_state_canonicalizes_assistant_proxy_session_names() {
             unread: true,
             lifecycle_managed: true,
             poll_misses: 0,
+            ..SessionState::default()
         },
     );
 
@@ -621,37 +647,44 @@ fn assistant_turn_completed_ignores_stale_turn_ids() {
 #[test]
 fn assistant_turn_completed_ignores_duplicate_turn_ids_after_mark_read() {
     let mut state = ObserverState::default();
+    let start = parse_timestamp("2026-03-14T00:00:00Z").expect("timestamp should parse");
 
-    apply_event(
+    apply_event_at(
         &mut state,
         ObserverEvent::AssistantPromptSubmitted {
             session: "terminal-1".to_string(),
             provider: AssistantProvider::Codex,
             turn_id: Some("turn-1".to_string()),
         },
+        start,
     );
-    apply_event(
+    apply_event_at(
         &mut state,
         ObserverEvent::AssistantTurnCompleted {
             session: "terminal-1".to_string(),
             provider: AssistantProvider::Codex,
             turn_id: Some("turn-1".to_string()),
         },
+        start + TimeDuration::seconds(1),
     );
-    apply_event(
+    reconcile_assistant_state_at(&mut state, start + TimeDuration::seconds(7));
+    apply_event_at(
         &mut state,
         ObserverEvent::MarkRead {
             session: "terminal-1".to_string(),
         },
+        start + TimeDuration::seconds(8),
     );
-    apply_event(
+    apply_event_at(
         &mut state,
         ObserverEvent::AssistantTurnCompleted {
             session: "terminal-1".to_string(),
             provider: AssistantProvider::Codex,
             turn_id: Some("turn-1".to_string()),
         },
+        start + TimeDuration::seconds(9),
     );
+    reconcile_assistant_state_at(&mut state, start + TimeDuration::seconds(15));
 
     let session = state
         .sessions
@@ -660,6 +693,182 @@ fn assistant_turn_completed_ignores_duplicate_turn_ids_after_mark_read() {
     assert!(!session.working);
     assert!(!session.unread);
     assert_eq!(session.completed_turn_id.as_deref(), Some("turn-1"));
+}
+
+#[test]
+fn codex_completion_waits_for_settle_window_before_unread() {
+    let mut state = ObserverState::default();
+    let start = parse_timestamp("2026-03-14T00:00:00Z").expect("timestamp should parse");
+
+    apply_event_at(
+        &mut state,
+        ObserverEvent::AssistantPromptSubmitted {
+            session: "terminal-1".to_string(),
+            provider: AssistantProvider::Codex,
+            turn_id: Some("turn-1".to_string()),
+        },
+        start,
+    );
+    apply_event_at(
+        &mut state,
+        ObserverEvent::AssistantTurnCompleted {
+            session: "terminal-1".to_string(),
+            provider: AssistantProvider::Codex,
+            turn_id: Some("turn-1".to_string()),
+        },
+        start + TimeDuration::seconds(1),
+    );
+
+    let session = state
+        .sessions
+        .get("terminal-1")
+        .expect("session should exist");
+    assert!(session.working);
+    assert!(!session.unread);
+
+    reconcile_assistant_state_at(&mut state, start + TimeDuration::seconds(5));
+    let session = state
+        .sessions
+        .get("terminal-1")
+        .expect("session should exist");
+    assert!(session.working);
+    assert!(!session.unread);
+
+    reconcile_assistant_state_at(&mut state, start + TimeDuration::seconds(6));
+    let session = state
+        .sessions
+        .get("terminal-1")
+        .expect("session should exist");
+    assert!(!session.working);
+    assert!(session.unread);
+}
+
+#[test]
+fn codex_nested_activity_defers_completion_until_quiet() {
+    let mut state = ObserverState::default();
+    let start = parse_timestamp("2026-03-14T00:00:00Z").expect("timestamp should parse");
+
+    apply_event_at(
+        &mut state,
+        ObserverEvent::AssistantEvent {
+            session: "terminal-1".to_string(),
+            provider: AssistantProvider::Codex,
+            event: AssistantEvent {
+                kind: AssistantEventKind::UserPromptSubmit,
+                provider_session_id: Some("root-session".to_string()),
+                turn_id: Some("turn-1".to_string()),
+                ..AssistantEvent::default()
+            },
+        },
+        start,
+    );
+    apply_event_at(
+        &mut state,
+        ObserverEvent::AssistantEvent {
+            session: "terminal-1".to_string(),
+            provider: AssistantProvider::Codex,
+            event: AssistantEvent {
+                kind: AssistantEventKind::Stop,
+                provider_session_id: Some("root-session".to_string()),
+                turn_id: Some("turn-1".to_string()),
+                ..AssistantEvent::default()
+            },
+        },
+        start + TimeDuration::seconds(1),
+    );
+    apply_event_at(
+        &mut state,
+        ObserverEvent::AssistantEvent {
+            session: "terminal-1".to_string(),
+            provider: AssistantProvider::Codex,
+            event: AssistantEvent {
+                kind: AssistantEventKind::PreToolUse,
+                provider_session_id: Some("nested-session".to_string()),
+                tool_name: Some("Bash".to_string()),
+                tool_call_id: Some("tool-1".to_string()),
+                ..AssistantEvent::default()
+            },
+        },
+        start + TimeDuration::seconds(2),
+    );
+
+    reconcile_assistant_state_at(&mut state, start + TimeDuration::seconds(8));
+    let session = state
+        .sessions
+        .get("terminal-1")
+        .expect("session should exist");
+    assert!(session.working);
+    assert!(!session.unread);
+
+    apply_event_at(
+        &mut state,
+        ObserverEvent::AssistantEvent {
+            session: "terminal-1".to_string(),
+            provider: AssistantProvider::Codex,
+            event: AssistantEvent {
+                kind: AssistantEventKind::PostToolUse,
+                provider_session_id: Some("nested-session".to_string()),
+                tool_name: Some("Bash".to_string()),
+                tool_call_id: Some("tool-1".to_string()),
+                ..AssistantEvent::default()
+            },
+        },
+        start + TimeDuration::seconds(9),
+    );
+    reconcile_assistant_state_at(&mut state, start + TimeDuration::seconds(9));
+
+    let session = state
+        .sessions
+        .get("terminal-1")
+        .expect("session should exist");
+    assert!(!session.working);
+    assert!(session.unread);
+}
+
+#[test]
+fn claude_attention_events_set_unread_without_working() {
+    let mut state = ObserverState::default();
+    let start = parse_timestamp("2026-03-14T00:00:00Z").expect("timestamp should parse");
+
+    apply_event_at(
+        &mut state,
+        ObserverEvent::AssistantEvent {
+            session: "terminal-1".to_string(),
+            provider: AssistantProvider::Claude,
+            event: AssistantEvent {
+                kind: AssistantEventKind::UserPromptSubmit,
+                provider_session_id: Some("claude-session".to_string()),
+                turn_id: Some("turn-1".to_string()),
+                ..AssistantEvent::default()
+            },
+        },
+        start,
+    );
+    apply_event_at(
+        &mut state,
+        ObserverEvent::AssistantEvent {
+            session: "terminal-1".to_string(),
+            provider: AssistantProvider::Claude,
+            event: AssistantEvent {
+                kind: AssistantEventKind::PermissionRequest,
+                provider_session_id: Some("claude-session".to_string()),
+                ..AssistantEvent::default()
+            },
+        },
+        start + TimeDuration::seconds(1),
+    );
+
+    let session = state
+        .sessions
+        .get("terminal-1")
+        .expect("session should exist");
+    assert!(!session.working);
+    assert!(session.unread);
+    assert!(session.attention_pending);
+    assert_eq!(
+        session.blocked_reason.as_deref(),
+        Some("permission_request")
+    );
 }
 
 #[test]

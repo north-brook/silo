@@ -91,10 +91,12 @@ fn build_workspace_agent() {
     let agent_manifest = agent_dir.join("Cargo.toml");
     let agent_lock = agent_dir.join("Cargo.lock");
     let agent_main = agent_dir.join("src/main.rs");
+    let agent_src = agent_dir.join("src");
 
     println!("cargo:rerun-if-changed={}", agent_manifest.display());
     println!("cargo:rerun-if-changed={}", agent_lock.display());
     println!("cargo:rerun-if-changed={}", agent_main.display());
+    println!("cargo:rerun-if-changed={}", agent_src.display());
     println!("cargo:rerun-if-env-changed=ZIG");
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("missing OUT_DIR for build script"));

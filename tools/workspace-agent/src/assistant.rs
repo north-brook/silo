@@ -1,28 +1,34 @@
 use std::env;
+use std::fs;
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::args::{optional_flag_value, required_flag_value};
-use crate::daemon::state::{AssistantProvider, ObserverEvent};
+use crate::daemon::state::{AssistantEvent, AssistantEventKind, AssistantProvider, ObserverEvent};
 use crate::runtime::{send_event, RuntimePaths};
 
 const DEFAULT_COLS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
 const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const CODEX_ROLLOUT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+const CODEX_ROLLOUT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 pub(crate) fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
     let provider = required_flag_value(args, "--provider")?;
     let provider = AssistantProvider::parse(provider)
         .ok_or_else(|| format!("unsupported assistant provider: {provider}"))?;
-    let command = build_wrapped_command(args)?;
+    let wrapped = build_wrapped_command(args)?;
+    let command = wrapped.command.clone();
 
     let session = env::var("ZMX_SESSION").unwrap_or_default();
     if session.trim().is_empty() {
@@ -76,6 +82,24 @@ pub(crate) fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
             provider,
         },
     )?;
+    if wrapped.has_initial_prompt {
+        send_synthetic_assistant_event(
+            &runtime,
+            &session,
+            provider,
+            AssistantEventKind::UserPromptSubmit,
+        )?;
+    }
+    let child_exited = Arc::new(AtomicBool::new(false));
+    let completion_reported = Arc::new(AtomicBool::new(false));
+    let initial_prompt_monitor = spawn_initial_prompt_monitor(
+        runtime.clone(),
+        session.clone(),
+        provider,
+        wrapped.initial_prompt.clone(),
+        Arc::clone(&child_exited),
+        Arc::clone(&completion_reported),
+    );
     let reader_done = Arc::new(AtomicBool::new(false));
     let reader_done_signal = Arc::clone(&reader_done);
     let reader_thread = thread::spawn(move || {
@@ -92,6 +116,20 @@ pub(crate) fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
     let status = child
         .wait()
         .map_err(|error| format!("assistant command wait failed: {error}"))?;
+    child_exited.store(true, Ordering::Relaxed);
+    if wrapped.has_initial_prompt {
+        let should_report_exit = completion_reported
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok();
+        if should_report_exit {
+            let kind = if status.exit_code() == 0 {
+                AssistantEventKind::Stop
+            } else {
+                AssistantEventKind::StopFailure
+            };
+            let _ = send_synthetic_assistant_event(&runtime, &session, provider, kind);
+        }
+    }
     drop(raw_mode);
     resize_stop.store(true, Ordering::Relaxed);
 
@@ -100,6 +138,9 @@ pub(crate) fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
     }
     let _ = reader_thread.join();
     let _ = resize_thread.join();
+    if let Some(monitor) = initial_prompt_monitor {
+        let _ = monitor.join();
+    }
 
     let code = status.exit_code();
     if code == 0 {
@@ -109,7 +150,14 @@ pub(crate) fn run_assistant_proxy(args: &[String]) -> Result<(), String> {
     process::exit(code as i32);
 }
 
-fn build_wrapped_command(args: &[String]) -> Result<Vec<String>, String> {
+#[derive(Debug)]
+struct WrappedAssistantCommand {
+    command: Vec<String>,
+    has_initial_prompt: bool,
+    initial_prompt: Option<String>,
+}
+
+fn build_wrapped_command(args: &[String]) -> Result<WrappedAssistantCommand, String> {
     let command_start = args
         .iter()
         .position(|arg| arg == "--")
@@ -127,14 +175,24 @@ fn build_wrapped_command(args: &[String]) -> Result<Vec<String>, String> {
         return Err("assistant-proxy requires a wrapped command".to_string());
     }
 
+    let has_initial_prompt = initial_prompt_argv || initial_prompt_file.is_some();
+    let mut prompt_text = None;
+    if initial_prompt_argv {
+        prompt_text = command.last().cloned();
+    }
     if let Some(path) = initial_prompt_file {
         let prompt = std::fs::read_to_string(path)
             .map_err(|error| format!("failed to read initial prompt file: {error}"))?;
         let _ = std::fs::remove_file(path);
+        prompt_text = Some(prompt.clone());
         command.push(prompt);
     }
 
-    Ok(command)
+    Ok(WrappedAssistantCommand {
+        command,
+        has_initial_prompt,
+        initial_prompt: prompt_text,
+    })
 }
 
 fn spawn_passthrough(command: Vec<String>) -> Result<(), String> {
@@ -304,18 +362,47 @@ pub(crate) fn observer_event_from_hook_input(
     input: &str,
 ) -> Option<ObserverEvent> {
     let hook = serde_json::from_str::<AssistantHookInput>(input).ok()?;
-    let turn_id = hook.turn_id.and_then(non_empty_string);
-    match hook.hook_event_name.as_str() {
-        "UserPromptSubmit" => Some(ObserverEvent::AssistantPromptSubmitted {
-            session: session.to_string(),
-            provider,
-            turn_id,
-        }),
-        "Stop" => Some(ObserverEvent::AssistantTurnCompleted {
-            session: session.to_string(),
-            provider,
-            turn_id,
-        }),
+    let kind = assistant_event_kind(&hook.hook_event_name)?;
+
+    Some(ObserverEvent::AssistantEvent {
+        session: session.to_string(),
+        provider,
+        event: AssistantEvent {
+            kind,
+            provider_session_id: hook.session_id.and_then(non_empty_string),
+            turn_id: hook.turn_id.and_then(non_empty_string),
+            tool_name: hook.tool_name.and_then(non_empty_string),
+            tool_call_id: hook.tool_use_id.and_then(non_empty_string),
+            notification_type: hook.notification_type.and_then(non_empty_string),
+            agent_id: hook.agent_id.and_then(non_empty_string),
+            agent_type: hook.agent_type.and_then(non_empty_string),
+            task_id: hook.task_id.and_then(non_empty_string),
+            compact_trigger: hook.trigger.and_then(non_empty_string),
+        },
+    })
+}
+
+fn assistant_event_kind(value: &str) -> Option<AssistantEventKind> {
+    match value {
+        "SessionStart" => Some(AssistantEventKind::SessionStart),
+        "UserPromptSubmit" => Some(AssistantEventKind::UserPromptSubmit),
+        "PreToolUse" => Some(AssistantEventKind::PreToolUse),
+        "PostToolUse" => Some(AssistantEventKind::PostToolUse),
+        "PostToolUseFailure" => Some(AssistantEventKind::PostToolUseFailure),
+        "PermissionRequest" => Some(AssistantEventKind::PermissionRequest),
+        "Notification" => Some(AssistantEventKind::Notification),
+        "SubagentStart" => Some(AssistantEventKind::SubagentStart),
+        "SubagentStop" => Some(AssistantEventKind::SubagentStop),
+        "TaskCreated" => Some(AssistantEventKind::TaskCreated),
+        "TaskCompleted" => Some(AssistantEventKind::TaskCompleted),
+        "Stop" => Some(AssistantEventKind::Stop),
+        "StopFailure" => Some(AssistantEventKind::StopFailure),
+        "TeammateIdle" => Some(AssistantEventKind::TeammateIdle),
+        "PreCompact" => Some(AssistantEventKind::PreCompact),
+        "PostCompact" => Some(AssistantEventKind::PostCompact),
+        "SessionEnd" => Some(AssistantEventKind::SessionEnd),
+        "Elicitation" => Some(AssistantEventKind::Elicitation),
+        "ElicitationResult" => Some(AssistantEventKind::ElicitationResult),
         _ => None,
     }
 }
@@ -331,12 +418,296 @@ fn assistant_agent_bin_path() -> Option<String> {
         })
 }
 
+fn send_synthetic_assistant_event(
+    runtime: &RuntimePaths,
+    session: &str,
+    provider: AssistantProvider,
+    kind: AssistantEventKind,
+) -> Result<(), String> {
+    send_event(
+        &runtime.fifo,
+        &ObserverEvent::AssistantEvent {
+            session: session.to_string(),
+            provider,
+            event: AssistantEvent {
+                kind,
+                ..AssistantEvent::default()
+            },
+        },
+    )
+}
+
+fn spawn_initial_prompt_monitor(
+    runtime: RuntimePaths,
+    session: String,
+    provider: AssistantProvider,
+    prompt: Option<String>,
+    child_exited: Arc<AtomicBool>,
+    completion_reported: Arc<AtomicBool>,
+) -> Option<thread::JoinHandle<()>> {
+    if provider != AssistantProvider::Codex {
+        return None;
+    }
+    let prompt = prompt?;
+    let launched_at = SystemTime::now();
+    Some(thread::spawn(move || {
+        monitor_codex_initial_prompt(
+            runtime,
+            session,
+            prompt,
+            launched_at,
+            child_exited,
+            completion_reported,
+        );
+    }))
+}
+
+fn monitor_codex_initial_prompt(
+    runtime: RuntimePaths,
+    session: String,
+    prompt: String,
+    launched_at: SystemTime,
+    child_exited: Arc<AtomicBool>,
+    completion_reported: Arc<AtomicBool>,
+) {
+    let discovery_deadline = launched_at
+        .checked_add(CODEX_ROLLOUT_DISCOVERY_TIMEOUT)
+        .unwrap_or(launched_at);
+    let mut matched_rollout: Option<PathBuf> = None;
+    let mut metadata_reported = false;
+
+    loop {
+        if child_exited.load(Ordering::Relaxed) || completion_reported.load(Ordering::Relaxed) {
+            return;
+        }
+
+        if matched_rollout.is_none() {
+            matched_rollout = find_matching_codex_rollout(&prompt, launched_at);
+            if matched_rollout.is_none() && SystemTime::now() >= discovery_deadline {
+                return;
+            }
+        }
+
+        if let Some(path) = matched_rollout.as_deref() {
+            let Some(status) = read_codex_rollout_status(path, &prompt) else {
+                thread::sleep(CODEX_ROLLOUT_POLL_INTERVAL);
+                continue;
+            };
+
+            if !metadata_reported {
+                if let Some(provider_session_id) = status.provider_session_id.clone() {
+                    let _ = send_event(
+                        &runtime.fifo,
+                        &ObserverEvent::AssistantEvent {
+                            session: session.clone(),
+                            provider: AssistantProvider::Codex,
+                            event: AssistantEvent {
+                                kind: AssistantEventKind::SessionStart,
+                                provider_session_id: Some(provider_session_id.clone()),
+                                ..AssistantEvent::default()
+                            },
+                        },
+                    );
+                    if let Some(turn_id) = status.started_turn_id.clone() {
+                        let _ = send_event(
+                            &runtime.fifo,
+                            &ObserverEvent::AssistantEvent {
+                                session: session.clone(),
+                                provider: AssistantProvider::Codex,
+                                event: AssistantEvent {
+                                    kind: AssistantEventKind::UserPromptSubmit,
+                                    provider_session_id: Some(provider_session_id),
+                                    turn_id: Some(turn_id),
+                                    ..AssistantEvent::default()
+                                },
+                            },
+                        );
+                    }
+                    metadata_reported = true;
+                }
+            }
+
+            if let Some(turn_id) = status.completed_turn_id {
+                if completion_reported
+                    .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    let _ = send_event(
+                        &runtime.fifo,
+                        &ObserverEvent::AssistantEvent {
+                            session: session.clone(),
+                            provider: AssistantProvider::Codex,
+                            event: AssistantEvent {
+                                kind: AssistantEventKind::Stop,
+                                provider_session_id: status.provider_session_id,
+                                turn_id: Some(turn_id),
+                                ..AssistantEvent::default()
+                            },
+                        },
+                    );
+                }
+                return;
+            }
+        }
+
+        thread::sleep(CODEX_ROLLOUT_POLL_INTERVAL);
+    }
+}
+
+#[derive(Debug, Default)]
+struct CodexRolloutStatus {
+    provider_session_id: Option<String>,
+    started_turn_id: Option<String>,
+    completed_turn_id: Option<String>,
+}
+
+fn find_matching_codex_rollout(prompt: &str, launched_at: SystemTime) -> Option<PathBuf> {
+    let root = env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".codex/sessions"))?;
+    if !root.is_dir() {
+        return None;
+    }
+
+    let cutoff = launched_at
+        .checked_sub(Duration::from_secs(10))
+        .unwrap_or(launched_at);
+    let mut candidates = Vec::new();
+    collect_recent_rollout_paths(&root, cutoff, &mut candidates);
+    candidates.sort_by(|left, right| right.cmp(left));
+    candidates
+        .into_iter()
+        .find(|path| read_codex_rollout_status(path, prompt).is_some())
+}
+
+fn collect_recent_rollout_paths(root: &Path, cutoff: SystemTime, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            collect_recent_rollout_paths(&path, cutoff, out);
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("rollout-") {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        if modified < cutoff {
+            continue;
+        }
+        out.push(path);
+    }
+}
+
+fn read_codex_rollout_status(path: &Path, prompt: &str) -> Option<CodexRolloutStatus> {
+    let contents = fs::read_to_string(path).ok()?;
+    let mut status = CodexRolloutStatus::default();
+    let mut prompt_matched = false;
+
+    for line in contents.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match value.get("type").and_then(Value::as_str) {
+            Some("session_meta") => {
+                status.provider_session_id = value
+                    .pointer("/payload/id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            Some("response_item") => {
+                let is_user_message = value.pointer("/payload/type").and_then(Value::as_str)
+                    == Some("message")
+                    && value.pointer("/payload/role").and_then(Value::as_str) == Some("user");
+                if !is_user_message {
+                    continue;
+                }
+                prompt_matched |= value
+                    .pointer("/payload/content")
+                    .and_then(extract_rollout_message_text)
+                    .is_some_and(|text| text.trim() == prompt.trim());
+            }
+            Some("event_msg") => match value.pointer("/payload/type").and_then(Value::as_str) {
+                Some("task_started") => {
+                    status.started_turn_id = value
+                        .pointer("/payload/turn_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                }
+                Some("task_complete") => {
+                    status.completed_turn_id = value
+                        .pointer("/payload/turn_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    prompt_matched.then_some(status)
+}
+
+fn extract_rollout_message_text(value: &Value) -> Option<String> {
+    let items = value.as_array()?;
+    let mut text = String::new();
+    for item in items {
+        let item_type = item.get("type").and_then(Value::as_str);
+        let item_text = item.get("text").and_then(Value::as_str);
+        if matches!(item_type, Some("input_text" | "output_text")) {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(item_text.unwrap_or_default());
+        }
+    }
+    (!text.trim().is_empty()).then_some(text)
+}
+
 #[derive(Debug, Deserialize)]
 struct AssistantHookInput {
     #[serde(default, alias = "hookEventName")]
     hook_event_name: String,
     #[serde(default, alias = "turnId")]
     turn_id: Option<String>,
+    #[serde(default, alias = "sessionId")]
+    session_id: Option<String>,
+    #[serde(default, alias = "toolName")]
+    tool_name: Option<String>,
+    #[serde(default, alias = "toolUseId")]
+    tool_use_id: Option<String>,
+    #[serde(default, alias = "notificationType")]
+    notification_type: Option<String>,
+    #[serde(default, alias = "agentId")]
+    agent_id: Option<String>,
+    #[serde(default, alias = "agentType")]
+    agent_type: Option<String>,
+    #[serde(default, alias = "taskId")]
+    task_id: Option<String>,
+    #[serde(default)]
+    trigger: Option<String>,
+    #[serde(flatten)]
+    _extra: std::collections::BTreeMap<String, Value>,
 }
 
 fn non_empty_string(value: String) -> Option<String> {
@@ -354,7 +725,7 @@ mod tests {
 
     #[test]
     fn build_wrapped_command_keeps_prompt_argv_passthrough() {
-        let command = build_wrapped_command(&proxy_args(&[
+        let wrapped = build_wrapped_command(&proxy_args(&[
             "--provider",
             "codex",
             "--initial-prompt-argv",
@@ -364,7 +735,12 @@ mod tests {
         ]))
         .expect("argv prompt command should parse");
 
-        assert_eq!(command, vec!["codex".to_string(), "ship it".to_string()]);
+        assert_eq!(
+            wrapped.command,
+            vec!["codex".to_string(), "ship it".to_string()]
+        );
+        assert!(wrapped.has_initial_prompt);
+        assert_eq!(wrapped.initial_prompt.as_deref(), Some("ship it"));
     }
 
     #[test]
@@ -373,7 +749,7 @@ mod tests {
             std::env::temp_dir().join(format!("assistant-proxy-prompt-{}.txt", std::process::id()));
         std::fs::write(&prompt_path, "ship it\nexplain why").expect("prompt file should write");
 
-        let command = build_wrapped_command(&proxy_args(&[
+        let wrapped = build_wrapped_command(&proxy_args(&[
             "--provider",
             "codex",
             "--initial-prompt-file",
@@ -384,10 +760,23 @@ mod tests {
         .expect("file prompt command should parse");
 
         assert_eq!(
-            command,
+            wrapped.command,
             vec!["codex".to_string(), "ship it\nexplain why".to_string()]
         );
+        assert!(wrapped.has_initial_prompt);
+        assert_eq!(wrapped.initial_prompt.as_deref(), Some("ship it\nexplain why"));
         assert!(!prompt_path.exists());
+    }
+
+    #[test]
+    fn build_wrapped_command_marks_plain_assistant_launch_without_initial_prompt() {
+        let wrapped =
+            build_wrapped_command(&proxy_args(&["--provider", "codex", "--", "codex"]))
+                .expect("plain assistant launch should parse");
+
+        assert_eq!(wrapped.command, vec!["codex".to_string()]);
+        assert!(!wrapped.has_initial_prompt);
+        assert!(wrapped.initial_prompt.is_none());
     }
 
     #[test]
@@ -407,5 +796,63 @@ mod tests {
             error,
             "assistant-proxy accepts only one initial prompt source"
         );
+    }
+
+    #[test]
+    fn read_codex_rollout_status_matches_prompt_and_turn_ids() {
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system time should be monotonic enough for test files")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "codex-rollout-{}-{nonce}.jsonl",
+            std::process::id(),
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"provider-session\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"ship it\"}]}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn-1\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-1\"}}\n"
+            ),
+        )
+        .expect("rollout file should write");
+
+        let status =
+            read_codex_rollout_status(&path, "ship it").expect("prompt should match rollout");
+        assert_eq!(
+            status.provider_session_id.as_deref(),
+            Some("provider-session")
+        );
+        assert_eq!(status.started_turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(status.completed_turn_id.as_deref(), Some("turn-1"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_codex_rollout_status_ignores_non_matching_prompt() {
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system time should be monotonic enough for test files")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "codex-rollout-miss-{}-{nonce}.jsonl",
+            std::process::id(),
+        ));
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"provider-session\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"different prompt\"}]}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-1\"}}\n"
+            ),
+        )
+        .expect("rollout file should write");
+
+        assert!(read_codex_rollout_status(&path, "ship it").is_none());
+
+        let _ = std::fs::remove_file(path);
     }
 }

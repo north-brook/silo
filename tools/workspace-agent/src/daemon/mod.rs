@@ -10,7 +10,8 @@ use crate::args::required_flag_value;
 use crate::files::observed_file_state;
 use crate::metadata::ComputeMetadataClient;
 use crate::runtime::{
-    acquire_pidfile, ensure_fifo, load_state, persist_state, spawn_fifo_reader, RuntimePaths,
+    acquire_pidfile, ensure_fifo, load_state_or_default_if_missing, persist_state,
+    spawn_fifo_reader, RuntimePaths,
 };
 
 use self::state::{
@@ -50,7 +51,13 @@ pub(crate) fn run_daemon(args: &[String]) -> Result<(), String> {
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     spawn_fifo_reader(runtime.fifo.clone(), event_tx.clone());
 
-    let mut state = load_state(&runtime.state_file).unwrap_or_default();
+    let mut state = match load_state_or_default_if_missing(&runtime.state_file) {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("workspace-agent: failed to load persisted state: {error}");
+            ObserverState::default()
+        }
+    };
     let mut last_published = None::<String>;
     let mut suspend_requested_for_activity = None::<String>;
     let metadata = ComputeMetadataClient::new(

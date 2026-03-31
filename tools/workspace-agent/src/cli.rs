@@ -12,7 +12,7 @@ use crate::files::{
     run_files_directory, run_files_read, run_files_sync_watch_set, run_files_tree,
     run_files_watch_state, run_files_write,
 };
-use crate::runtime::{load_state, send_event, write_json_stdout, RuntimePaths};
+use crate::runtime::{load_state_or_default_if_missing, send_event, write_json_stdout, RuntimePaths};
 
 pub(crate) fn run() -> Result<(), String> {
     let args = env::args().skip(1).collect::<Vec<_>>();
@@ -59,7 +59,7 @@ fn run_mark_read(args: &[String]) -> Result<(), String> {
 
 fn run_terminals() -> Result<(), String> {
     let runtime = RuntimePaths::new();
-    let mut state = load_state(&runtime.state_file).unwrap_or_default();
+    let mut state = load_state_or_default_if_missing(&runtime.state_file)?;
     if let Ok(live_sessions) = list_zmx_sessions() {
         reconcile_sessions(&mut state, &live_sessions);
     }
@@ -69,7 +69,7 @@ fn run_terminals() -> Result<(), String> {
 
 fn run_sessions_snapshot() -> Result<(), String> {
     let runtime = RuntimePaths::new();
-    let mut state = load_state(&runtime.state_file).unwrap_or_default();
+    let mut state = load_state_or_default_if_missing(&runtime.state_file)?;
     if let Ok(live_sessions) = list_zmx_sessions() {
         reconcile_sessions(&mut state, &live_sessions);
     }

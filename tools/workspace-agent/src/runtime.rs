@@ -48,9 +48,21 @@ impl RuntimePaths {
     }
 }
 
-pub(crate) fn load_state(path: &Path) -> Result<ObserverState, String> {
-    let contents = fs::read_to_string(path)
-        .map_err(|error| format!("failed to read state file {}: {error}", path.display()))?;
+fn load_state_contents(path: &Path) -> Result<Option<String>, String> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "failed to read state file {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+pub(crate) fn load_state_or_default_if_missing(path: &Path) -> Result<ObserverState, String> {
+    let Some(contents) = load_state_contents(path)? else {
+        return Ok(ObserverState::default());
+    };
     serde_json::from_str(&contents).map_err(|error| format!("invalid state json: {error}"))
 }
 
@@ -258,6 +270,7 @@ pub(crate) fn acquire_pidfile(path: &Path) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::state::{AssistantProvider, SessionState};
     use std::io::BufReader;
     use std::os::unix::fs::FileTypeExt;
     use std::thread;
@@ -344,5 +357,68 @@ mod tests {
             "mkfifo should succeed: {}",
             io::Error::last_os_error()
         );
+    }
+
+    #[test]
+    fn load_state_or_default_if_missing_defaults_when_state_file_is_absent() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be usable in tests")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("workspace-agent-state-missing-{unique}.json"));
+        let state = load_state_or_default_if_missing(&path).expect("missing state should default");
+        assert!(state.sessions.is_empty());
+        assert!(state.browsers.is_empty());
+        assert!(state.files_sessions.is_empty());
+    }
+
+    #[test]
+    fn load_state_or_default_if_missing_preserves_parse_errors() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be usable in tests")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("workspace-agent-state-invalid-{unique}.json"));
+        fs::write(&path, "{not-json").expect("invalid state fixture should write");
+
+        let error = load_state_or_default_if_missing(&path).expect_err("invalid json should fail");
+        assert!(error.contains("invalid state json"));
+
+        fs::remove_file(&path).expect("invalid state fixture should cleanup");
+    }
+
+    #[test]
+    fn load_state_or_default_if_missing_loads_existing_state() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be usable in tests")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("workspace-agent-state-valid-{unique}.json"));
+        let mut state = ObserverState::default();
+        state.sessions.insert(
+            "terminal-1".to_string(),
+            SessionState {
+                active_command: Some("codex".to_string()),
+                assistant_provider: Some(AssistantProvider::Codex),
+                ..SessionState::default()
+            },
+        );
+        fs::write(
+            &path,
+            serde_json::to_vec(&state).expect("state should serialize"),
+        )
+        .expect("valid state fixture should write");
+
+        let loaded =
+            load_state_or_default_if_missing(&path).expect("existing state should deserialize");
+        assert_eq!(
+            loaded
+                .sessions
+                .get("terminal-1")
+                .and_then(|session| session.active_command.as_deref()),
+            Some("codex")
+        );
+
+        fs::remove_file(&path).expect("valid state fixture should cleanup");
     }
 }
