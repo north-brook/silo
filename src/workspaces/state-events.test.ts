@@ -6,7 +6,9 @@ import type {
 } from "@/workspaces/api";
 import {
 	applyWorkspaceStateEventToWorkspace,
+	applyWorkspaceStateEventToWorkspaces,
 	removeWorkspaceSessionFromWorkspace,
+	replaceWorkspaceInWorkspaces,
 } from "@/workspaces/state-events";
 
 function session(
@@ -180,5 +182,54 @@ describe("removeWorkspaceSessionFromWorkspace", () => {
 		expect(next?.active_session).toEqual(current.active_session);
 		expect(next?.terminals).toEqual(current.terminals);
 		expect(next?.browsers).toEqual([]);
+	});
+});
+
+describe("applyWorkspaceStateEventToWorkspaces", () => {
+	test("updates the matching workspace in a cached collection", () => {
+		const current = [
+			workspace({
+				name: "alpha-silo",
+				lifecycle: { phase: "ready" },
+			}),
+			workspace({
+				name: "beta-silo",
+				lifecycle: { phase: "ready" },
+			}),
+		];
+
+		const next = applyWorkspaceStateEventToWorkspaces(current, {
+			workspace: "beta-silo",
+			clearedActiveSession: false,
+			lifecycle: {
+				phase: "bootstrapping",
+				detail: "Preparing repository",
+				last_error: null,
+				updated_at: "2026-03-23T00:00:00Z",
+			},
+		});
+
+		expect(next).not.toBe(current);
+		expect(next?.[0]).toBe(current[0]);
+		expect(next?.[1]?.lifecycle.phase).toBe("bootstrapping");
+	});
+});
+
+describe("replaceWorkspaceInWorkspaces", () => {
+	test("replaces the matching workspace without touching neighbors", () => {
+		const current = [
+			workspace({ name: "alpha-silo", lifecycle: { phase: "ready" } }),
+			workspace({ name: "beta-silo", lifecycle: { phase: "ready" } }),
+		];
+		const replacement = workspace({
+			name: "beta-silo",
+			lifecycle: { phase: "waiting_for_agent" },
+		});
+
+		const next = replaceWorkspaceInWorkspaces(current, replacement);
+
+		expect(next).not.toBe(current);
+		expect(next?.[0]).toBe(current[0]);
+		expect(next?.[1]).toEqual(replacement);
 	});
 });

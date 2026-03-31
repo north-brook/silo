@@ -9,10 +9,18 @@ import {
 	useMemo,
 } from "react";
 import { useNavigate } from "react-router-dom";
+import { getTemplateState, type TemplateState } from "@/projects/api";
+import { hotPollLogMode, invoke } from "@/shared/lib/invoke";
 import {
 	resolveForegroundPollInterval,
 	usePageIsForeground,
 } from "@/shared/lib/page-foreground";
+import {
+	type Workspace,
+	type WorkspaceSession,
+	workspaceIsReady,
+	workspaceSessions,
+} from "@/workspaces/api";
 import {
 	type BrowserStateEventPayload,
 	popupBrowserSessionHrefForEvent,
@@ -21,19 +29,12 @@ import {
 	type CloudSession,
 	normalizeWorkspaceSession,
 } from "@/workspaces/hosts/model";
-import { type TemplateState, getTemplateState } from "@/projects/api";
 import { useWorkspaceRouteParams } from "@/workspaces/routes/params";
-import { invoke } from "@/shared/lib/invoke";
 import {
 	applyWorkspaceStateEventToWorkspace,
+	replaceWorkspaceInWorkspaces,
 	type WorkspaceStateEventPayload,
 } from "@/workspaces/state-events";
-import {
-	type Workspace,
-	type WorkspaceSession,
-	workspaceIsReady,
-	workspaceSessions,
-} from "@/workspaces/api";
 
 interface WorkspaceStateContextValue {
 	workspaceName: string;
@@ -75,16 +76,16 @@ function WorkspaceStateProviderInner({
 				"workspaces_get_workspace",
 				{ workspace: workspaceName },
 				{
-					log: "state_changes_only",
+					log: hotPollLogMode(),
 					key: `poll:workspaces_get_workspace:${workspaceName}`,
 				},
 			),
 		enabled: !!workspaceName,
 		refetchInterval: resolveForegroundPollInterval({
-			activeMs: 2000,
+			activeMs: 30000,
 			enabled: !!workspaceName,
-			hiddenMs: 15000,
-			inactiveMs: 8000,
+			hiddenMs: 300000,
+			inactiveMs: 120000,
 			isForeground,
 		}),
 	});
@@ -159,20 +160,16 @@ function WorkspaceStateProviderInner({
 			unlisteners.push(nextUnlisten);
 		});
 
-		void listen<WorkspaceStateEventPayload>(
-			"workspace://state",
-			(event) => {
-				if (disposed || event.payload.workspace !== workspaceName) {
-					return;
-				}
-				queryClient.setQueryData<Workspace | null>(
-					["workspaces_get_workspace", workspaceName],
-					(current) =>
-						applyWorkspaceStateEventToWorkspace(current, event.payload) ?? null,
-				);
-				invalidateWorkspace();
-			},
-		).then((nextUnlisten) => {
+		void listen<WorkspaceStateEventPayload>("workspace://state", (event) => {
+			if (disposed || event.payload.workspace !== workspaceName) {
+				return;
+			}
+			queryClient.setQueryData<Workspace | null>(
+				["workspaces_get_workspace", workspaceName],
+				(current) =>
+					applyWorkspaceStateEventToWorkspace(current, event.payload) ?? null,
+			);
+		}).then((nextUnlisten) => {
 			if (disposed) {
 				void Promise.resolve(nextUnlisten()).catch(() => {});
 				return;
@@ -184,13 +181,17 @@ function WorkspaceStateProviderInner({
 			disposed = true;
 			disposeListeners();
 		};
-	}, [
-		invalidateWorkspace,
-		navigate,
-		projectParam,
-		queryClient,
-		workspaceName,
-	]);
+	}, [invalidateWorkspace, navigate, projectParam, queryClient, workspaceName]);
+
+	useEffect(() => {
+		if (!workspaceQuery.data) {
+			return;
+		}
+		queryClient.setQueryData<Workspace[]>(
+			["workspaces_list_workspaces"],
+			(current) => replaceWorkspaceInWorkspaces(current, workspaceQuery.data),
+		);
+	}, [queryClient, workspaceQuery.data]);
 
 	const workspace = workspaceQuery.data ?? null;
 	const isMissing =

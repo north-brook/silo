@@ -94,6 +94,10 @@ export function initializeFrontendLogging() {
 	);
 }
 
+export function hotPollLogMode() {
+	return import.meta.env.DEV ? "state_changes_only" : "errors_only";
+}
+
 export function invoke<T>(command: string): Promise<T>;
 export function invoke<T>(
 	command: string,

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
 	Box,
 	ChevronDown,
@@ -32,7 +33,7 @@ import {
 } from "@/projects/api";
 import { useNewWorkspace } from "@/projects/sidebar/new-workspace";
 import { useOpenProject } from "@/projects/sidebar/open-project";
-import { invoke } from "@/shared/lib/invoke";
+import { hotPollLogMode, invoke } from "@/shared/lib/invoke";
 import {
 	resolveForegroundPollInterval,
 	usePageIsForeground,
@@ -58,6 +59,10 @@ import {
 	type WorkspaceRouteState,
 	workspaceHref,
 } from "@/workspaces/routes/paths";
+import {
+	applyWorkspaceStateEventToWorkspaces,
+	type WorkspaceStateEventPayload,
+} from "@/workspaces/state-events";
 
 // ---------------------------------------------------------------------------
 // Context
@@ -843,14 +848,14 @@ export function ProjectsSidebar() {
 		queryKey: ["workspaces_list_workspaces"],
 		queryFn: () =>
 			invoke<Workspace[]>("workspaces_list_workspaces", {
-				log: "state_changes_only",
+				log: hotPollLogMode(),
 				key: "poll:workspaces_list_workspaces",
 			}),
 		refetchInterval: resolveForegroundPollInterval({
 			active: isOpen,
-			activeMs: 2000,
-			hiddenMs: 20000,
-			inactiveMs: 10000,
+			activeMs: 30000,
+			hiddenMs: 300000,
+			inactiveMs: 120000,
 			isForeground,
 		}),
 	});
@@ -875,6 +880,35 @@ export function ProjectsSidebar() {
 	const [metaKeyHeld, setMetaKeyHeld] = useState(false);
 
 	const prevUnreadRef = useRef<Set<string> | null>(null);
+
+	useEffect(() => {
+		let disposed = false;
+		let unlisten: null | (() => void | Promise<void>) = null;
+
+		void listen<WorkspaceStateEventPayload>("workspace://state", (event) => {
+			if (disposed) {
+				return;
+			}
+			queryClient.setQueryData<Workspace[]>(
+				["workspaces_list_workspaces"],
+				(current) =>
+					applyWorkspaceStateEventToWorkspaces(current, event.payload),
+			);
+		}).then((nextUnlisten) => {
+			if (disposed) {
+				void Promise.resolve(nextUnlisten()).catch(() => {});
+				return;
+			}
+			unlisten = nextUnlisten;
+		});
+
+		return () => {
+			disposed = true;
+			if (unlisten) {
+				void Promise.resolve(unlisten()).catch(() => {});
+			}
+		};
+	}, [queryClient]);
 
 	useEffect(() => {
 		if (!workspaces.data) return;

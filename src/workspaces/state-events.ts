@@ -1,9 +1,9 @@
 import {
 	isTemplateWorkspace,
-	type WorkspaceLifecycle,
-	type WorkspaceTemplateOperationState,
 	type Workspace,
+	type WorkspaceLifecycle,
 	type WorkspaceSession,
+	type WorkspaceTemplateOperationState,
 } from "@/workspaces/api";
 
 export interface WorkspaceStateEventPayload {
@@ -117,6 +117,56 @@ export function applyWorkspaceStateEventToWorkspace(
 		unread: nextUnread,
 		working: nextWorking,
 	};
+}
+
+export function applyWorkspaceStateEventToWorkspaces(
+	current: Workspace[] | undefined,
+	event: WorkspaceStateEventPayload,
+): Workspace[] | undefined {
+	if (!current) {
+		return current;
+	}
+
+	let changed = false;
+	const next = current.map((workspace) => {
+		if (workspace.name !== event.workspace) {
+			return workspace;
+		}
+
+		const updated = applyWorkspaceStateEventToWorkspace(workspace, event);
+		if (!updated || updated === workspace) {
+			return workspace;
+		}
+
+		changed = true;
+		return updated;
+	});
+
+	return changed ? next : current;
+}
+
+export function replaceWorkspaceInWorkspaces(
+	current: Workspace[] | undefined,
+	nextWorkspace: Workspace | null | undefined,
+): Workspace[] | undefined {
+	if (!current || !nextWorkspace) {
+		return current;
+	}
+
+	let changed = false;
+	const next = current.map((workspace) => {
+		if (workspace.name !== nextWorkspace.name) {
+			return workspace;
+		}
+		if (workspace === nextWorkspace) {
+			return workspace;
+		}
+
+		changed = true;
+		return nextWorkspace;
+	});
+
+	return changed ? next : current;
 }
 
 export function removeWorkspaceSessionFromWorkspace(

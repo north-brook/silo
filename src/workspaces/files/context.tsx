@@ -310,17 +310,46 @@ export function FileSessionsProvider({ children }: { children: ReactNode }) {
 			).sort(),
 		[displaySessions],
 	);
+	const watchedPathsSyncRef = useRef<{
+		pendingKey: null | string;
+		syncedKey: null | string;
+	}>({
+		pendingKey: null,
+		syncedKey: null,
+	});
 	useEffect(() => {
 		if (!workspaceName) {
+			watchedPathsSyncRef.current = {
+				pendingKey: null,
+				syncedKey: null,
+			};
 			return;
 		}
-		void filesSetWatchedPaths(workspaceName, watchedPaths).catch((error) => {
-			console.error("failed to sync watched file paths", {
-				workspace: workspaceName,
-				error,
-				paths: watchedPaths,
+		const nextKey = `${workspaceName}\u0000${watchedPaths.join("\u0000")}`;
+		if (
+			watchedPathsSyncRef.current.syncedKey === nextKey ||
+			watchedPathsSyncRef.current.pendingKey === nextKey
+		) {
+			return;
+		}
+		watchedPathsSyncRef.current.pendingKey = nextKey;
+		void filesSetWatchedPaths(workspaceName, watchedPaths)
+			.then(() => {
+				if (watchedPathsSyncRef.current.pendingKey === nextKey) {
+					watchedPathsSyncRef.current.pendingKey = null;
+				}
+				watchedPathsSyncRef.current.syncedKey = nextKey;
+			})
+			.catch((error) => {
+				if (watchedPathsSyncRef.current.pendingKey === nextKey) {
+					watchedPathsSyncRef.current.pendingKey = null;
+				}
+				console.error("failed to sync watched file paths", {
+					workspace: workspaceName,
+					error,
+					paths: watchedPaths,
+				});
 			});
-		});
 	}, [workspaceName, watchedPaths]);
 
 	const watchedStateQuery = useQuery({

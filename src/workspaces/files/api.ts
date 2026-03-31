@@ -1,4 +1,4 @@
-import { invoke } from "@/shared/lib/invoke";
+import { hotPollLogMode, invoke } from "@/shared/lib/invoke";
 import { filePathOpensInBrowser } from "@/workspaces/files/browser";
 
 export interface FileTreeEntry {
@@ -56,7 +56,7 @@ export function filesListTree(workspace: string): Promise<FileTreeEntry[]> {
 		"files_list_tree",
 		{ workspace },
 		{
-			log: "state_changes_only",
+			log: hotPollLogMode(),
 			key: `poll:files_list_tree:${workspace}`,
 		},
 	);
@@ -70,7 +70,7 @@ export function filesListDirectory(
 		"files_list_directory",
 		path ? { workspace, path } : { workspace },
 		{
-			log: "state_changes_only",
+			log: hotPollLogMode(),
 			key: `poll:files_list_directory:${workspace}:${path ?? ""}`,
 		},
 	);
@@ -84,7 +84,7 @@ export function filesRead(
 		"files_read",
 		{ workspace, path },
 		{
-			log: "state_changes_only",
+			log: hotPollLogMode(),
 			key: `poll:files_read:${workspace}:${path}`,
 		},
 	);
@@ -108,10 +108,16 @@ export function filesSetWatchedPaths(
 	workspace: string,
 	paths: string[],
 ): Promise<void> {
-	return invoke<void>("files_set_watched_paths", {
-		workspace,
-		paths,
-	});
+	return invoke<void>(
+		"files_set_watched_paths",
+		{
+			workspace,
+			paths,
+		},
+		{
+			log: "errors_only",
+		},
+	);
 }
 
 export function filesGetWatchedState(
@@ -121,7 +127,7 @@ export function filesGetWatchedState(
 		"files_get_watched_state",
 		{ workspace },
 		{
-			log: "state_changes_only",
+			log: hotPollLogMode(),
 			key: `poll:files_get_watched_state:${workspace}`,
 		},
 	);
