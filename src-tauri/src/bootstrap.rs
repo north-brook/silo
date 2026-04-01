@@ -480,6 +480,31 @@ fn workspace_needs_agent_update(workspace: &Workspace) -> bool {
     workspace.agent_fingerprint() != Some(expected.as_str())
 }
 
+fn workspace_has_stale_agent_update_state(workspace: &Workspace) -> bool {
+    let expected = workspace_agent_fingerprint();
+    workspace_has_stale_agent_update_state_with_expected(
+        workspace.status(),
+        workspace.lifecycle().phase(),
+        workspace.agent_fingerprint(),
+        expected.as_str(),
+    )
+}
+
+fn workspace_has_stale_agent_update_state_with_expected(
+    status: &str,
+    phase: &str,
+    agent_fingerprint: Option<&str>,
+    expected_fingerprint: &str,
+) -> bool {
+    status == "RUNNING"
+        && phase == "updating_workspace_agent"
+        && agent_fingerprint == Some(expected_fingerprint)
+}
+
+fn workspace_agent_update_reconcile_needed(workspace: &Workspace) -> bool {
+    workspace_needs_agent_update(workspace) || workspace_has_stale_agent_update_state(workspace)
+}
+
 pub(crate) fn start_release_workspace_agent_rollout_if_needed(
     app_handle: tauri::AppHandle<AppRuntime>,
 ) {
@@ -510,7 +535,7 @@ pub(crate) fn start_release_workspace_agent_rollout_if_needed(
             Ok(workspaces) => {
                 let mut pending_updates = 0usize;
                 for workspace in workspaces {
-                    if workspace_needs_agent_update(&workspace) {
+                    if workspace_agent_update_reconcile_needed(&workspace) {
                         pending_updates += 1;
                     }
                     start_workspace_agent_update_reconcile_if_needed(workspace);
@@ -544,7 +569,7 @@ pub(crate) fn start_workspace_agent_update_reconcile_if_needed(workspace: Worksp
     if !build_info::is_production_build() || !gcp::runtime_identity_configured() {
         return;
     }
-    if !workspace_needs_agent_update(&workspace) {
+    if !workspace_agent_update_reconcile_needed(&workspace) {
         return;
     }
 
@@ -601,6 +626,9 @@ async fn reconcile_workspace_agent_update(workspace: &str, attempt_id: u64) -> R
 
     let expected_fingerprint = workspace_agent_fingerprint();
     if lookup.workspace.agent_fingerprint() == Some(expected_fingerprint.as_str()) {
+        if lookup.workspace.lifecycle().phase() == "updating_workspace_agent" {
+            wait_for_workspace_agent(workspace, Some(expected_fingerprint.as_str())).await?;
+        }
         if let Some(manager) = workspace_metadata_manager() {
             manager.enqueue_workspace_lifecycle(
                 workspace,
@@ -627,8 +655,18 @@ async fn reconcile_workspace_agent_update(workspace: &str, attempt_id: u64) -> R
 
     wait_for_workspace_ssh(&lookup).await?;
 
-    let bootstrap = workspace_bootstrap(&lookup)?;
-    let install_script = workspace_agent_update_script(&lookup, &bootstrap);
+    let bootstrap = match workspace_bootstrap(&lookup) {
+        Ok(bootstrap) => Some(bootstrap),
+        Err(error) => {
+            log::warn!(
+                "skipping assistant config sync during workspace agent update for {}: {}",
+                lookup.workspace.name(),
+                error
+            );
+            None
+        }
+    };
+    let install_script = workspace_agent_update_script(&lookup, bootstrap.as_ref());
     let install_result = run_remote_command_with_stdin(
         &lookup,
         &run_terminal_user_command("bash -se"),
@@ -1526,14 +1564,31 @@ fn workspace_agent_install_script(lookup: &WorkspaceLookup) -> String {
 
 fn workspace_agent_update_script(
     lookup: &WorkspaceLookup,
-    bootstrap: &WorkspaceBootstrap,
+    bootstrap: Option<&WorkspaceBootstrap>,
 ) -> String {
+    workspace_agent_update_script_for_target(
+        lookup.workspace.name(),
+        &lookup.gcloud_project,
+        lookup.workspace.zone(),
+        bootstrap,
+    )
+}
+
+fn workspace_agent_update_script_for_target(
+    instance: &str,
+    project: &str,
+    zone: &str,
+    bootstrap: Option<&WorkspaceBootstrap>,
+) -> String {
+    let assistant_config_sync = bootstrap
+        .map(workspace_assistant_config_sync_script)
+        .unwrap_or_default();
     format!(
         "set -euo pipefail\n\
 {assistant_config_sync}\
 {agent_install}",
-        assistant_config_sync = workspace_assistant_config_sync_script(bootstrap),
-        agent_install = workspace_agent_install_script(lookup),
+        assistant_config_sync = assistant_config_sync,
+        agent_install = workspace_agent_install_script_for_target(instance, project, zone),
     )
 }
 
@@ -2122,6 +2177,36 @@ mod tests {
     }
 
     #[test]
+    fn stale_agent_update_state_requires_running_workspace() {
+        assert!(!workspace_has_stale_agent_update_state_with_expected(
+            "TERMINATED",
+            "updating_workspace_agent",
+            Some("fingerprint"),
+            "fingerprint",
+        ));
+    }
+
+    #[test]
+    fn stale_agent_update_state_requires_matching_fingerprint() {
+        assert!(!workspace_has_stale_agent_update_state_with_expected(
+            "RUNNING",
+            "updating_workspace_agent",
+            Some("old-fingerprint"),
+            "new-fingerprint",
+        ));
+    }
+
+    #[test]
+    fn stale_agent_update_state_detects_expected_fingerprint_stuck_updating() {
+        assert!(workspace_has_stale_agent_update_state_with_expected(
+            "RUNNING",
+            "updating_workspace_agent",
+            Some("fingerprint"),
+            "fingerprint",
+        ));
+    }
+
+    #[test]
     fn workspace_bootstrap_state_write_script_persists_boot_id_and_signature() {
         let script = workspace_bootstrap_state_write_script();
 
@@ -2271,6 +2356,54 @@ mod tests {
         assert!(script.contains("model = \"gpt-5.4\""));
         assert!(script.contains("\"model\":\"opus\""));
         assert!(!script.contains("codex_hooks = true"));
+    }
+
+    #[test]
+    fn workspace_agent_update_script_skips_assistant_config_when_bootstrap_is_unavailable() {
+        let script = workspace_agent_update_script_for_target(
+            "demo-silo-feature",
+            "silo-489618",
+            "us-east4-c",
+            None,
+        );
+
+        assert!(script.starts_with("set -euo pipefail\n"));
+        assert!(script.contains("EOF_AGENT_BIN"));
+        assert!(!script.contains("$HOME/.codex/config.toml"));
+        assert!(!script.contains("$HOME/.claude/settings.json"));
+    }
+
+    #[test]
+    fn workspace_agent_update_script_includes_assistant_config_when_bootstrap_is_available() {
+        let bootstrap = WorkspaceBootstrap {
+            remote_url: "https://github.com/example/repo.git".to_string(),
+            target_branch: "main".to_string(),
+            workspace_branch: Some("feature/demo".to_string()),
+            gh_username: "octocat".to_string(),
+            gh_token: "gh-secret".to_string(),
+            codex_auth_json: "{\"tokens\":{\"refresh_token\":\"codex-secret\"}}".to_string(),
+            codex_auth_fingerprint: hex_sha256(b"codex-secret"),
+            codex_model: "gpt-5.4".to_string(),
+            codex_model_reasoning_effort: "xhigh".to_string(),
+            claude_token: "claude-secret".to_string(),
+            claude_model: "opus".to_string(),
+            claude_effort_level: "high".to_string(),
+            claude_always_thinking_enabled: true,
+            git_user_name: "Example User".to_string(),
+            git_user_email: "user@example.com".to_string(),
+            env_files: Vec::new(),
+        };
+
+        let script = workspace_agent_update_script_for_target(
+            "demo-silo-feature",
+            "silo-489618",
+            "us-east4-c",
+            Some(&bootstrap),
+        );
+
+        assert!(script.contains("$HOME/.codex/config.toml"));
+        assert!(script.contains("$HOME/.claude/settings.json"));
+        assert!(script.contains("EOF_AGENT_BIN"));
     }
 
     #[test]
