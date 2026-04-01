@@ -30,8 +30,11 @@ const MAX_ATTACHMENT_RECENT_OUTPUT_BYTES: usize = 16 * 1024;
 const MAX_ATTACHMENT_PENDING_OUTPUT_BYTES: usize = 512 * 1024;
 const DEFAULT_TRANSCRIPT_TAIL_BYTES: usize = 128 * 1024;
 const ATTACH_COMMAND_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+const ATTACH_COMMAND_READY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const ATTACH_RESERVATION_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const ATTACH_RESERVATION_WAIT_INTERVAL: Duration = Duration::from_millis(50);
+const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
+const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1118,17 +1121,39 @@ fn mark_attachment_connected(attachment: &Attachment) {
 }
 
 fn queue_attach_command(attachment: Arc<Attachment>, command: String) {
-    let data = terminal_command_bytes(&command);
+    let data = startup_command_bytes(&command);
     if data.is_empty() {
         return;
     }
 
     std::thread::spawn(move || {
+        let deadline = Instant::now() + ATTACH_COMMAND_WAIT_TIMEOUT;
         if let Ok(connected) = attachment.connected.lock() {
             let _ = attachment.connected_cv.wait_timeout_while(
                 connected,
                 ATTACH_COMMAND_WAIT_TIMEOUT,
                 |is_connected| !*is_connected,
+            );
+        }
+
+        let mut ready = false;
+        while Instant::now() < deadline {
+            let recent_output = attachment
+                .recent_output
+                .lock()
+                .map(|buffer| buffer.clone())
+                .unwrap_or_default();
+            if startup_command_ready(&recent_output) {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(ATTACH_COMMAND_READY_POLL_INTERVAL);
+        }
+
+        if !ready {
+            log::debug!(
+                "sending startup command before prompt readiness was confirmed attachment_id={}",
+                attachment.key.name
             );
         }
 
@@ -1489,6 +1514,7 @@ fn is_missing_terminal_session_error(stderr: &str) -> bool {
         || lower.contains("unknown session")
 }
 
+#[cfg(test)]
 fn terminal_command_bytes(command: &str) -> Vec<u8> {
     if command.is_empty() {
         return Vec::new();
@@ -1499,6 +1525,83 @@ fn terminal_command_bytes(command: &str) -> Vec<u8> {
         data.push(b'\n');
     }
     data
+}
+
+fn startup_command_bytes(command: &str) -> Vec<u8> {
+    let command = command.trim_end_matches(['\r', '\n']);
+    if command.is_empty() {
+        return Vec::new();
+    }
+
+    let mut data = bracketed_paste_bytes(command.as_bytes());
+    data.push(b'\n');
+    data
+}
+
+fn bracketed_paste_bytes(data: &[u8]) -> Vec<u8> {
+    let mut wrapped =
+        Vec::with_capacity(BRACKETED_PASTE_START.len() + data.len() + BRACKETED_PASTE_END.len());
+    wrapped.extend_from_slice(BRACKETED_PASTE_START);
+    wrapped.extend_from_slice(data);
+    wrapped.extend_from_slice(BRACKETED_PASTE_END);
+    wrapped
+}
+
+fn startup_command_ready(recent_output: &[u8]) -> bool {
+    if recent_output.is_empty() {
+        return false;
+    }
+
+    let raw = String::from_utf8_lossy(recent_output);
+    if raw.contains("\u{1b}[?2004h") {
+        return true;
+    }
+
+    let stripped = strip_terminal_control_sequences(&raw);
+    let normalized = stripped.replace('\r', "");
+    let last_line = normalized.lines().last().map(str::trim).unwrap_or_default();
+
+    !last_line.is_empty()
+        && (last_line.starts_with('➜')
+            || last_line.ends_with('$')
+            || last_line.ends_with('%')
+            || last_line.ends_with('#'))
+}
+
+fn strip_terminal_control_sequences(text: &str) -> String {
+    let mut stripped = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            if ch != '\u{7}' {
+                stripped.push(ch);
+            }
+            continue;
+        }
+
+        match chars.next() {
+            Some('[') => {
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                let mut previous_was_escape = false;
+                for next in chars.by_ref() {
+                    if next == '\u{7}' || (previous_was_escape && next == '\\') {
+                        break;
+                    }
+                    previous_was_escape = next == '\u{1b}';
+                }
+            }
+            Some(_) | None => {}
+        }
+    }
+
+    stripped
 }
 
 #[cfg(test)]
@@ -1600,6 +1703,38 @@ mod tests {
         assert_eq!(terminal_command_bytes("pwd"), b"pwd\n");
         assert_eq!(terminal_command_bytes("pwd\n"), b"pwd\n");
         assert!(terminal_command_bytes("").is_empty());
+    }
+
+    #[test]
+    fn startup_command_bytes_wraps_command_as_bracketed_paste() {
+        assert_eq!(
+            startup_command_bytes("echo ready"),
+            b"\x1b[200~echo ready\x1b[201~\n"
+        );
+        assert_eq!(
+            startup_command_bytes("echo ready\n"),
+            b"\x1b[200~echo ready\x1b[201~\n"
+        );
+        assert!(startup_command_bytes("").is_empty());
+    }
+
+    #[test]
+    fn startup_command_ready_accepts_bracketed_paste_prompt_signal() {
+        assert!(startup_command_ready(b"\x1b[?2004h"));
+    }
+
+    #[test]
+    fn startup_command_ready_accepts_plain_prompt_markers() {
+        assert!(startup_command_ready(b"\r\n$ "));
+        assert!(startup_command_ready("➜  workspace git:(main) ".as_bytes()));
+    }
+
+    #[test]
+    fn startup_command_ready_rejects_non_prompt_output() {
+        assert!(!startup_command_ready(b""));
+        assert!(!startup_command_ready(
+            b"\x1b]2;silo@git-jazz:~/workspace\x07starting attach"
+        ));
     }
 
     #[test]
@@ -1777,6 +1912,52 @@ mod tests {
         assert_eq!(sessions[0].attachment_id, "terminal-1");
         assert_eq!(sessions[0].working, Some(true));
         assert_eq!(sessions[0].unread, Some(false));
+    }
+
+    #[test]
+    fn queue_attach_command_writes_bracketed_paste_after_prompt_ready() {
+        let written = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = SharedBufferWriter(Arc::clone(&written));
+        let attachment = Arc::new(Attachment {
+            app: None,
+            id: "att-1".to_string(),
+            key: AttachmentKey {
+                workspace: "ws".to_string(),
+                name: "dev".to_string(),
+            },
+            master: Mutex::new(
+                native_pty_system()
+                    .openpty(PtySize::default())
+                    .expect("pty")
+                    .master,
+            ),
+            writer: Mutex::new(Box::new(writer)),
+            killer: Mutex::new(Box::new(NoopKiller)),
+            output_state: Mutex::new(AttachmentOutputState {
+                channel: Channel::new(|_| Ok(())),
+                ready: false,
+                pending: Vec::new(),
+            }),
+            window_label: Mutex::new("main".to_string()),
+            recent_output: Mutex::new(b"\x1b[?2004h".to_vec()),
+            connected: Mutex::new(true),
+            connected_cv: Condvar::new(),
+        });
+
+        queue_attach_command(attachment, "echo hi".to_string());
+
+        let started = Instant::now();
+        loop {
+            if written.lock().expect("written bytes lock").as_slice()
+                == b"\x1b[200~echo hi\x1b[201~\n"
+            {
+                break;
+            }
+            if started.elapsed() > Duration::from_secs(1) {
+                panic!("queued attach command should be written");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -2016,6 +2197,22 @@ mod tests {
 
     #[derive(Debug)]
     struct NoopKiller;
+
+    struct SharedBufferWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedBufferWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("shared writer lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     impl ChildKiller for NoopKiller {
         fn kill(&mut self) -> std::io::Result<()> {
