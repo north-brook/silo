@@ -20,6 +20,11 @@ import {
 	STALE_ATTACHMENT_RECONNECT_MESSAGE,
 	STALE_ATTACHMENT_RESUME_NOTICE,
 } from "./recovery";
+import {
+	TERMINAL_ASSISTANT_COMPLETION_REFRESH_DELAY_MS,
+	TERMINAL_COMMAND_STATE_REFRESH_DELAY_MS,
+	terminalInputContainsSubmit,
+} from "./refresh";
 import { assistantTerminalModel } from "./session";
 
 const DELETE_BYTE = 0x7f;
@@ -227,6 +232,8 @@ export function TerminalSessionHost({
 	const attachQueuedRef = useRef(false);
 	const attachSizeRef = useRef<TerminalSize | null>(null);
 	const retryNonceRef = useRef(retryNonce);
+	const commandStateRefreshTimerRef = useRef<number | null>(null);
+	const assistantCompletionRefreshTimerRef = useRef<number | null>(null);
 	const isAssistantSessionRef = useRef(
 		assistantTerminalModel(session.name) != null,
 	);
@@ -250,6 +257,49 @@ export function TerminalSessionHost({
 			reconnectTimeoutRef.current = null;
 		}
 	}, []);
+
+	const clearWorkspaceRefreshTimers = useCallback(() => {
+		if (commandStateRefreshTimerRef.current !== null) {
+			window.clearTimeout(commandStateRefreshTimerRef.current);
+			commandStateRefreshTimerRef.current = null;
+		}
+		if (assistantCompletionRefreshTimerRef.current !== null) {
+			window.clearTimeout(assistantCompletionRefreshTimerRef.current);
+			assistantCompletionRefreshTimerRef.current = null;
+		}
+	}, []);
+
+	const invalidateWorkspaceSoon = useCallback(
+		(delayMs: number, timerRef: { current: number | null }) => {
+			if (timerRef.current !== null) {
+				window.clearTimeout(timerRef.current);
+			}
+			timerRef.current = window.setTimeout(() => {
+				timerRef.current = null;
+				if (hostUnmountedRef.current) {
+					return;
+				}
+				void queryClient.invalidateQueries({
+					queryKey: ["workspaces_get_workspace", session.workspace],
+				});
+			}, delayMs);
+		},
+		[queryClient, session.workspace],
+	);
+
+	const scheduleCommandStateRefresh = useCallback(() => {
+		invalidateWorkspaceSoon(
+			TERMINAL_COMMAND_STATE_REFRESH_DELAY_MS,
+			commandStateRefreshTimerRef,
+		);
+	}, [invalidateWorkspaceSoon]);
+
+	const scheduleAssistantCompletionRefresh = useCallback(() => {
+		invalidateWorkspaceSoon(
+			TERMINAL_ASSISTANT_COMPLETION_REFRESH_DELAY_MS,
+			assistantCompletionRefreshTimerRef,
+		);
+	}, [invalidateWorkspaceSoon]);
 
 	const fitAndResizeTerminal = useCallback(() => {
 		if (!visibleRef.current) {
@@ -502,6 +552,7 @@ export function TerminalSessionHost({
 		hostUnmountedRef.current = false;
 		return () => {
 			hostUnmountedRef.current = true;
+			clearWorkspaceRefreshTimers();
 			terminalIdRef.current = null;
 			void invoke("terminal_detach_terminal", {
 				workspace: session.workspace,
@@ -514,7 +565,11 @@ export function TerminalSessionHost({
 				});
 			});
 		};
-	}, [session.attachmentId, session.workspace]);
+	}, [
+		clearWorkspaceRefreshTimers,
+		session.attachmentId,
+		session.workspace,
+	]);
 
 	useEffect(() => {
 		staleAttachmentRecoveryRef.current = recoverFromStaleAttachment;
@@ -573,6 +628,10 @@ export function TerminalSessionHost({
 			}
 
 			const bytes = typeof data === "string" ? encoder.encode(data) : data;
+			if (terminalInputContainsSubmit(bytes)) {
+				scheduleCommandStateRefresh();
+				scheduleAssistantCompletionRefresh();
+			}
 			void invoke("terminal_write_terminal", {
 				terminal: terminalId,
 				data: Array.from(bytes),
@@ -771,6 +830,7 @@ export function TerminalSessionHost({
 				return;
 			}
 			term.write(normalizeTerminalOutput(data));
+			scheduleAssistantCompletionRefresh();
 		};
 
 		void (async () => {
@@ -894,6 +954,7 @@ export function TerminalSessionHost({
 		clearReconnectTimer,
 		isMountReady,
 		requestReconnect,
+		scheduleAssistantCompletionRefresh,
 		scheduleFitAndResize,
 		sendResize,
 		session.attachmentId,
@@ -960,6 +1021,10 @@ export function TerminalSessionHost({
 		terminalIdRef.current = null;
 		triggerAttach();
 	}, [clearReconnectTimer, retryNonce, triggerAttach]);
+
+	useEffect(() => {
+		clearWorkspaceRefreshTimers();
+	}, [clearWorkspaceRefreshTimers, session.attachmentId]);
 
 	useEffect(() => {
 		if (!visible || !isPageForeground || session.unread !== true) {
